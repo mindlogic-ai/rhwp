@@ -1,11 +1,14 @@
 import { defineConfig } from 'vite';
 import { resolve, extname, join } from 'path';
 import { readFileSync, readFile } from 'fs';
-import { VitePWA } from 'vite-plugin-pwa';
 
 const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8'));
 
 export default defineConfig({
+  // factchat HWP agent: STUDIO_BASE makes the asset paths match the production
+  // factchat path (/static/rhwp/studio/) so the bundled HTML resolves its own
+  // JS/CSS/WASM correctly when served from that directory.
+  base: process.env.STUDIO_BASE || '/studio/',
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
@@ -55,46 +58,10 @@ export default defineConfig({
         });
       },
     },
-    VitePWA({
-      registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'icons/*.png'],
-      manifest: {
-        name: 'rhwp-studio',
-        short_name: 'rhwp',
-        description: 'HWP/HWPX 뷰어·에디터 — 알(R), 모두의 한글',
-        lang: 'ko',
-        theme_color: '#2b6cb0',
-        background_color: '#ffffff',
-        display: 'standalone',
-        start_url: '/rhwp/',
-        scope: '/rhwp/',
-        icons: [
-          { src: 'icons/icon-128.png', sizes: '128x128', type: 'image/png' },
-          { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' },
-          { src: 'icons/icon-256.png', sizes: '256x256', type: 'image/png' },
-          { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' },
-          { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
-        ],
-      },
-      workbox: {
-        // WASM (~12 MB) is kept out of precache to avoid blocking SW installation;
-        // CacheFirst at runtime still gives offline access after the first load.
-        globPatterns: ['**/*.{js,css,html,png,svg,ico,woff,woff2,ttf,otf}'],
-        maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
-        runtimeCaching: [
-          {
-            urlPattern: /\.wasm$/,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'wasm-cache',
-              expiration: { maxEntries: 5, maxAgeSeconds: 30 * 24 * 60 * 60 },
-            },
-          },
-        ],
-      },
-      devOptions: {
-        enabled: false,
-      },
-    }),
+    // factchat HWP agent: PWA disabled — the SW's CacheFirst on .wasm
+    // serves a stale WASM after engine upgrades, which is exactly the
+    // failure mode we hit when shipping v0.7.13 to fix form_16/17.
+    // The factchat-served index.html has SW self-heal that unregisters
+    // any prior PWA registration on load.
   ],
 });
