@@ -40,11 +40,13 @@ const eventBus = new EventBus();
 const documentState = new DocumentDirtyState(eventBus);
 documentState.installBeforeUnload(window);
 
-// E2E 테스트용 전역 노출 (개발 모드 전용)
+// factchat HWP agent: expose globals always so the iframe bridge
+// (public/agent-bridge.js) can drive the WASM doc via window.__wasm.
+// initRhwpDev stays DEV-only.
+(window as any).__wasm = wasm;
+(window as any).__eventBus = eventBus;
+(window as any).__documentState = documentState;
 if (import.meta.env.DEV) {
-  (window as any).__wasm = wasm;
-  (window as any).__eventBus = eventBus;
-  (window as any).__documentState = documentState;
   initRhwpDev(wasm);
 }
 let canvasView: CanvasView | null = null;
