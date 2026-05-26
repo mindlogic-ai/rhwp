@@ -162,6 +162,51 @@
       document.body.classList.toggle('agent-locked', b);
     }
 
+    // ── Suppress "HWPX 비표준 감지" validation modal ──
+    // rhwp-studio raises a modal on every HWPX load that references
+    // non-standard lineseg (lineseg-per-paragraph dependent on 한컴 textRun
+    // reflow). The modal offers "자동 보정 (권장)" / "그대로 보기" — but we
+    // already call `reflowLinesegs()` on every refresh() above, so the
+    // "auto-fix" is happening regardless. The modal is pure noise that
+    // blocks the chat UX until dismissed.
+    //
+    // The newer rhwp-studio source supports `skipValidationModal` via
+    // `agentLoad: true`, and our loadFile handler already passes that —
+    // but the deployed bundle (index-ZhKOdagf.js) predates that wiring
+    // and renders the modal unconditionally. Until the deployed bundle is
+    // rebuilt, we intercept the modal at the DOM level: MutationObserver
+    // is set up here, BEFORE any doc load triggers the modal, so when the
+    // node is appended to <body> we remove it in the same microtask —
+    // before the browser paints. The user sees nothing.
+    //
+    // We auto-resolve to 자동 보정 (the rhwp-recommended path) by clicking
+    // the primary button BEFORE removing the overlay, so the modal's
+    // resolver promise completes cleanly and the post-load flow finishes.
+    const validationObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+          if (!node.classList || !node.classList.contains('modal-overlay')) continue;
+          const titleEl = node.querySelector('.dialog-title');
+          if (!titleEl) continue;
+          // Match only the validation modal by title text — leave other
+          // dialogs (저장 확인, 폰트 누락 등) untouched.
+          if (!/HWPX 비표준 감지/.test(titleEl.textContent || '')) continue;
+          // Click 자동 보정 first so reflowLinesegs runs and the modal's
+          // resolver settles to 'auto-fix' (matches the recommended path).
+          const primaryBtn = node.querySelector('.dialog-btn-primary');
+          if (primaryBtn instanceof HTMLButtonElement) {
+            try { primaryBtn.click(); } catch {}
+          }
+          // Belt + suspenders: remove the overlay in case the click didn't
+          // tear it down synchronously, so it never reaches paint.
+          node.style.display = 'none';
+          try { node.remove(); } catch {}
+        }
+      }
+    });
+    validationObserver.observe(document.body, { childList: true });
+
     // ── Outline ──
     function buildOutline(maxItems = 200) {
       const doc = getDoc();
