@@ -8,6 +8,29 @@
   <link rel="apple-touch-icon" href="/icons/icon-256.png" />
   <title>rhwp-studio</title>
   <link rel="stylesheet" href="/src/style.css" />
+  <script>
+    // factchat HWP agent: self-heal from a stale service worker installed
+    // by a prior PWA build. Without this, the SW intercepts asset fetches
+    // and serves cached responses pointing at filenames that no longer
+    // exist after an engine upgrade. Safe no-op when no SW is registered.
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        var hadSw = false;
+        regs.forEach(function (r) {
+          if (r.scope && (r.scope.indexOf('/static/rhwp/') !== -1 || r.scope.indexOf('/studio/') !== -1)) {
+            hadSw = true;
+            r.unregister();
+          }
+        });
+        if (hadSw && 'caches' in window) {
+          caches.keys().then(function (keys) {
+            keys.forEach(function (k) { caches.delete(k); });
+            location.reload();
+          });
+        }
+      }).catch(function () {});
+    }
+  </script>
 </head>
 <body>
   <div id="studio-root">
@@ -591,5 +614,11 @@
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>
+  <!-- factchat HWP agent bridge: exposes WASM methods to the parent window
+       via postMessage RPC. Loaded after the main module so window.__wasm
+       is already exposed by the time agent-bridge.js initializes. Vite
+       inlines this path relative to base= so it resolves to
+       /static/rhwp/studio/agent-bridge.js in production. -->
+  <script src="./agent-bridge.js" defer></script>
 </body>
 </html>
