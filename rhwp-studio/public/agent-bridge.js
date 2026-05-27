@@ -415,6 +415,87 @@
         }
         return { sec, paragraphs };
       },
+      // Full-text dump — replaces multi-call find_text exploration. Returns
+      // every paragraph's full body text AND every table cell flattened
+      // inline with [path]/[rRcC] markers, so the agent reads the whole
+      // doc in one round-trip and can map text back to set_cell_text /
+      // replace_block_text targets.
+      async getFullText(params) {
+        const scope = (params && params.scope) || 'doc';
+        const doc = getDoc();
+        const lines = [];
+        let charCount = 0;
+        const CELL_HARD_CAP = 2000;
+        const PARA_HARD_CAP = 8000;
+
+        function flattenTable(sec, para, ctrl, tblPath) {
+          const dims = tryGetTableDims(sec, para, ctrl);
+          if (!dims) return;
+          lines.push(`[${tblPath} table ${dims.rowCount}x${dims.colCount}]`);
+          let bboxes = [];
+          try { bboxes = JSON.parse(doc.getTableCellBboxes(sec, para, ctrl)) || []; } catch {}
+          if (bboxes.length > 0) {
+            const sorted = [...bboxes].sort((a, b) => a.row - b.row || a.col - b.col);
+            for (const b of sorted) {
+              let ct = '';
+              try {
+                ct = (doc.getTextInCell(sec, para, ctrl, b.cellIdx, 0, 0, CELL_HARD_CAP) || '').trim();
+              } catch {}
+              const span = (b.rowSpan > 1 || b.colSpan > 1) ? ` span=${b.rowSpan}x${b.colSpan}` : '';
+              lines.push(`  [r${b.row}c${b.col}${span}] ${ct}`);
+              charCount += ct.length;
+            }
+          } else {
+            for (let r = 0; r < dims.rowCount; r++) {
+              for (let c = 0; c < dims.colCount; c++) {
+                const idx = r * dims.colCount + c;
+                let ct = '';
+                try { ct = (doc.getTextInCell(sec, para, ctrl, idx, 0, 0, CELL_HARD_CAP) || '').trim(); } catch {}
+                lines.push(`  [r${r}c${c}] ${ct}`);
+                charCount += ct.length;
+              }
+            }
+          }
+        }
+
+        function flattenParagraph(s, p) {
+          try {
+            const len = doc.getParagraphLength(s, p);
+            const text = (doc.getTextRange(s, p, 0, Math.min(len, PARA_HARD_CAP)) || '');
+            const path = `s${s}:p${p}`;
+            if (text.trim()) {
+              lines.push(`[${path}] ${text}`);
+              charCount += text.length;
+            } else {
+              lines.push(`[${path}] (empty)`);
+            }
+            for (let ctrl = 0; ctrl < 6; ctrl++) {
+              if (!tryGetTableDims(s, p, ctrl)) continue;
+              const tblPath = ctrl === 0 ? path : `${path}:c${ctrl}`;
+              flattenTable(s, p, ctrl, tblPath);
+            }
+          } catch {}
+        }
+
+        if (scope === 'table') {
+          if (!params || !params.path) throw new Error('get_full_text(scope="table") requires path');
+          const { sec, para, ctrl } = pathToCoords(params.path);
+          flattenTable(sec, para, ctrl, params.path);
+        } else if (scope === 'section') {
+          const sec = (params && typeof params.sec === 'number')
+            ? params.sec
+            : (params && params.path ? parseInt(String(params.path).replace(/^s/, ''), 10) : 0);
+          const pCount = doc.getParagraphCount(sec);
+          for (let p = 0; p < pCount; p++) flattenParagraph(sec, p);
+        } else {
+          const sections = doc.getSectionCount();
+          for (let s = 0; s < sections; s++) {
+            const pCount = doc.getParagraphCount(s);
+            for (let p = 0; p < pCount; p++) flattenParagraph(s, p);
+          }
+        }
+        return { scope, text: lines.join('\n'), char_count: charCount };
+      },
       async getTable(params) {
         const { sec, para, ctrl } = pathToCoords(params.path);
         const doc = getDoc();
@@ -1193,18 +1274,59 @@
       },
       async insertPicture(params) {
         const { sec, para } = pathToCoords(params.path);
-        const { image_url, offset = 0, width_mm = 80, height_mm = 60, description = '' } = params;
-        const res = await fetch(image_url);
-        if (!res.ok) throw new Error(`fetch image: ${res.status}`);
-        const bytes = new Uint8Array(await res.arrayBuffer());
-        const ext = (image_url.match(/\.(png|jpg|jpeg|gif|webp|bmp)/i) || [, 'png'])[1].toLowerCase();
+        const {
+          image_url,
+          image_b64,
+          ext: extHint,
+          offset = 0,
+          width_mm = 80,
+          height_mm = 60,
+          description = '',
+        } = params;
+
+        // Prefer bytes-via-RPC. Server reads S3 → base64 → bridge → bytes,
+        // avoiding cross-origin fetch from the iframe. image_url stays as
+        // a legacy fallback.
+        let bytes, ext;
+        if (image_b64) {
+          const binStr = atob(image_b64);
+          bytes = new Uint8Array(binStr.length);
+          for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+          ext = (extHint || 'png').toLowerCase().replace(/^\./, '');
+        } else if (image_url) {
+          const res = await fetch(image_url);
+          if (!res.ok) throw new Error(`fetch image: ${res.status}`);
+          bytes = new Uint8Array(await res.arrayBuffer());
+          ext = (image_url.match(/\.(png|jpg|jpeg|gif|webp|bmp)/i) || [, 'png'])[1].toLowerCase();
+        } else {
+          throw new Error('insertPicture: image_b64 or image_url required');
+        }
+
         const widthHwp = Math.round(width_mm * 283.5);
         const heightHwp = Math.round(height_mm * 283.5);
+
+        // Decode natural PNG pixel dims for the crop calc (see rhwp
+        // object_ops.rs:1490).
+        let naturalWPx = 0, naturalHPx = 0;
+        try {
+          const blob = new Blob([bytes], { type: `image/${ext === 'jpg' ? 'jpeg' : ext}` });
+          const bitmap = await createImageBitmap(blob);
+          naturalWPx = bitmap.width || 0;
+          naturalHPx = bitmap.height || 0;
+          bitmap.close && bitmap.close();
+        } catch (e) {
+          console.warn('[bridge] could not decode image dims via createImageBitmap', e);
+        }
+        if (!naturalWPx || !naturalHPx) {
+          naturalWPx = Math.max(1, Math.round(widthHwp / 75));
+          naturalHPx = Math.max(1, Math.round(heightHwp / 75));
+        }
+
         const doc = getDoc();
         doc.beginBatch();
         try {
           const r = safeParse(doc.insertPicture(sec, para, offset, bytes,
-            widthHwp, heightHwp, widthHwp, heightHwp, ext, description));
+            widthHwp, heightHwp, naturalWPx, naturalHPx, ext, description));
           if (!r.ok && r.raw === undefined) throw new Error(r.error || 'insertPicture failed');
           doc.endBatch();
           refresh();
