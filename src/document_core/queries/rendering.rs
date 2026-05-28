@@ -3194,6 +3194,13 @@ fn compute_hwp_used_height(
                     Some(s) => s,
                     None => return ItemExtent::Skip,
                 };
+                // [Mindlogic] Same internal-vpos-reset guard as the
+                // PartialParagraph case below.
+                for i in 1..p.line_segs.len() {
+                    if p.line_segs[i].vertical_pos == 0 {
+                        return ItemExtent::Unmeasurable;
+                    }
+                }
                 let last = p.line_segs.last().unwrap();
                 ItemExtent::Flow {
                     vpos: first.vertical_pos,
@@ -3216,6 +3223,17 @@ fn compute_hwp_used_height(
                 let e = end_line.saturating_sub(1).min(p.line_segs.len() - 1);
                 if s > e {
                     return ItemExtent::Skip;
+                }
+                // [Mindlogic] A partial paragraph can contain a vpos-reset
+                // INTERNALLY (e.g. small_03 pi=25 lines 3..7 with reset@line5
+                // where lines 3-4 are in one region and lines 5-7 in another).
+                // Computing bottom from the last lineseg in such case gives
+                // a tiny value relative to first lineseg → negative diff +
+                // misleading metric. Punt to Unmeasurable for now.
+                for i in (s + 1)..=e {
+                    if p.line_segs[i].vertical_pos == 0 {
+                        return ItemExtent::Unmeasurable;
+                    }
                 }
                 let first = &p.line_segs[s];
                 let last = &p.line_segs[e];
