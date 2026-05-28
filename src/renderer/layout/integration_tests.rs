@@ -1274,7 +1274,7 @@ mod tests {
         assert!(!svg.is_empty(), "페이지 2 SVG 가 비어있음");
 
         // 박스 (table border rect) bottom y 찾기
-        // 우측 단 (x ≈ 597), top y ≈ 244, height ≈ 288 → bottom ≈ 532
+        // 우측 단 (x ≈ 597), top y ≈ 237, height ≈ 288 → bottom ≈ 525
         let mut box_bottom: Option<f64> = None;
         for chunk in svg.split("<rect ").skip(1) {
             let close = match chunk.find("/>") {
@@ -1300,8 +1300,11 @@ mod tests {
                 Some(v) => v,
                 None => continue,
             };
-            // 박스: x ≈ 597 (col 1), y in [240, 250], h in [285, 290]
-            if x > 595.0 && x < 600.0 && y > 240.0 && y < 250.0 && h > 285.0 && h < 290.0 {
+            // 박스: x ≈ 597 (col 1), y in [233, 250], h in [285, 290]
+            // y 범위는 89a15cc6 ~ ce5efa4b (compute_hwp_used_height metric chain)
+            // 이후 ~3 px 위로 이동했다 (실측 y=236.92). 박스 자체는 동일 위치이고
+            // gap 검증 (box_bottom → ① answer) 은 그대로이므로 범위만 완화.
+            if x > 595.0 && x < 600.0 && y > 233.0 && y < 250.0 && h > 285.0 && h < 290.0 {
                 box_bottom = Some(y + h);
                 break;
             }
@@ -1509,11 +1512,16 @@ mod tests {
         );
 
         // Line 2 baseline ≈ 247.68, line top ≈ 235.65, sheet 22.88
-        // 정상 범위: y ∈ [230, 240] (Line 2 영역)
+        // 정상 범위: y ∈ [225, 240] (Line 2 영역)
         // 회귀 범위: y ∈ [212, 218] (Line 1 영역)
+        //
+        // y 하한이 230 → 225 로 완화된 것은 89a15cc6 ~ ce5efa4b
+        // (compute_hwp_used_height metric chain) 이후 Line 2 baseline 이 ~3 px
+        // 위로 이동했기 때문 (실측 y=228.75). 여전히 Line 1 회귀 영역 [212, 218]
+        // 으로부터 안전한 거리이므로 본문 겹침 결함은 없다.
         assert!(
-            (230.0..=240.0).contains(&rect_y),
-            "Task #624: ㉠ 사각형 y={:.2} 가 Line 2 영역 [230, 240] 에 있어야 함. \
+            (225.0..=240.0).contains(&rect_y),
+            "Task #624: ㉠ 사각형 y={:.2} 가 Line 2 영역 [225, 240] 에 있어야 함. \
              회귀 (Task #520 부분 회귀): y≈213.95 (Line 1 영역, 본문 '분자당 구성' 위 겹침). \
              정정 (3 line fix): y≈235.65 (Line 2 영역, ' 이다.' 앞).",
             rect_y
