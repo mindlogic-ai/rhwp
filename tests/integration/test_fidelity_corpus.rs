@@ -90,3 +90,29 @@ fn k_star_p14_renders_committee_footer() {
         );
     }
 }
+
+#[test]
+fn internship_plan_p4_matches_hancom_content() {
+    // BUG (Bucket C): Hancom paginates page 4 to contain a 4-circle infographic
+    // ("학습연계" / "성공기반" labels) + a small table + a bullet list. rhwp
+    // currently puts only the bullet list on page 4 because it missed a
+    // cross-paragraph vpos reset that Hancom honors as a page break. Same page
+    // count (11) but different per-page content. After Bucket C the page-4
+    // content must match Hancom — sentinel text "학습연계" or "성공기반"
+    // (infographic labels) must appear on p4.
+    let doc = load_sample("internship_plan.hwpx");
+    assert_eq!(doc.page_count(), 11, "doc must paginate to 11 pages");
+
+    let svg = doc.render_page_svg_native(3).expect("render page 4");
+    let page_text = svg_text(&svg);
+    let dense = page_text.replace(' ', "");
+    let has_sentinel = ["학습연계", "성공기반"].iter().any(|s| {
+        let needle = s.replace(' ', "");
+        dense.contains(&needle)
+    });
+    assert!(
+        has_sentinel,
+        "page 4 must contain '학습연계' or '성공기반' \
+         (currently drifted to page 3 — cross-paragraph vpos-reset bug)",
+    );
+}
