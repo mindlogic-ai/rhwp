@@ -2096,30 +2096,7 @@ impl TypesetEngine {
         } else {
             (line_heights, line_spacings)
         };
-        // === [/Mindlogic patch — trust-lineseg-cache] ====================
-
-        // === [Mindlogic patch — trust-cache implies sb/sa = 0] ============
-        // When trusting Hancom's saved linesegs, the per-line metrics
-        // already encode all the paragraph extent Hancom used when saving.
-        // Hancom's saved vpos shows pi=N+1.first_vpos == pi=N.last_seg
-        // + lh + ls — NO inter-paragraph gap from sb/sa.
-        //
-        // Empirical proof on form_04: every paragraph's
-        // (total_height - vpos_h) == sb + sa exactly. Without this, rhwp
-        // accumulates ~13px/para of phantom space, orphaning the bottom
-        // paragraph onto a fresh page on tight docs.
-        //
-        // Companion patch in src/renderer/layout/paragraph_layout.rs ALSO
-        // skips sb/sa for trust-cache paragraphs so visual rendering stays
-        // consistent with the pagination decision (otherwise typeset
-        // thinks a para is X px tall but layout draws it at X+13 → visible
-        // bottom-of-page overflow).
-        let (spacing_before, spacing_after) = if trust_cache {
-            (0.0, 0.0)
-        } else {
-            (spacing_before, spacing_after)
-        };
-        // === [/Mindlogic patch] ===========================================
+        // === [/Mindlogic patch] ==========================================
 
         let lines_total: f64 = line_heights
             .iter()

@@ -168,21 +168,12 @@ impl LayoutEngine {
         let para_style = styles.para_styles.get(para_style_id);
         let margin_left = para_style.map(|s| s.margin_left).unwrap_or(0.0);
         let margin_right = para_style.map(|s| s.margin_right).unwrap_or(0.0);
-        let raw_spacing_before = crate::renderer::hwp3_variant_flow_spacing_before(
+        let spacing_before = crate::renderer::hwp3_variant_flow_spacing_before(
             para_style.map(|s| s.spacing_before).unwrap_or(0.0),
             self.use_hwp3_origin_flow_spacing_before.get(),
         );
-        let raw_spacing_after = para_style.map(|s| s.spacing_after).unwrap_or(0.0);
+        let spacing_after = para_style.map(|s| s.spacing_after).unwrap_or(0.0);
         let alignment = para_style.map(|s| s.alignment).unwrap_or(Alignment::Left);
-
-        // [Mindlogic patch — see layout_paragraph site at ~line 962 for rationale]
-        let para_trust_cache =
-            !para.line_segs.is_empty() && para.line_segs.iter().all(|s| s.line_height > 0);
-        let (spacing_before, spacing_after) = if para_trust_cache {
-            (0.0, 0.0)
-        } else {
-            (raw_spacing_before, raw_spacing_after)
-        };
 
         let y = y_start + spacing_before;
 
@@ -968,32 +959,11 @@ impl LayoutEngine {
         let alignment = para_style
             .map(|s| s.alignment)
             .unwrap_or(Alignment::Justify);
-        let raw_spacing_before = crate::renderer::hwp3_variant_flow_spacing_before(
+        let spacing_before = crate::renderer::hwp3_variant_flow_spacing_before(
             para_style.map(|s| s.spacing_before).unwrap_or(0.0),
             self.use_hwp3_origin_flow_spacing_before.get(),
         );
-        let raw_spacing_after = para_style.map(|s| s.spacing_after).unwrap_or(0.0);
-        // === [Mindlogic patch — trust-cache paragraphs skip sb/sa] ========
-        // Sister of the typeset.rs trust-cache sb/sa zero patch. When the
-        // paragraph has Hancom-saved linesegs (line_segs non-empty + all
-        // positive line_height), Hancom's saved vpos values ALREADY include
-        // all the paragraph-extent space. Adding sb/sa here makes the
-        // rendered layout drift below Hancom's saved positions by ~13 px
-        // per paragraph and visually misaligns with the typeset pagination
-        // decision (which also zeroes sb/sa for trust-cache paragraphs).
-        //
-        // For non-trust paragraphs (HWP-binary inputs, post-edit reflow,
-        // or paragraphs the composer line-count-mismatched), preserve the
-        // existing sb/sa application.
-        let para_trust_cache = para
-            .map(|p| !p.line_segs.is_empty() && p.line_segs.iter().all(|s| s.line_height > 0))
-            .unwrap_or(false);
-        let (spacing_before, spacing_after) = if para_trust_cache {
-            (0.0, 0.0)
-        } else {
-            (raw_spacing_before, raw_spacing_after)
-        };
-        // === [/Mindlogic patch] ===========================================
+        let spacing_after = para_style.map(|s| s.spacing_after).unwrap_or(0.0);
         // [Task #874 Case 3] `<...>` 단독 paragraph 의 paragraph-level extra spacing 제거.
         // typeset.rs::format_paragraph 측 동일 제거 — solo_zone_pad (zone 전환 패딩) 만 유지.
         let tab_width = para_style.map(|s| s.default_tab_width).unwrap_or(0.0);
