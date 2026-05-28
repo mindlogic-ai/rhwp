@@ -705,6 +705,86 @@ impl HeightMeasurer {
                         .iter()
                         .enumerate()
                         .map(|(pidx, p)| {
+                            // === [Mindlogic patch — Bucket A: trust cached cell linesegs] ===
+                            // When Hancom's saved linesegs carry valid heights,
+                            // sum them directly instead of re-deriving from
+                            // font metrics. The compose/recompose path
+                            // under-counts line_height by 3-26 px per
+                            // paragraph on multi-line wrapped cell content
+                            // (k_star_visa_track p14 verified) which makes
+                            // the table outer height short, pagination
+                            // disagrees with Hancom, and visible bottom
+                            // rows of tall TAC=false tables get cut off.
+                            //
+                            // Mirrors the typeset.rs trust-cache (commits
+                            // 554e7415 / 5870b034) — wrap-zone segs are
+                            // deduped by vpos, sb/sa is skipped because
+                            // Hancom's saved cell.height already embodies
+                            // inter-paragraph spacing.
+                            //
+                            // Fall-back cases (covered by the existing
+                            // compose/recompose path below):
+                            //   * no cached linesegs (programmatic insert)
+                            //   * any seg with non-positive line_height
+                            //   * paragraph hosts a nested Table control
+                            //     (nested-table measurement decides its
+                            //     own size; the outer linesegs don't
+                            //     embody nested-table height)
+                            let unique_segs: Vec<&crate::model::paragraph::LineSeg> = {
+                                let mut seen_vpos: Vec<i32> =
+                                    Vec::with_capacity(p.line_segs.len());
+                                p.line_segs
+                                    .iter()
+                                    .filter(|s| {
+                                        if seen_vpos.contains(&s.vertical_pos) {
+                                            false
+                                        } else {
+                                            seen_vpos.push(s.vertical_pos);
+                                            true
+                                        }
+                                    })
+                                    .collect()
+                            };
+                            let trust_cache = !unique_segs.is_empty()
+                                && unique_segs.iter().all(|s| s.line_height > 0)
+                                && !p
+                                    .controls
+                                    .iter()
+                                    .any(|c| matches!(c, Control::Table(_)));
+                            if trust_cache {
+                                let is_last_para = pidx + 1 == cell_para_count;
+                                let is_block_rowbreak = matches!(
+                                    table.page_break,
+                                    TablePageBreak::RowBreak
+                                ) && !table.common.treat_as_char;
+                                let line_count = unique_segs.len();
+                                let lines_total: f64 = unique_segs
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, seg)| {
+                                        let h = hwpunit_to_px(seg.line_height, self.dpi);
+                                        let is_cell_last_line =
+                                            is_last_para && i + 1 == line_count;
+                                        // Match the trailing-ls rule from the
+                                        // recompose path below (Task #874 #4
+                                        // / #1086): block RowBreak tables
+                                        // drop the cell's last trailing
+                                        // line-spacing to match render-visible
+                                        // height; everyone else keeps it.
+                                        let include_trailing_ls = !is_cell_last_line
+                                            || cell_para_count > 1;
+                                        let include_trailing_ls = include_trailing_ls
+                                            && (!is_cell_last_line || !is_block_rowbreak);
+                                        if include_trailing_ls {
+                                            h + hwpunit_to_px(seg.line_spacing, self.dpi)
+                                        } else {
+                                            h
+                                        }
+                                    })
+                                    .sum();
+                                return lines_total;
+                            }
+                            // === [/Mindlogic patch] =================================
                             let mut comp = compose_paragraph(p);
                             // [Task #671] line_segs 비어 있는 셀 paragraph 의 단일 ComposedLine
                             // 압축 결과를 셀 가용 너비에 맞춰 다중 ComposedLine 으로 재분할.

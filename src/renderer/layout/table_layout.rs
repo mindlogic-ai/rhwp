@@ -1083,6 +1083,70 @@ impl LayoutEngine {
                     return 0.0;
                 }
                 // === [/Mindlogic patch] ====================================
+
+                // === [Mindlogic patch — Bucket A: trust cached cell linesegs] ===
+                // When Hancom's saved linesegs are present with valid heights,
+                // use them directly. Diagnostics on k_star_visa_track p14 show
+                // rhwp's font-metric path UNDER-counts by 3-26 px per
+                // paragraph relative to Hancom's cached line_height — the
+                // 15x1 form table ends up 435 px shorter than Hancom's
+                // saved cell-height, so the bottom rows visually appear cut
+                // off (and the dump-pages metric fails the file).
+                //
+                // Mirrors the trust-cache pattern from typeset.rs (commits
+                // 554e7415 / 5870b034) but applied per-cell-paragraph. The
+                // wrap-zone dedupe by vpos is also lifted from there.
+                //
+                // Falls back to the font-metric path when:
+                //   * paragraph has no cached linesegs (programmatic insert)
+                //   * any seg has non-positive line_height (corrupt cache)
+                //   * paragraph contains a nested Table (nested-table layout
+                //     decides its own size separately; the outer paragraph
+                //     contributes nothing measurable from its own linesegs)
+                //
+                // Skips sb/sa for trust-cache paragraphs to match the
+                // semantics from commit 5870b034 — Hancom's saved values
+                // already embody inter-paragraph spacing.
+                let unique_segs: Vec<&crate::model::paragraph::LineSeg> = {
+                    let mut seen_vpos: Vec<i32> = Vec::with_capacity(p.line_segs.len());
+                    p.line_segs
+                        .iter()
+                        .filter(|s| {
+                            if seen_vpos.contains(&s.vertical_pos) {
+                                false
+                            } else {
+                                seen_vpos.push(s.vertical_pos);
+                                true
+                            }
+                        })
+                        .collect()
+                };
+                let trust_cache = !unique_segs.is_empty()
+                    && unique_segs.iter().all(|s| s.line_height > 0)
+                    && !p
+                        .controls
+                        .iter()
+                        .any(|c| matches!(c, Control::Table(_)));
+                if trust_cache {
+                    let is_last_para = pidx + 1 == cell_para_count;
+                    let line_count = unique_segs.len();
+                    let lines_total: f64 = unique_segs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, seg)| {
+                            let h = crate::renderer::hwpunit_to_px(seg.line_height, self.dpi);
+                            let is_cell_last_line = is_last_para && i + 1 == line_count;
+                            if !is_cell_last_line {
+                                h + crate::renderer::hwpunit_to_px(seg.line_spacing, self.dpi)
+                            } else {
+                                h
+                            }
+                        })
+                        .sum();
+                    return lines_total;
+                }
+                // === [/Mindlogic patch] ===========================================
+
                 let mut comp = compose_paragraph(p);
                 // [Task #671] line_segs 비어 있는 셀 paragraph 의 단일 ComposedLine
                 // 압축 결과를 셀 가용 너비에 맞춰 다중 ComposedLine 으로 재분할.
