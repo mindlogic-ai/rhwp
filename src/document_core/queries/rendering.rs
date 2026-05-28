@@ -3158,15 +3158,47 @@ fn compute_hwp_used_height(
     use crate::renderer::hwpunit_to_px;
     use crate::renderer::pagination::PageItem;
 
-    // 1) 단 항목 내 첫 vpos-reset 검색
-    for item in &cc.items {
-        let (para_idx, range_start, range_end) = match item {
+    // === [Mindlogic patch — flow-region aware metric] ====================
+    // Each PageItem contributes a (vpos, bottom) extent in HU. Items where
+    // vpos == 0 after we've already seen items in the current region mark
+    // a vpos-reset — Hancom restarts the y origin (typically after a
+    // TopAndBottom table). We accumulate per-region max bottoms.
+    //
+    // Items considered "in flow":
+    //   - Paragraphs (full + partial) — bottom = last_seg.vertical_pos
+    //     + line_height + line_spacing
+    //   - Tables in TopAndBottom or treat_as_char wrap — bottom = vpos
+    //     + table.common.height
+    //   - Shapes / Pictures in TopAndBottom or treat_as_char wrap — same
+    //
+    // Items NOT in flow (skipped — they don't displace text):
+    //   - InFrontOfText / BehindText / Square / Tight / etc. floats
+    //
+    // If we encounter an item we can't measure (PartialTable that spans,
+    // unrecognized shape), we return None rather than guess a wrong value.
+    fn item_extent_hu(
+        item: &PageItem,
+        paragraphs: &[Paragraph],
+    ) -> ItemExtent {
+        use crate::model::shape::TextWrap;
+        let consumes_flow = |wrap: &TextWrap, tac: bool| {
+            tac || matches!(wrap, TextWrap::TopAndBottom)
+        };
+        match item {
             PageItem::FullParagraph { para_index } => {
                 let p = match paragraphs.get(*para_index) {
                     Some(p) => p,
-                    None => continue,
+                    None => return ItemExtent::Skip,
                 };
-                (*para_index, 0usize, p.line_segs.len())
+                let first = match p.line_segs.first() {
+                    Some(s) => s,
+                    None => return ItemExtent::Skip,
+                };
+                let last = p.line_segs.last().unwrap();
+                ItemExtent::Flow {
+                    vpos: first.vertical_pos,
+                    bottom: last.vertical_pos + last.line_height + last.line_spacing,
+                }
             }
             PageItem::PartialParagraph {
                 para_index,
@@ -3175,60 +3207,134 @@ fn compute_hwp_used_height(
             } => {
                 let p = match paragraphs.get(*para_index) {
                     Some(p) => p,
-                    None => continue,
+                    None => return ItemExtent::Skip,
                 };
-                (*para_index, *start_line, (*end_line).min(p.line_segs.len()))
+                if p.line_segs.is_empty() {
+                    return ItemExtent::Skip;
+                }
+                let s = (*start_line).min(p.line_segs.len() - 1);
+                let e = end_line.saturating_sub(1).min(p.line_segs.len() - 1);
+                if s > e {
+                    return ItemExtent::Skip;
+                }
+                let first = &p.line_segs[s];
+                let last = &p.line_segs[e];
+                ItemExtent::Flow {
+                    vpos: first.vertical_pos,
+                    bottom: last.vertical_pos + last.line_height + last.line_spacing,
+                }
             }
-            _ => continue,
-        };
-        let p = match paragraphs.get(para_idx) {
-            Some(p) => p,
-            None => continue,
-        };
-        // line>0 인 줄 중 vertical_pos==0 첫 줄 찾기
-        for i in range_start.max(1)..range_end {
-            if let Some(seg) = p.line_segs.get(i) {
-                if seg.vertical_pos == 0 {
-                    if let Some(prev) = p.line_segs.get(i.saturating_sub(1)) {
-                        let bottom_hwpu = prev.vertical_pos + prev.line_height + prev.line_spacing;
-                        return Some(hwpunit_to_px(bottom_hwpu, dpi));
+            PageItem::Table {
+                para_index,
+                control_index,
+            } => {
+                let p = match paragraphs.get(*para_index) {
+                    Some(p) => p,
+                    None => return ItemExtent::Skip,
+                };
+                let first = match p.line_segs.first() {
+                    Some(s) => s,
+                    None => return ItemExtent::Skip,
+                };
+                let ctrl = match p.controls.get(*control_index) {
+                    Some(c) => c,
+                    None => return ItemExtent::Skip,
+                };
+                if let Control::Table(t) = ctrl {
+                    if consumes_flow(&t.common.text_wrap, t.common.treat_as_char) {
+                        ItemExtent::Flow {
+                            vpos: first.vertical_pos,
+                            bottom: first.vertical_pos + t.common.height as i32,
+                        }
+                    } else {
+                        ItemExtent::Skip
                     }
+                } else {
+                    ItemExtent::Skip
+                }
+            }
+            PageItem::PartialTable { .. } => ItemExtent::Unmeasurable,
+            PageItem::Shape {
+                para_index,
+                control_index,
+            } => {
+                let p = match paragraphs.get(*para_index) {
+                    Some(p) => p,
+                    None => return ItemExtent::Skip,
+                };
+                let first = match p.line_segs.first() {
+                    Some(s) => s,
+                    None => return ItemExtent::Skip,
+                };
+                let ctrl = match p.controls.get(*control_index) {
+                    Some(c) => c,
+                    None => return ItemExtent::Skip,
+                };
+                let (wrap, tac, height) = match ctrl {
+                    Control::Shape(s) => (
+                        s.common().text_wrap.clone(),
+                        s.common().treat_as_char,
+                        s.common().height as i32,
+                    ),
+                    Control::Picture(pic) => (
+                        pic.common.text_wrap.clone(),
+                        pic.common.treat_as_char,
+                        pic.common.height as i32,
+                    ),
+                    _ => return ItemExtent::Skip,
+                };
+                if consumes_flow(&wrap, tac) {
+                    ItemExtent::Flow {
+                        vpos: first.vertical_pos,
+                        bottom: first.vertical_pos + height,
+                    }
+                } else {
+                    ItemExtent::Skip
                 }
             }
         }
     }
 
-    // 2) reset 미발견: 단 마지막 항목의 마지막 줄
-    let last_item = cc.items.last()?;
-    let (para_idx, line_idx) = match last_item {
-        PageItem::FullParagraph { para_index } => {
-            let p = paragraphs.get(*para_index)?;
-            if p.line_segs.is_empty() {
-                return None;
+    let mut accumulated_prev_regions: i32 = 0;
+    let mut current_region_bottom: i32 = 0;
+    let mut current_region_has_item = false;
+    let mut any_flow_item = false;
+
+    for item in &cc.items {
+        match item_extent_hu(item, paragraphs) {
+            ItemExtent::Skip => continue,
+            ItemExtent::Unmeasurable => return None,
+            ItemExtent::Flow { vpos, bottom } => {
+                if vpos == 0 && current_region_has_item {
+                    accumulated_prev_regions += current_region_bottom;
+                    current_region_bottom = 0;
+                    current_region_has_item = false;
+                }
+                if bottom > current_region_bottom {
+                    current_region_bottom = bottom;
+                }
+                current_region_has_item = true;
+                any_flow_item = true;
             }
-            (*para_index, p.line_segs.len() - 1)
         }
-        PageItem::PartialParagraph {
-            para_index,
-            end_line,
-            ..
-        } => {
-            let p = paragraphs.get(*para_index)?;
-            if p.line_segs.is_empty() {
-                return None;
-            }
-            (
-                *para_index,
-                end_line.saturating_sub(1).min(p.line_segs.len() - 1),
-            )
-        }
-        _ => return None,
-    };
-    let p = paragraphs.get(para_idx)?;
-    let seg = p.line_segs.get(line_idx)?;
-    let bottom_hwpu = seg.vertical_pos + seg.line_height + seg.line_spacing;
-    Some(hwpunit_to_px(bottom_hwpu, dpi))
+    }
+
+    if !any_flow_item {
+        return None;
+    }
+    let total_hu = accumulated_prev_regions + current_region_bottom;
+    Some(hwpunit_to_px(total_hu, dpi))
 }
+
+enum ItemExtent {
+    /// Skip this item (float / unrecognized / empty paragraph).
+    Skip,
+    /// Can't measure reliably — abort and return None for the whole page.
+    Unmeasurable,
+    /// Flow-consuming item with HU extent.
+    Flow { vpos: i32, bottom: i32 },
+}
+// === [/Mindlogic patch] ====================================================
 
 /// LINE_SEG vertical_pos 범위를 문자열로 포맷.
 ///
