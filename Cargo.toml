@@ -17,6 +17,13 @@ path = "src/main.rs"
 name = "font-metric-gen"
 path = "src/tools/font_metric_gen.rs"
 
+# === [Mindlogic — fidelity corpus integration tests] ===
+# Lives under tests/integration/ (Cargo's default discovery picks up
+# only top-level tests/*.rs; nested files need an explicit entry).
+[[test]]
+name = "test_fidelity_corpus"
+path = "tests/integration/test_fidelity_corpus.rs"
+
 [dependencies]
 wasm-bindgen = "0.2"
 cfb = "0.14"
