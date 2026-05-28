@@ -600,6 +600,16 @@ pub struct PaginationOpts {
     /// 페이지 절반 이상 + 현재 paragraph 의 first_line vpos 가 페이지 1/4 이내)
     /// 시 강제 page break — 한컴 변환 시 인코딩한 page break 시그널 인식.
     pub is_hwp3_variant: bool,
+    /// [Mindlogic patch — Bucket C: HWPX cross-para vpos-reset breaks]
+    /// Detect cross-paragraph vpos resets on regular HWPX docs (not just
+    /// HWP3-converted ones). Fires a page break when the previous paragraph's
+    /// last seg vpos ≥ 90% of body height AND the next paragraph's first seg
+    /// vpos ≤ 10%, signalling Hancom's encoded page boundary that lives
+    /// outside the official `ColumnBreakType::Page` channel. Narrower than
+    /// `is_hwp3_variant`: paragraph→paragraph transitions only (skips
+    /// transitions where the current paragraph hosts a partial table, per
+    /// issue #418 mitigation).
+    pub hwpx_cross_para_reset_breaks: bool,
 }
 
 /// 페이지 분할 엔진

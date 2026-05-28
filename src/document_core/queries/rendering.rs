@@ -1706,6 +1706,8 @@ impl DocumentCore {
                         hide_empty_line: section.section_def.hide_empty_line,
                         respect_vpos_reset: self.respect_vpos_reset,
                         is_hwp3_variant: self.document.is_hwp3_variant,
+                        // [Mindlogic patch — Bucket C] wired from DocumentCore in C.4.
+                        hwpx_cross_para_reset_breaks: false,
                     },
                 )
             } else {
