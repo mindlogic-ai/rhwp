@@ -104,7 +104,9 @@ impl DocumentCore {
             show_transparent_borders: false,
             clip_enabled: true,
             debug_overlay: false,
-            respect_vpos_reset: false,
+            // [Mindlogic patch — vpos-reset default on] See document_core/mod.rs
+            // for rationale. Keep these defaults in sync.
+            respect_vpos_reset: true,
             measured_tables: Vec::new(),
             dirty_sections: vec![true; sec_count],
             measured_sections: Vec::new(),

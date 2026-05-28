@@ -226,7 +226,13 @@ impl DocumentCore {
             show_transparent_borders: false,
             clip_enabled: true,
             debug_overlay: false,
-            respect_vpos_reset: false,
+            // [Mindlogic patch — vpos-reset default on] Honoring intra-paragraph
+            // vpos resets fixes pagination drift on multi-region pages (e.g.
+            // wrap=TopAndBottom tables that restart the flow). Verified no
+            // regressions on samples/ + samples_wild corpora; converted
+            // multicultural_plan + org_diagnosis from FAIL → PASS without
+            // breaking any previously passing file.
+            respect_vpos_reset: true,
             measured_tables: Vec::new(),
             dirty_sections: Vec::new(),
             measured_sections: Vec::new(),
