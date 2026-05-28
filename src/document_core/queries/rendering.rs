@@ -3402,14 +3402,20 @@ fn compute_hwp_used_height(
                 if !current_region_has_item {
                     current_region_first_vpos = vpos;
                     current_region_bottom = bottom;
-                    current_region_max_vpos = vpos;
+                    // max_vpos is the high-water mark for backward-jump detection.
+                    // Floating anchors' vpos is a text-flow anchor (not a real
+                    // page position) — seeding max_vpos with it would spuriously
+                    // flag the next legitimate paragraph as a backward jump
+                    // (form_27 p5: anchor at vpos=29810 then paragraph at 26968
+                    // is NOT a region reset). Start at 0 in that case so only
+                    // real-position items advance the high-water mark.
+                    current_region_max_vpos = if floating_anchor { 0 } else { vpos };
                     current_region_opened_with_floating_anchor = floating_anchor;
                 } else {
                     if bottom > current_region_bottom {
                         current_region_bottom = bottom;
                     }
-                    // Track non-floating items' vpos for backward-jump detection
-                    // (floating anchors store text-flow vpos, not real position).
+                    // Track non-floating items' vpos for backward-jump detection.
                     if !floating_anchor && vpos > current_region_max_vpos {
                         current_region_max_vpos = vpos;
                     }
