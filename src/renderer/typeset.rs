@@ -4853,11 +4853,15 @@ mod tests {
         let styles = ResolvedStyleSet::default();
 
         // 여러 줄이 있는 큰 문단 (페이지 경계에서 줄 단위 분할)
+        // vertical_pos를 단조 증가시켜 실제 HWPX 문서의 line_segs 형태를 재현 —
+        // 5870b034 ("trust-cache skip sb/sa") 이후 vpos=0 일색의 합성 fixture는
+        // "이미 배치된 단일 블록"으로 해석되어 1페이지에 50줄이 다 들어가 버린다.
         let paras = vec![Paragraph {
             line_segs: (0..50)
-                .map(|_| LineSeg {
+                .map(|i| LineSeg {
                     line_height: 1800,
                     line_spacing: 200,
+                    vertical_pos: i as i32 * 2000,
                     ..Default::default()
                 })
                 .collect(),
