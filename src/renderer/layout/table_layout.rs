@@ -1037,6 +1037,52 @@ impl LayoutEngine {
             .iter()
             .enumerate()
             .map(|(pidx, p)| {
+                // === [Mindlogic patch — overlay-only paragraph contributes 0] ===
+                // Defensive correctness: when a paragraph's flow content is
+                // purely overlay nested tables / shapes / pictures
+                // (InFrontOfText / BehindText), it should NOT inflate the
+                // host cell's content height — overlays are drawn on a
+                // separate z-layer, not in flow. Without this guard a
+                // paragraph wrapping a large IN_FRONT_OF_TEXT calendar grid
+                // would grow its host cell to the grid's natural height.
+                // (Observed on SNU samples 04 / 18 — though in those two
+                // the visible-frame size is set elsewhere; this guard
+                // forestalls related regressions on similar inputs.)
+                // Flow-affecting controls are tables/shapes/pictures that
+                // are not overlays. ColumnDef, SectionDef, fields, etc.
+                // don't take flow space themselves.
+                fn is_flow_affecting(c: &Control) -> bool {
+                    use crate::model::shape::TextWrap;
+                    match c {
+                        Control::Table(t) => !matches!(
+                            t.common.text_wrap,
+                            TextWrap::InFrontOfText | TextWrap::BehindText
+                        ),
+                        Control::Shape(s) => !matches!(
+                            s.common().text_wrap,
+                            TextWrap::InFrontOfText | TextWrap::BehindText
+                        ),
+                        Control::Picture(pic) => !matches!(
+                            pic.common.text_wrap,
+                            TextWrap::InFrontOfText | TextWrap::BehindText
+                        ),
+                        _ => false,
+                    }
+                }
+                let has_overlay_table_only = p.text.trim().is_empty()
+                    && p.controls
+                        .iter()
+                        .any(|c| matches!(c, Control::Table(t) if matches!(
+                            t.common.text_wrap,
+                            crate::model::shape::TextWrap::InFrontOfText
+                                | crate::model::shape::TextWrap::BehindText
+                        )))
+                    && !p.controls.iter().any(is_flow_affecting);
+                let only_overlay_tables = has_overlay_table_only;
+                if only_overlay_tables {
+                    return 0.0;
+                }
+                // === [/Mindlogic patch] ====================================
                 let mut comp = compose_paragraph(p);
                 // [Task #671] line_segs 비어 있는 셀 paragraph 의 단일 ComposedLine
                 // 압축 결과를 셀 가용 너비에 맞춰 다중 ComposedLine 으로 재분할.
@@ -1795,7 +1841,8 @@ impl LayoutEngine {
                             }
                             Control::Table(t) => {
                                 // 중첩 표 높이: 행 높이 합산
-                                let nested_h = self.calc_nested_table_height(t, styles);
+                                // [Mindlogic patch] overlay nested tables don't displace flow.
+                                let nested_h = self.calc_nested_table_height_for_flow(t, styles);
                                 text_height += nested_h;
                             }
                             _ => {}
@@ -3049,6 +3096,30 @@ impl LayoutEngine {
             + om_bottom
     }
 
+    /// === [Mindlogic patch — overlay nested tables don't displace flow] ===
+    /// Returns 0 for nested tables whose text_wrap is `InFrontOfText` or
+    /// `BehindText`. Those are overlay tables — Hancom draws them on a
+    /// separate z-layer over/under content, so they MUST NOT inflate the
+    /// host cell's content height. The literal `calc_nested_table_height`
+    /// still returns the geometric extent (needed when actually positioning
+    /// the nested table on the page) — this helper is for sum-into-cell-
+    /// content-height contexts only.
+    pub(crate) fn calc_nested_table_height_for_flow(
+        &self,
+        table: &crate::model::table::Table,
+        styles: &ResolvedStyleSet,
+    ) -> f64 {
+        use crate::model::shape::TextWrap;
+        if matches!(
+            table.common.text_wrap,
+            TextWrap::InFrontOfText | TextWrap::BehindText
+        ) {
+            return 0.0;
+        }
+        self.calc_nested_table_height(table, styles)
+    }
+    /// === [/Mindlogic patch] =================================================
+
     /// 셀의 content_offset 이후 실제 남은 콘텐츠 높이를 계산한다.
     /// MeasuredCell과 동일한 높이 로직을 사용한다 (pagination 엔진이 MeasuredCell 기준으로
     /// content_offset을 산출하므로 동일 기준이어야 함).
@@ -3078,12 +3149,14 @@ impl LayoutEngine {
             };
             if comp.lines.is_empty() {
                 // 중첩 표 컨트롤 문단: 실제 중첩 표 높이로 계산
+                // [Mindlogic patch] overlay nested tables (InFrontOfText / BehindText)
+                // don't displace flow → use calc_nested_table_height_for_flow.
                 let nested_h: f64 = p
                     .controls
                     .iter()
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
-                            self.calc_nested_table_height(t, styles)
+                            self.calc_nested_table_height_for_flow(t, styles)
                         } else {
                             0.0
                         }
@@ -3118,12 +3191,13 @@ impl LayoutEngine {
                     })
                     .sum();
                 if has_table_in_para {
+                    // [Mindlogic patch] overlay nested tables don't displace flow.
                     let nested_h: f64 = p
                         .controls
                         .iter()
                         .map(|ctrl| {
                             if let Control::Table(t) = ctrl {
-                                self.calc_nested_table_height(t, styles)
+                                self.calc_nested_table_height_for_flow(t, styles)
                             } else {
                                 0.0
                             }
@@ -3285,6 +3359,7 @@ impl LayoutEngine {
             }
 
             // 중첩 표 포함 문단(atomic) — line_count==0 또는 has_table_in_para
+            // [Mindlogic patch] overlay nested tables don't displace flow.
             let has_table_in_para = para.controls.iter().any(|c| matches!(c, Control::Table(_)));
             if line_count == 0 || has_table_in_para {
                 let nested_h: f64 = para
@@ -3292,7 +3367,7 @@ impl LayoutEngine {
                     .iter()
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
-                            self.calc_nested_table_height(t, styles)
+                            self.calc_nested_table_height_for_flow(t, styles)
                         } else {
                             0.0
                         }
@@ -3603,12 +3678,13 @@ impl LayoutEngine {
             }
             if line_count == 0 || has_table_in_para {
                 // 중첩 표/빈 문단 — atomic 유닛 1개.
+                // [Mindlogic patch] overlay nested tables don't displace flow.
                 let nested_h: f64 = p
                     .controls
                     .iter()
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
-                            self.calc_nested_table_height(t, styles)
+                            self.calc_nested_table_height_for_flow(t, styles)
                         } else {
                             0.0
                         }
@@ -4113,13 +4189,14 @@ impl LayoutEngine {
 
             // [Task #362] nested table paragraph 의 실제 콘텐츠 높이
             // (compute_cell_line_ranges 와 동일한 시멘틱)
+            // [Mindlogic patch] overlay nested tables don't displace flow.
             let para_h = if line_count == 0 || has_table_in_para {
                 let nested_h: f64 = para
                     .controls
                     .iter()
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
-                            self.calc_nested_table_height(t, styles)
+                            self.calc_nested_table_height_for_flow(t, styles)
                         } else {
                             0.0
                         }
