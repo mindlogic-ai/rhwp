@@ -2039,6 +2039,45 @@ impl TypesetEngine {
             (vec![hwpunit_to_px(400, self.dpi)], vec![0.0])
         };
 
+        // === [Mindlogic patch — trust-lineseg-cache] =====================
+        // HWPX paragraphs carry pre-baked `vertsize` / `spacing` values from
+        // when the doc was saved in Hancom Office. rhwp's compositor
+        // recomputes line heights from font metrics, which drifts ~1–3% per
+        // line and accumulates across tight pages (cover pages, gov forms,
+        // university templates) — pushing content over page boundaries that
+        // Hancom keeps on the same page.
+        //
+        // When the input has a valid cache (line count matches what the
+        // compositor produced, every seg has a positive `line_height`, and
+        // no seg lives inside a wrap zone), trust the cache verbatim instead
+        // of using the recomputed heights. After edits, `reflow_line_segs`
+        // overwrites `line_segs` with rhwp-computed values, so this stays
+        // self-consistent across the load → edit → re-render cycle.
+        //
+        // Wrap-zone paragraphs (`column_start > 0`, e.g. text flowing around
+        // an anchored picture) and count mismatches fall back to the
+        // existing composed path.
+        let trust_cache = !para.line_segs.is_empty()
+            && para.line_segs.len() == line_heights.len()
+            && para
+                .line_segs
+                .iter()
+                .all(|s| s.line_height > 0 && s.column_start == 0);
+        let (line_heights, line_spacings): (Vec<f64>, Vec<f64>) = if trust_cache {
+            para.line_segs
+                .iter()
+                .map(|seg| {
+                    (
+                        hwpunit_to_px(seg.line_height, self.dpi),
+                        hwpunit_to_px(seg.line_spacing, self.dpi),
+                    )
+                })
+                .unzip()
+        } else {
+            (line_heights, line_spacings)
+        };
+        // === [/Mindlogic patch] ==========================================
+
         let lines_total: f64 = line_heights
             .iter()
             .zip(line_spacings.iter())
