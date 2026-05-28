@@ -2571,6 +2571,30 @@ impl TypesetEngine {
                 end_line = cursor_line + 1;
             }
 
+            // === [Mindlogic patch — 2-line widow control] ====================
+            // Narrow rule: prevent splitting a 2-line paragraph such that
+            // line 1 orphans alone on next page. Only triggers when:
+            //   - paragraph has exactly 2 lines (line_count == 2)
+            //   - cursor_line == 0 (placing from start)
+            //   - end_line == 1 (only first line fits)
+            //   - current page is at least half-full
+            //   - page has other content already
+            //
+            // Restricted to 2-line case to avoid the medschool regression
+            // we observed with broader widow control: 3+ line paragraphs
+            // can legitimately split into 2+1, 3+1, etc. Only the strict
+            // 1+1 case is unambiguously bad (creates a fully-orphan page).
+            let is_two_line_widow = line_count == 2
+                && cursor_line == 0
+                && end_line == 1
+                && !st.current_items.is_empty()
+                && st.current_height > available * 0.5;
+            if is_two_line_widow {
+                st.advance_column_or_new_page();
+                continue;
+            }
+            // === [/Mindlogic patch] ===========================================
+
             let part_line_height = fmt.line_advances_sum(cursor_line..end_line);
             let part_sp_after = if end_line >= line_count {
                 fmt.spacing_after
