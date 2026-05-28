@@ -3296,6 +3296,7 @@ fn compute_hwp_used_height(
     }
 
     let mut accumulated_prev_regions: i32 = 0;
+    let mut current_region_first_vpos: i32 = 0;
     let mut current_region_bottom: i32 = 0;
     let mut current_region_has_item = false;
     let mut any_flow_item = false;
@@ -3306,11 +3307,16 @@ fn compute_hwp_used_height(
             ItemExtent::Unmeasurable => return None,
             ItemExtent::Flow { vpos, bottom } => {
                 if vpos == 0 && current_region_has_item {
-                    accumulated_prev_regions += current_region_bottom;
+                    // Close previous region: add its height (bottom-first_vpos).
+                    accumulated_prev_regions += current_region_bottom - current_region_first_vpos;
+                    current_region_first_vpos = 0;
                     current_region_bottom = 0;
                     current_region_has_item = false;
                 }
-                if bottom > current_region_bottom {
+                if !current_region_has_item {
+                    current_region_first_vpos = vpos;
+                    current_region_bottom = bottom;
+                } else if bottom > current_region_bottom {
                     current_region_bottom = bottom;
                 }
                 current_region_has_item = true;
@@ -3322,7 +3328,9 @@ fn compute_hwp_used_height(
     if !any_flow_item {
         return None;
     }
-    let total_hu = accumulated_prev_regions + current_region_bottom;
+    // Each region contributes (its_bottom - its_first_vpos) — the height it
+    // actually occupied on the page. Regions sum across vpos-resets.
+    let total_hu = accumulated_prev_regions + (current_region_bottom - current_region_first_vpos);
     Some(hwpunit_to_px(total_hu, dpi))
 }
 
