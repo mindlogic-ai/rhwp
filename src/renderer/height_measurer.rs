@@ -1069,10 +1069,44 @@ impl HeightMeasurer {
         // 발동 영역 sweep 진단 (187 fixture): ≤2% 7 건 면제, ≥5% 11 건 그대로.
         const TAC_SHRINK_THRESHOLD_RATIO: f64 = 0.02;
         let shrink_threshold = (common_h * TAC_SHRINK_THRESHOLD_RATIO).max(1.0);
-        let table_height = if table.common.treat_as_char
-            && common_h > 0.0
+        // === [Mindlogic patch — non-TAC photo grid: shrink to outer <hp:sz>] ===
+        // Hancom applies outer-height-authoritativeness to non-TAC
+        // anchored tables (text_wrap = TopAndBottom) too, but ONLY when
+        // the row content overflows the declared `<hp:sz height>` by a
+        // significant margin — small (<50%) overflows are absorbed by
+        // growing rows (Hancom honors the larger of declared and natural
+        // size). The canonical shrink case is a photo grid: cellSz
+        // heights small (text-row size), cells contain pictures with
+        // larger natural heights, outer `<hp:sz>` set to the visible
+        // total Hancom intends to render.
+        //
+        // Threshold rationale: For TAC tables, even tiny overflows
+        // (>=2% per Task #672) trigger shrink because TAC tables sit on
+        // a text baseline. For non-TAC anchored tables, the existing
+        // measure_table grows rows freely (per the 2x1 case in sample
+        // 15: common_h=373, raw=386 → row grew slightly to fit picture,
+        // Hancom does the same). Only when raw_table_height exceeds
+        // common_h by >50% (= raw/common > 1.5) does Hancom shrink
+        // proportionally (per the 6x2 case in sample 15: common_h=340,
+        // raw=656, ratio=1.93 → photo grid shrinks).
+        //
+        // 50% threshold derived from the SNU 20-doc corpus:
+        //   tac=false TopAndBottom shrink candidates seen:
+        //     6x2 sample 15: ratio 1.93 → shrink (correct)
+        //     2x1 sample 15: ratio 1.04 → no shrink (correct)
+        //     3x2 sample 15: ratio 1.00 → no shrink (correct)
+        //   tac=true cases unchanged (existing 2% threshold).
+        let non_tac_shrink_floor =
+            !table.common.treat_as_char && raw_table_height < common_h * 1.5;
+        let should_shrink = common_h > 0.0
             && raw_table_height > common_h + shrink_threshold
-        {
+            && !non_tac_shrink_floor
+            && (table.common.treat_as_char
+                || matches!(
+                    table.common.text_wrap,
+                    crate::model::shape::TextWrap::TopAndBottom
+                ));
+        let table_height = if should_shrink {
             let scale = common_h / raw_table_height;
             for h in &mut row_heights {
                 *h *= scale;
@@ -1081,6 +1115,7 @@ impl HeightMeasurer {
         } else {
             raw_table_height
         };
+        // === [/Mindlogic patch] ====================================
 
         // 누적 행 높이 계산 (이진 탐색용)
         let mut cumulative_heights = vec![0.0f64; row_count + 1];
