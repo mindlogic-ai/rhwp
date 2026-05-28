@@ -3205,6 +3205,7 @@ fn compute_hwp_used_height(
                 ItemExtent::Flow {
                     vpos: first.vertical_pos,
                     bottom: last.vertical_pos + last.line_height + last.line_spacing,
+                    floating_anchor: false,
                 }
             }
             PageItem::PartialParagraph {
@@ -3240,6 +3241,7 @@ fn compute_hwp_used_height(
                 ItemExtent::Flow {
                     vpos: first.vertical_pos,
                     bottom: last.vertical_pos + last.line_height + last.line_spacing,
+                    floating_anchor: false,
                 }
             }
             PageItem::Table {
@@ -3263,6 +3265,7 @@ fn compute_hwp_used_height(
                         ItemExtent::Flow {
                             vpos: first.vertical_pos,
                             bottom: first.vertical_pos + t.common.height as i32,
+                            floating_anchor: !t.common.treat_as_char,
                         }
                     } else {
                         ItemExtent::Skip
@@ -3305,6 +3308,7 @@ fn compute_hwp_used_height(
                     ItemExtent::Flow {
                         vpos: first.vertical_pos,
                         bottom: first.vertical_pos + height,
+                        floating_anchor: !tac,
                     }
                 } else {
                     ItemExtent::Skip
@@ -3313,31 +3317,85 @@ fn compute_hwp_used_height(
         }
     }
 
+    // [Mindlogic patch — floating-anchor regions use paragraph extent only]
+    // A tac=false (non-treat-as-char) Table / Shape / Picture stores its
+    // `vertical_pos` as a text-flow ANCHOR in the legacy paragraph-relative
+    // coordinate system — not as its actual page-y. Hancom typically renders
+    // such items at a derived page position (cover-page 결재 boxes appear
+    // at the top of the page even though their anchor vpos is 19021 HU
+    // into the section).
+    //
+    // 358a7d33's flow metric naively includes the anchor's vpos in the
+    // per-region span, then fe5820fa subtracts first_vpos, which combined
+    // produces a hybrid coordinate that doesn't match anything: see medschool
+    // page 1 (+244 px false-positive against rhwp's actual 901 px render).
+    //
+    // Fix: when a region opens with a floating anchor (tac=false) AND later
+    // contains a paragraph, close the region with `bottom` directly (no
+    // first_vpos subtraction) — this matches the legacy paragraph-only
+    // metric for those pages, which is what rhwp's rendering pipeline
+    // actually accumulates. Pure-table cover pages (358a7d33's med_01 case,
+    // no paragraphs in the region) still measure with bottom - first_vpos
+    // because nothing else changes their anchoring semantics. Inline
+    // (tac=true) tables stay on the original first_vpos-subtracted path
+    // because their vpos IS the actual page-y (17_forest case).
     let mut accumulated_prev_regions: i32 = 0;
     let mut current_region_first_vpos: i32 = 0;
     let mut current_region_bottom: i32 = 0;
     let mut current_region_has_item = false;
+    let mut current_region_has_paragraph = false;
+    let mut current_region_opened_with_floating_anchor = false;
     let mut any_flow_item = false;
+
+    let close_region = |first_vpos: i32,
+                        bottom: i32,
+                        has_paragraph: bool,
+                        opened_with_floating_anchor: bool|
+     -> i32 {
+        if opened_with_floating_anchor && has_paragraph {
+            bottom
+        } else {
+            bottom - first_vpos
+        }
+    };
 
     for item in &cc.items {
         match item_extent_hu(item, paragraphs) {
             ItemExtent::Skip => continue,
             ItemExtent::Unmeasurable => return None,
-            ItemExtent::Flow { vpos, bottom } => {
+            ItemExtent::Flow {
+                vpos,
+                bottom,
+                floating_anchor,
+            } => {
                 if vpos == 0 && current_region_has_item {
-                    // Close previous region: add its height (bottom-first_vpos).
-                    accumulated_prev_regions += current_region_bottom - current_region_first_vpos;
+                    // Close previous region.
+                    accumulated_prev_regions += close_region(
+                        current_region_first_vpos,
+                        current_region_bottom,
+                        current_region_has_paragraph,
+                        current_region_opened_with_floating_anchor,
+                    );
                     current_region_first_vpos = 0;
                     current_region_bottom = 0;
                     current_region_has_item = false;
+                    current_region_has_paragraph = false;
+                    current_region_opened_with_floating_anchor = false;
                 }
                 if !current_region_has_item {
                     current_region_first_vpos = vpos;
                     current_region_bottom = bottom;
+                    current_region_opened_with_floating_anchor = floating_anchor;
                 } else if bottom > current_region_bottom {
                     current_region_bottom = bottom;
                 }
                 current_region_has_item = true;
+                if !floating_anchor && matches!(
+                    item,
+                    PageItem::FullParagraph { .. } | PageItem::PartialParagraph { .. }
+                ) {
+                    current_region_has_paragraph = true;
+                }
                 any_flow_item = true;
             }
         }
@@ -3346,9 +3404,13 @@ fn compute_hwp_used_height(
     if !any_flow_item {
         return None;
     }
-    // Each region contributes (its_bottom - its_first_vpos) — the height it
-    // actually occupied on the page. Regions sum across vpos-resets.
-    let total_hu = accumulated_prev_regions + (current_region_bottom - current_region_first_vpos);
+    let total_hu = accumulated_prev_regions
+        + close_region(
+            current_region_first_vpos,
+            current_region_bottom,
+            current_region_has_paragraph,
+            current_region_opened_with_floating_anchor,
+        );
     Some(hwpunit_to_px(total_hu, dpi))
 }
 
@@ -3357,8 +3419,18 @@ enum ItemExtent {
     Skip,
     /// Can't measure reliably — abort and return None for the whole page.
     Unmeasurable,
-    /// Flow-consuming item with HU extent.
-    Flow { vpos: i32, bottom: i32 },
+    /// Flow-consuming item with HU extent. `floating_anchor` is true when the
+    /// item is a tac=false (non-treat-as-char) Table / Shape / Picture — those
+    /// have their `vertical_pos` stored as a text-flow anchor in the legacy
+    /// paragraph-relative coordinate system, not as their actual page-y. The
+    /// per-region accumulator uses this to detect hybrid regions (anchored
+    /// non-paragraph + flow paragraphs) and switch the close-formula to match
+    /// the legacy paragraph-only metric on those pages.
+    Flow {
+        vpos: i32,
+        bottom: i32,
+        floating_anchor: bool,
+    },
 }
 // === [/Mindlogic patch] ====================================================
 
