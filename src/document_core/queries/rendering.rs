@@ -3368,7 +3368,20 @@ fn compute_hwp_used_height(
                 bottom,
                 floating_anchor,
             } => {
-                if vpos == 0 && current_region_has_item {
+                // Region boundary detection: a vpos==0 signal is the explicit
+                // reset, but Hancom also restarts the flow after section /
+                // page breaks where the new region's vpos lands at a small
+                // non-zero value (typical after a TopAndBottom table). Treat
+                // any backward jump (new vpos < current first_vpos) as a new
+                // region — without this huge_01 p26 (vpos 59439 → 10333),
+                // form_07 / form_11 split-pages, etc. under-count by hundreds
+                // of px because all post-reset items get absorbed into the
+                // first region's span without ever lifting current_bottom.
+                let backward_jump = current_region_has_item
+                    && !floating_anchor
+                    && vpos > 0
+                    && vpos < current_region_first_vpos;
+                if (vpos == 0 || backward_jump) && current_region_has_item {
                     // Close previous region.
                     accumulated_prev_regions += close_region(
                         current_region_first_vpos,
