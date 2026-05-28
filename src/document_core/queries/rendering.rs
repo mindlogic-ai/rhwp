@@ -3342,6 +3342,7 @@ fn compute_hwp_used_height(
     let mut accumulated_prev_regions: i32 = 0;
     let mut current_region_first_vpos: i32 = 0;
     let mut current_region_bottom: i32 = 0;
+    let mut current_region_max_vpos: i32 = 0;
     let mut current_region_has_item = false;
     let mut current_region_has_paragraph = false;
     let mut current_region_opened_with_floating_anchor = false;
@@ -3372,15 +3373,17 @@ fn compute_hwp_used_height(
                 // reset, but Hancom also restarts the flow after section /
                 // page breaks where the new region's vpos lands at a small
                 // non-zero value (typical after a TopAndBottom table). Treat
-                // any backward jump (new vpos < current first_vpos) as a new
-                // region — without this huge_01 p26 (vpos 59439 → 10333),
-                // form_07 / form_11 split-pages, etc. under-count by hundreds
-                // of px because all post-reset items get absorbed into the
-                // first region's span without ever lifting current_bottom.
+                // any backward jump (new vpos significantly less than the
+                // highest vpos already seen in the region) as a new region
+                // — without this huge_01 p26 (vpos 59439 → 10333),
+                // internship_plan p10 (mid-region jump 55092 → 12968), etc.
+                // under-count by hundreds of px because all post-reset items
+                // get absorbed into the original region's span without ever
+                // lifting current_bottom.
                 let backward_jump = current_region_has_item
                     && !floating_anchor
                     && vpos > 0
-                    && vpos < current_region_first_vpos;
+                    && vpos < current_region_max_vpos;
                 if (vpos == 0 || backward_jump) && current_region_has_item {
                     // Close previous region.
                     accumulated_prev_regions += close_region(
@@ -3391,6 +3394,7 @@ fn compute_hwp_used_height(
                     );
                     current_region_first_vpos = 0;
                     current_region_bottom = 0;
+                    current_region_max_vpos = 0;
                     current_region_has_item = false;
                     current_region_has_paragraph = false;
                     current_region_opened_with_floating_anchor = false;
@@ -3398,9 +3402,17 @@ fn compute_hwp_used_height(
                 if !current_region_has_item {
                     current_region_first_vpos = vpos;
                     current_region_bottom = bottom;
+                    current_region_max_vpos = vpos;
                     current_region_opened_with_floating_anchor = floating_anchor;
-                } else if bottom > current_region_bottom {
-                    current_region_bottom = bottom;
+                } else {
+                    if bottom > current_region_bottom {
+                        current_region_bottom = bottom;
+                    }
+                    // Track non-floating items' vpos for backward-jump detection
+                    // (floating anchors store text-flow vpos, not real position).
+                    if !floating_anchor && vpos > current_region_max_vpos {
+                        current_region_max_vpos = vpos;
+                    }
                 }
                 current_region_has_item = true;
                 if !floating_anchor && matches!(
