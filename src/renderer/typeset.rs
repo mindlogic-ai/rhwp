@@ -2057,14 +2057,34 @@ impl TypesetEngine {
         // Wrap-zone paragraphs (`column_start > 0`, e.g. text flowing around
         // an anchored picture) and count mismatches fall back to the
         // existing composed path.
-        let trust_cache = !para.line_segs.is_empty()
-            && para.line_segs.len() == line_heights.len()
-            && para
-                .line_segs
-                .iter()
-                .all(|s| s.line_height > 0 && s.column_start == 0);
-        let (line_heights, line_spacings): (Vec<f64>, Vec<f64>) = if trust_cache {
+        // Group linesegs by unique vertpos. Multiple linesegs at the same
+        // vertpos are wrap-zone splits — text flowing around an anchored
+        // picture — and represent ONE logical line, not several. The
+        // compositor sometimes double-counts these, inflating paragraph
+        // height. Dedupe to one (line_height, line_spacing) per vertpos,
+        // taking the first seg's metrics (all wrap-split segs share the
+        // same line_height/spacing in the input).
+        let unique_segs: Vec<&crate::model::paragraph::LineSeg> = {
+            let mut seen_vpos: Vec<i32> = Vec::with_capacity(para.line_segs.len());
             para.line_segs
+                .iter()
+                .filter(|s| {
+                    if seen_vpos.contains(&s.vertical_pos) {
+                        false
+                    } else {
+                        seen_vpos.push(s.vertical_pos);
+                        true
+                    }
+                })
+                .collect()
+        };
+        let trust_cache = !unique_segs.is_empty()
+            && unique_segs.iter().all(|s| s.line_height > 0)
+            && (unique_segs.len() == line_heights.len()
+                || (unique_segs.len() < para.line_segs.len()
+                    && para.line_segs.len() == line_heights.len()));
+        let (line_heights, line_spacings): (Vec<f64>, Vec<f64>) = if trust_cache {
+            unique_segs
                 .iter()
                 .map(|seg| {
                     (
