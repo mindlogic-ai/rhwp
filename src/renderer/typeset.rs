@@ -1033,6 +1033,40 @@ impl TypesetEngine {
                     }
                     // fit 가능 — 정상 emit (기존 동작)
                 }
+                // === [Mindlogic patch — last-pi-before-force-break safety skip] ===
+                // form_11 / similar case: current paragraph is a single short
+                // line (footer/disclaimer) immediately before a forced page
+                // break. With the 4 px safety margin it doesn't fit on
+                // current page → spills to its own page → +1 page. Hancom
+                // squeezes it onto current page (within base body, just past
+                // safety margin). Skip safety once when:
+                //   - next paragraph forces a page/section break
+                //   - current paragraph would fit without safety
+                //   - current is non-empty (the empty case is handled above)
+                if next_force_break && !is_curr_empty {
+                    // Magic 4.0 must match LAYOUT_DRIFT_SAFETY_PX in typeset_paragraph.
+                    // Approximate height_for_fit from line_segs since fmt isn't
+                    // computed yet at this stage.
+                    let para_h_px: f64 = para
+                        .line_segs
+                        .iter()
+                        .map(|s| hwpunit_to_px(s.line_height + s.line_spacing, self.dpi))
+                        .sum();
+                    let trailing_ls_px = para
+                        .line_segs
+                        .last()
+                        .map(|s| hwpunit_to_px(s.line_spacing, self.dpi))
+                        .unwrap_or(0.0);
+                    let h4f_approx = (para_h_px - trailing_ls_px).max(0.0);
+                    let base_avail = st.available_height();
+                    let with_safety = base_avail - 4.0;
+                    if st.current_height + h4f_approx <= base_avail
+                        && st.current_height + h4f_approx > with_safety
+                    {
+                        st.skip_safety_margin_once = true;
+                    }
+                }
+                // === [/Mindlogic patch] =============================================
             }
             // [Task #362] 어울림(Square wrap) 표 옆 paragraph 흡수.
             // Paginator engine.rs:288-320 동일 시멘틱.
