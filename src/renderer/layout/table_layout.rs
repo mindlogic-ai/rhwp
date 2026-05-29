@@ -3924,6 +3924,32 @@ impl LayoutEngine {
                     break;
                 }
                 if j > start && h + u.height > avail_height {
+                    // [Mindlogic patch — region-tail orphan guard]
+                    // A budget break here pushes everything up to the next HWP
+                    // vpos reset (hard break) onto the following page. When that
+                    // tail is tiny it lands alone on a near-empty page — Hancom
+                    // fits these tight regions on one page; rhwp spills by a hair
+                    // (sub-pixel rounding) and manufactures a phantom page.
+                    // If the whole tail-to-next-reset is small AND the overflow is
+                    // sub-line, keep it on this page and break cleanly at the reset.
+                    let mut tail_h = 0.0f64;
+                    let mut k = j;
+                    while k < units.len() {
+                        if k > j && units[k].hard_break_before {
+                            break;
+                        }
+                        tail_h += units[k].height;
+                        k += 1;
+                    }
+                    let tail_ends_at_reset = k >= units.len() || units[k].hard_break_before;
+                    let overflow = h + tail_h - avail_height;
+                    if tail_ends_at_reset
+                        && tail_h <= avail_height * 0.15
+                        && overflow <= avail_height * 0.02
+                    {
+                        h += tail_h;
+                        j = k;
+                    }
                     break;
                 }
                 h += u.height;

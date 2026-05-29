@@ -3382,7 +3382,15 @@ impl TypesetEngine {
 
         // TAC 표는 분할하지 않고 통째로 배치
         let available = st.available_height();
-        if st.current_height + table_height > available && !st.current_items.is_empty() {
+        // [Mindlogic patch — TAC sub-line fit tolerance]
+        // The fit-check height (LINE_SEG line_height) runs a few px larger than
+        // what the table actually renders, so a TAC table that Hancom keeps on
+        // the page spills to the next one over sub-pixel rounding, leaving a
+        // near-empty page (e.g. a full-page certificate image). Allow a sub-line
+        // overflow (<1% of page) before advancing — same philosophy as the
+        // region-tail / last-row orphan guards in table_layout.rs.
+        let fit_tol = available * 0.01;
+        if st.current_height + table_height > available + fit_tol && !st.current_items.is_empty() {
             st.advance_column_or_new_page();
         }
 
@@ -4102,6 +4110,22 @@ impl TypesetEngine {
                     };
                     if consumed + cs_before + row_total <= avail_for_rows {
                         // 행 전체가 예산 안에 들어감.
+                        consumed += cs_before + row_total;
+                        r += 1;
+                        end_row = r;
+                        continue;
+                    }
+                    // [Mindlogic patch — last-row orphan guard]
+                    // Mirror of the intra-cell region-tail guard (table_layout.rs):
+                    // if this is the table's final row and it overflows the page by
+                    // only a hair (sub-line), keep it here rather than orphaning a
+                    // tiny final row onto a near-empty page. Hancom fits these; rhwp
+                    // spills by a few px (rounding) and manufactures a phantom page.
+                    if r + 1 == row_count
+                        && row_total <= avail_for_rows * 0.15
+                        && consumed + cs_before + row_total - avail_for_rows
+                            <= avail_for_rows * 0.02
+                    {
                         consumed += cs_before + row_total;
                         r += 1;
                         end_row = r;
