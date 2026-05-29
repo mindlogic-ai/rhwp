@@ -1178,14 +1178,34 @@ impl HeightMeasurer {
         //   tac=true cases unchanged (existing 2% threshold).
         let non_tac_shrink_floor =
             !table.common.treat_as_char && raw_table_height < common_h * 1.5;
+        // === [Mindlogic patch — non-TAC shrink requires picture content] ===
+        // The non-TAC TopAndBottom shrink above is the photo-grid case:
+        // Hancom keeps the declared `<hp:sz>` height and scales the cell
+        // *pictures* down to fit. That only makes sense when the overflow
+        // is driven by scalable content. A text-only form table whose rows
+        // naturally exceed the declared height must instead GROW and
+        // paginate — Hancom never crushes text to 31% to honor a declared
+        // height. overseas_training (48x5, raw=2776 vs common=873, zero
+        // pictures) was collapsing 4 Hancom pages into 2 via this path.
+        // Gate: a non-TAC table with no pictures in any cell never shrinks.
+        // (TAC tables keep the Task #672 clip-to-declared-height behavior
+        // unchanged — they sit on a text baseline and clip overflow.)
+        let table_has_pictures = table.cells.iter().any(|cell| {
+            cell.paragraphs.iter().any(|para| {
+                para.controls
+                    .iter()
+                    .any(|ctrl| matches!(ctrl, Control::Picture(_)))
+            })
+        });
         let should_shrink = common_h > 0.0
             && raw_table_height > common_h + shrink_threshold
             && !non_tac_shrink_floor
             && (table.common.treat_as_char
-                || matches!(
+                || (matches!(
                     table.common.text_wrap,
                     crate::model::shape::TextWrap::TopAndBottom
-                ));
+                ) && table_has_pictures));
+        // === [/Mindlogic patch] ====================================
         let table_height = if should_shrink {
             let scale = common_h / raw_table_height;
             for h in &mut row_heights {

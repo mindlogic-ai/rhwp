@@ -114,6 +114,31 @@ fn small_04_trailing_blank_stays_on_page1() {
     );
 }
 
+#[test]
+fn overseas_training_text_table_paginates_like_hancom() {
+    // BUG (non-TAC TopAndBottom shrink cluster): this document has a tall
+    // text-only 48x5 form table with a declared outer height far shorter
+    // than its natural row content. The photo-grid shrink rule used to
+    // scale it down to the declared height, collapsing Hancom's 4 pages
+    // into 2. Text-only tables must grow and paginate instead; only picture
+    // grids can be proportionally shrunk to the outer <hp:sz> height.
+    let doc = load_sample("overseas_training.hwpx");
+    assert_eq!(doc.page_count(), 4, "doc must paginate to 4 pages");
+
+    let svg = doc.render_page_svg_native(3).expect("render page 4");
+    let page_text = svg_text(&svg);
+    let dense = page_text.replace(' ', "");
+    let has_final_table = ["가습마스크", "장바구니", "마스크"].iter().all(|s| {
+        let needle = s.replace(' ', "");
+        dense.contains(&needle)
+    });
+    assert!(
+        has_final_table,
+        "page 4 must contain the final accommodation/pledge table content; \
+         the text-only form table must not be crushed into earlier pages",
+    );
+}
+
 // [Bucket C] #[ignore]'d 2026-05-29. The cross-paragraph vpos-reset detector
 // (hwpx_cross_para_reset_breaks) DOES move the infographic onto page 4 as this
 // test requires — but it also cascades a phantom page (rhwp -> 12 pages, Hancom
