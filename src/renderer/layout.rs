@@ -4473,17 +4473,26 @@ impl LayoutEngine {
                 })
             })
             .unwrap_or(false);
-        if has_prior_tac_in_para {
-            let needs_update = para_start_y
-                .get(&para_index)
-                .map(|&existing| y_offset > existing + 1.0)
-                .unwrap_or(true);
-            if needs_update {
-                para_start_y.insert(para_index, y_offset);
+        // === [Mindlogic patch — don't clobber para_start_y for later tac controls] ===
+        // Task #402 needs a 2nd+ tac control in a paragraph to render BELOW the
+        // first (at the advanced y_offset). The old code persisted that advance
+        // into the shared para_start_y — which corrupted the anchor that an
+        // InFrontOfText float in the SAME paragraph reads in the 2nd shape pass
+        // (doc 09 p1: the 보고사항 label box, anchored to a paragraph that also
+        // holds two later tac shapes, dropped to the page bottom). Keep
+        // para_start_y at the paragraph's true origin; use a LOCAL effective
+        // anchor for THIS control's own placement (identical value to the old
+        // bump, so picture placement is unchanged).
+        para_start_y.entry(para_index).or_insert(y_offset);
+        let tac_effective_anchor = {
+            let origin = *para_start_y.get(&para_index).unwrap_or(&y_offset);
+            if has_prior_tac_in_para && y_offset > origin + 1.0 {
+                y_offset
+            } else {
+                origin
             }
-        } else {
-            para_start_y.entry(para_index).or_insert(y_offset);
-        }
+        };
+        // === [/Mindlogic patch] ===
         let mut result_y = y_offset;
         if let Some(para) = paragraphs.get(para_index) {
             if let Some(ctrl) = para.controls.get(control_index) {
@@ -4491,7 +4500,7 @@ impl LayoutEngine {
                     if pic.common.treat_as_char {
                         let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                         let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
-                        let pic_y = para_start_y.get(&para_index).copied().unwrap_or(y_offset);
+                        let pic_y = tac_effective_anchor;
                         let comp = composed.get(para_index);
                         let para_style_id = comp
                             .map(|c| c.para_style_id as usize)
@@ -4794,7 +4803,7 @@ impl LayoutEngine {
                                 .get(para_style_id)
                                 .map(|s| s.alignment)
                                 .unwrap_or(Alignment::Left);
-                            let pic_y = para_start_y.get(&para_index).copied().unwrap_or(y_offset);
+                            let pic_y = tac_effective_anchor;
                             let pic_container = LayoutRect {
                                 x: col_area.x,
                                 y: pic_y,
