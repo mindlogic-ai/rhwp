@@ -1644,6 +1644,17 @@ impl TypesetEngine {
             }
 
             // 인라인 컨트롤 처리: 도형/그림/수식/각주 (Paginator engine.rs:509-525 동일)
+            // [Mindlogic patch — side-by-side TopAndBottom para-float dedup]
+            // Per-paragraph groups of (range_top_px, range_bottom_px, max_extra)
+            // for the Task #409 pushdown below. Objects whose vertical spans
+            // [voff, voff+h] OVERLAP are laid out side-by-side, so their flow
+            // pushdown is max(extra), not sum. Range-overlap (not exact-offset)
+            // grouping is required because side-by-side images carry slightly
+            // different offsets (rounding: 2825 vs 2826) or a negative offset
+            // (e.g. -7099). Single floats and genuinely stacked (non-overlapping)
+            // floats are unaffected. Without this, huge_02-style multi-image rows
+            // count each image's full height (+274..+347px/page).
+            let mut pushdown_groups: Vec<(f64, f64, f64)> = Vec::new();
             for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
                 match ctrl {
                     Control::Shape(_) | Control::Picture(_) | Control::Equation(_) => {
@@ -1726,8 +1737,8 @@ impl TypesetEngine {
                             // overflow 로 잘림). pagination 측에서도 layout 과 동일하게
                             // 개체 높이를 current_height 에 누적.
                             use crate::model::shape::{TextWrap, VertRelTo};
-                            // (obj_h, extra=obj_h+margin_bottom)
-                            let pushdown_h: Option<(f64, f64)> = match ctrl {
+                            // (obj_h, extra=obj_h+margin_bottom, vertical_offset_hu as i32)
+                            let pushdown_h: Option<(f64, f64, i32)> = match ctrl {
                                 Control::Picture(pic)
                                     if !pic.common.treat_as_char
                                         && matches!(
@@ -1739,7 +1750,7 @@ impl TypesetEngine {
                                     let h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                                     let mb =
                                         hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi);
-                                    Some((h, h + mb))
+                                    Some((h, h + mb, pic.common.vertical_offset as i32))
                                 }
                                 Control::Shape(s)
                                     if !s.common().treat_as_char
@@ -1752,11 +1763,11 @@ impl TypesetEngine {
                                     let cm = s.common();
                                     let h = hwpunit_to_px(cm.height as i32, self.dpi);
                                     let mb = hwpunit_to_px(cm.margin.bottom as i32, self.dpi);
-                                    Some((h, h + mb))
+                                    Some((h, h + mb, cm.vertical_offset as i32))
                                 }
                                 _ => None,
                             };
-                            if let Some((obj_h, extra)) = pushdown_h {
+                            if let Some((obj_h, extra, voff)) = pushdown_h {
                                 // [Task #1079] 파일 vpos 가 이미 그림 공간을 반영(그림 para 줄
                                 // 앞 gap ≥ 그림 높이)하면 VPOS_CORR sync 가 그 공간을 따르므로
                                 // pushdown 가산은 이중 계상. gap 이 그림 높이 미만(파일 vpos
@@ -1777,7 +1788,26 @@ impl TypesetEngine {
                                     }
                                 };
                                 if !already_accounted {
-                                    st.current_height += extra;
+                                    // [Mindlogic patch — side-by-side dedup] objects whose
+                                    // vertical spans overlap render side-by-side; only the
+                                    // tallest pushes flow. Add the incremental max for the
+                                    // overlapping group instead of summing every object.
+                                    let top = hwpunit_to_px(voff, self.dpi);
+                                    let bottom = top + obj_h;
+                                    if let Some(slot) = pushdown_groups
+                                        .iter_mut()
+                                        .find(|(t, b, _)| top < *b && *t < bottom)
+                                    {
+                                        if extra > slot.2 {
+                                            st.current_height += extra - slot.2;
+                                            slot.2 = extra;
+                                        }
+                                        slot.0 = slot.0.min(top);
+                                        slot.1 = slot.1.max(bottom);
+                                    } else {
+                                        st.current_height += extra;
+                                        pushdown_groups.push((top, bottom, extra));
+                                    }
                                 }
                             }
                         }
