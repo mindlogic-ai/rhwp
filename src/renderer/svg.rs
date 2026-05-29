@@ -2289,6 +2289,20 @@ impl Renderer for SvgRenderer {
         let ratio = if style.ratio > 0.0 { style.ratio } else { 1.0 };
         let has_ratio = (ratio - 1.0).abs() > 0.01;
 
+        // === [Mindlogic patch — sup/sub script] ===
+        // HWPX supScript/subScript: y/font_size를 직접 조정 (html.rs:296 동일 로직).
+        // SVG <text>의 절대 좌표 모델에서는 baseline-shift CSS가 정확치 않으므로
+        // y와 font_size를 직접 깎아 효과를 표현한다. char_positions는 원본
+        // font_size로 계산되어 가로 advance가 살짝 길게 잡히지만, 시각상 거대한
+        // ³ 글리프가 baseline을 침범하던 lab_report mm³/cm³ 버그가 해소된다.
+        let (y, font_size) = if style.superscript {
+            (y - font_size * 0.3, font_size * 0.7)
+        } else if style.subscript {
+            (y + font_size * 0.15, font_size * 0.7)
+        } else {
+            (y, font_size)
+        };
+
         // 공통 스타일 속성 구성 (fill 제외 — 그림자/원본에서 각각 설정)
         let mut base_attrs = format!(
             "font-family=\"{}\" font-size=\"{}\"",
