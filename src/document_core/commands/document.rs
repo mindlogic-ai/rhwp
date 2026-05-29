@@ -107,6 +107,10 @@ impl DocumentCore {
             // [Mindlogic patch — vpos-reset default on] See document_core/mod.rs
             // for rationale. Keep these defaults in sync.
             respect_vpos_reset: true,
+            // [Mindlogic patch — Bucket C] See document_core/mod.rs for rationale.
+            // Default OFF pending second-break narrowing; flip to true via direct
+            // doc-state mutation in callers that want the new behavior.
+            hwpx_cross_para_reset_breaks: false,
             measured_tables: Vec::new(),
             dirty_sections: vec![true; sec_count],
             measured_sections: Vec::new(),

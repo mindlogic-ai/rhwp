@@ -549,6 +549,10 @@ impl TypesetEngine {
             false,
             false,
             force_break_before,
+            // [Mindlogic patch — Bucket C] non-variant delegate: don't enable
+            // HWPX cross-para breaks here; caller goes through the doc-state
+            // wired path in rendering.rs.
+            false,
         )
     }
 
@@ -574,6 +578,11 @@ impl TypesetEngine {
         skip_spacing_before_prededuct: bool,
         hwp3_origin_page_tolerance: bool,
         force_break_before: &std::collections::HashSet<usize>,
+        // [Mindlogic patch — Bucket C: HWPX cross-para vpos-reset breaks]
+        // When true, fires page breaks on regular HWPX docs where the previous
+        // paragraph ends near page bottom AND the next paragraph starts near
+        // page top — Hancom's encoded page break outside ColumnBreakType::Page.
+        hwpx_cross_para_reset_breaks: bool,
     ) -> PaginationResult {
         let layout = PageLayoutInfo::from_page_def(page_def, column_def, self.dpi);
         let col_count = column_def.column_count.max(1);
@@ -581,6 +590,18 @@ impl TypesetEngine {
         let footnote_safety_margin = hwpunit_to_px(3000, self.dpi);
         // [Task #1007] variant cross-paragraph vpos reset THRESHOLD 계산용 body height (HU)
         let body_height_hu_for_variant: i32 = if is_hwp3_variant {
+            page_def.height.saturating_sub(
+                page_def
+                    .margin_top
+                    .saturating_add(page_def.margin_bottom)
+                    .saturating_add(page_def.margin_header)
+                    .saturating_add(page_def.margin_footer),
+            ) as i32
+        } else {
+            0
+        };
+        // [Mindlogic patch — Bucket C] HWPX cross-para break body height (HU).
+        let body_height_hu_for_hwpx_breaks: i32 = if hwpx_cross_para_reset_breaks {
             page_def.height.saturating_sub(
                 page_def
                     .margin_top
@@ -819,7 +840,68 @@ impl TypesetEngine {
                 }
             }
 
-            if (force_page_break || para_style_break || variant_vpos_reset_break)
+            // === [Mindlogic patch — Bucket C: HWPX cross-para vpos-reset breaks] ===
+            // Parallel detector to is_hwp3_variant but fires on regular HWPX docs.
+            // Signal: prev paragraph ends ≥ 90% body height AND current paragraph's
+            // first vpos REWOUND below prev's end vpos by ≥ 50% body height —
+            // i.e. Hancom saved the first line as page-relative on a new page
+            // (so the absolute vpos dropped, even if not all the way to 0,
+            // because a non-flow element occupies the top of the new page).
+            // Narrower than variant: only paragraph→paragraph transitions
+            // where both sides have real (non-synthetic) line segs and the
+            // current paragraph isn't hosting a Table (#418 mitigation).
+            // GATE: single-column pages only. Multi-column docs (exam papers,
+            // 2-col layouts) use vpos resets to mark column boundaries, not
+            // page boundaries — firing here would misroute paragraphs.
+            let mut hwpx_vpos_reset_break = false;
+            if hwpx_cross_para_reset_breaks
+                && col_count == 1
+                && body_height_hu_for_hwpx_breaks > 0
+                && !para.text.is_empty()
+            {
+                let curr_first = para
+                    .line_segs
+                    .first()
+                    .filter(|ls| !is_synthetic_line_seg(ls));
+                let prev_real = variant_prev_para_idx.and_then(|prev_pi| {
+                    (0..=prev_pi).rev().find_map(|i| {
+                        paragraphs
+                            .get(i)
+                            .and_then(|p| p.line_segs.last())
+                            .filter(|ls| !is_synthetic_line_seg(ls))
+                            .map(|ls| (i, ls))
+                    })
+                });
+                if let (Some((_prev_idx, prev_last)), Some(curr_first)) = (prev_real, curr_first) {
+                    let prev_end = prev_last
+                        .vertical_pos
+                        .saturating_add(prev_last.line_height);
+                    let high_threshold = body_height_hu_for_hwpx_breaks * 90 / 100;
+                    let rewound = prev_end >= high_threshold
+                        && curr_first.vertical_pos >= 0
+                        && curr_first.vertical_pos < prev_last.vertical_pos
+                        && (prev_end - curr_first.vertical_pos)
+                            >= body_height_hu_for_hwpx_breaks * 50 / 100;
+                    if rewound {
+                        // Issue #418 mitigation: skip when current paragraph
+                        // hosts a Table control. Partial tables encode their
+                        // own page splits and shouldn't be double-broken.
+                        let current_hosts_table = para
+                            .controls
+                            .iter()
+                            .any(|c| matches!(c, Control::Table(_)));
+                        if !current_hosts_table {
+                            hwpx_vpos_reset_break = true;
+                        }
+                    }
+                }
+            }
+            // === [end Bucket C patch] ===
+
+            if (force_page_break
+                || para_style_break
+                || variant_vpos_reset_break
+                || hwpx_vpos_reset_break)
                 && !st.current_items.is_empty()
             {
                 st.force_new_page();

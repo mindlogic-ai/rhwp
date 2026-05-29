@@ -132,9 +132,25 @@ impl Paginator {
         let hide_empty_line = opts.hide_empty_line;
         let respect_vpos_reset = opts.respect_vpos_reset;
         let is_hwp3_variant = opts.is_hwp3_variant;
+        // [Mindlogic patch — Bucket C: HWPX cross-para vpos-reset breaks]
+        let hwpx_cross_para_reset_breaks = opts.hwpx_cross_para_reset_breaks;
         // [Task #1007] 페이지 본문 영역 높이 (HWPUNIT) — variant cross-paragraph
         // vpos reset 감지 THRESHOLD 계산용.
         let body_height_hu_for_variant = if is_hwp3_variant {
+            let page_h_hu = page_def.height.saturating_sub(
+                page_def
+                    .margin_top
+                    .saturating_add(page_def.margin_bottom)
+                    .saturating_add(page_def.margin_header)
+                    .saturating_add(page_def.margin_footer),
+            );
+            page_h_hu as i32
+        } else {
+            0
+        };
+        // [Mindlogic patch — Bucket C] body height for HWPX cross-para breaks.
+        // Computed independently of is_hwp3_variant so both detectors can fire.
+        let body_height_hu_for_hwpx_breaks = if hwpx_cross_para_reset_breaks {
             let page_h_hu = page_def.height.saturating_sub(
                 page_def
                     .margin_top
@@ -403,7 +419,69 @@ impl Paginator {
                 }
             }
 
-            if (force_page_break || para_style_break || variant_vpos_reset_break)
+            // === [Mindlogic patch — Bucket C: HWPX cross-para vpos-reset breaks] ===
+            // Parallel detector to is_hwp3_variant but fires on regular HWPX docs.
+            // Signal: prev paragraph ends ≥ 90% body height AND current paragraph's
+            // first vpos REWOUND below prev's end vpos — i.e. Hancom saved the
+            // first line as page-relative on a new page (so the absolute vpos
+            // dropped). Narrower than variant: only paragraph→paragraph
+            // transitions where both sides have real (non-synthetic) line segs
+            // and the current paragraph isn't hosting a Table (#418 mitigation).
+            // GATE: single-column pages only. Multi-column docs (exam papers,
+            // 2-col layouts) use vpos resets to mark column boundaries, not
+            // page boundaries — firing here would misroute paragraphs.
+            let mut hwpx_vpos_reset_break = false;
+            if hwpx_cross_para_reset_breaks
+                && col_count == 1
+                && body_height_hu_for_hwpx_breaks > 0
+                && !para.text.is_empty()
+            {
+                let curr_first = para
+                    .line_segs
+                    .first()
+                    .filter(|ls| !is_synthetic_line_seg(ls));
+                let prev_real = prev_pagination_para.and_then(|prev_pi| {
+                    (0..=prev_pi).rev().find_map(|i| {
+                        paragraphs
+                            .get(i)
+                            .and_then(|p| p.line_segs.last())
+                            .filter(|ls| !is_synthetic_line_seg(ls))
+                            .map(|ls| (i, ls))
+                    })
+                });
+                if let (Some((_prev_idx, prev_last)), Some(curr_first)) = (prev_real, curr_first) {
+                    let prev_end = prev_last
+                        .vertical_pos
+                        .saturating_add(prev_last.line_height);
+                    let high_threshold = body_height_hu_for_hwpx_breaks * 90 / 100;
+                    // "Rewound" = curr_first.vertical_pos < prev_last.vertical_pos.
+                    // Width of rewind ≥ 50% body height = an actual page reset
+                    // (not a mid-page wrap from intra-paragraph float).
+                    let rewound = prev_end >= high_threshold
+                        && curr_first.vertical_pos >= 0
+                        && curr_first.vertical_pos < prev_last.vertical_pos
+                        && (prev_end - curr_first.vertical_pos)
+                            >= body_height_hu_for_hwpx_breaks * 50 / 100;
+                    if rewound {
+                        // Issue #418 mitigation: skip when current paragraph
+                        // hosts a Table control. Partial tables encode their own
+                        // page splits and shouldn't be double-broken.
+                        let current_hosts_table = para
+                            .controls
+                            .iter()
+                            .any(|c| matches!(c, Control::Table(_)));
+                        if !current_hosts_table {
+                            hwpx_vpos_reset_break = true;
+                        }
+                    }
+                }
+            }
+            // === [end Bucket C patch] ===
+
+            if (force_page_break
+                || para_style_break
+                || variant_vpos_reset_break
+                || hwpx_vpos_reset_break)
                 && !st.current_items.is_empty()
             {
                 self.process_page_break(&mut st);

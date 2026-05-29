@@ -71,6 +71,12 @@ pub struct DocumentCore {
     pub(crate) debug_overlay: bool,
     /// LINE_SEG vpos-reset 강제 분리 적용 여부 (페이지네이션 옵션)
     pub(crate) respect_vpos_reset: bool,
+    /// [Mindlogic patch — Bucket C: HWPX cross-para vpos-reset breaks]
+    /// 일반 HWPX 문서에 대해서도 cross-paragraph vpos reset 을 page break 로
+    /// 해석한다. is_hwp3_variant 의 좁은 버전 — col_count==1 페이지 + 표→표
+    /// 경계 회피 (#418 mitigation). Default OFF pending follow-up narrowing —
+    /// see DocumentCore default + test_fidelity_corpus.rs#internship_plan_p4.
+    pub(crate) hwpx_cross_para_reset_breaks: bool,
     /// 구역별 표 측정 데이터 (페이지네이션 결과 보존)
     pub(crate) measured_tables: Vec<Vec<MeasuredTable>>,
     /// 구역별 dirty 플래그 (true = 재페이지네이션 필요)
@@ -233,6 +239,16 @@ impl DocumentCore {
             // multicultural_plan + org_diagnosis from FAIL → PASS without
             // breaking any previously passing file.
             respect_vpos_reset: true,
+            // [Mindlogic patch — Bucket C] Default OFF pending second-break
+            // narrowing. Detector lands in pagination/engine.rs + typeset.rs
+            // gated by col_count==1 so multi-column docs are immune. Single-
+            // column docs (e.g. internship_plan.hwpx) get the correct break
+            // injected between pi=51→pi=52 BUT cascade a phantom second break
+            // because rhwp packs body text ~13.5px/page tighter than Hancom.
+            // Once a "page already filled by a table" guard lands to suppress
+            // the second break, flip this default to true and remove the
+            // #[ignore] in tests/integration/test_fidelity_corpus.rs.
+            hwpx_cross_para_reset_breaks: false,
             measured_tables: Vec::new(),
             dirty_sections: Vec::new(),
             measured_sections: Vec::new(),

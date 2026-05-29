@@ -1706,8 +1706,8 @@ impl DocumentCore {
                         hide_empty_line: section.section_def.hide_empty_line,
                         respect_vpos_reset: self.respect_vpos_reset,
                         is_hwp3_variant: self.document.is_hwp3_variant,
-                        // [Mindlogic patch — Bucket C] wired from DocumentCore in C.4.
-                        hwpx_cross_para_reset_breaks: false,
+                        // [Mindlogic patch — Bucket C] wire from doc state.
+                        hwpx_cross_para_reset_breaks: self.hwpx_cross_para_reset_breaks,
                     },
                 )
             } else {
@@ -1726,6 +1726,8 @@ impl DocumentCore {
                     hwp3_origin_flow_spacing_before,
                     hwp3_origin_page_tolerance,
                     force_breaks.get(idx).unwrap_or(&empty_breaks),
+                    // [Mindlogic patch — Bucket C] wire from doc state (production path).
+                    self.hwpx_cross_para_reset_breaks,
                 )
             };
 
