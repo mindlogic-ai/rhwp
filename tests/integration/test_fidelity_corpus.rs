@@ -101,8 +101,10 @@ fn k_star_p14_renders_committee_footer() {
 // once the "table already filled this page" narrowing lands to suppress the
 // second break. Do NOT delete this test — it is the regression gate for that
 // follow-up.
-#[ignore = "Bucket C: detector default-off pending second-break narrowing (see document_core/mod.rs)"]
 #[test]
+#[ignore = "Bucket C regression gate: detector ships default-off (helps 0 corpus files, \
+            cascades a phantom 12th page on internship_plan). Re-enable the flag and remove \
+            this #[ignore] once the 'table already filled this page' narrowing lands."]
 fn internship_plan_p4_matches_hancom_content() {
     // BUG (Bucket C): Hancom paginates page 4 to contain a 4-circle infographic
     // ("학습연계" / "성공기반" labels) + a small table + a bullet list. rhwp
