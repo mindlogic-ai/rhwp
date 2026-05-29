@@ -3320,11 +3320,23 @@ impl LayoutEngine {
                             .any(|c| matches!(c, Control::Shape(s) if s.common().treat_as_char));
                         if has_tac_shape {
                             // LINE_SEG lh = 이미지+캡션+간격 전체 높이
+                            // === [Mindlogic patch — include line_spacing in tac-shape advance] ===
+                            // Hancom's saved lineseg extent is (line_height + line_spacing);
+                            // the paginator (typeset) advances by that full extent. The render
+                            // walk here advanced by line_height only, dropping line_spacing on
+                            // every tac-shape paragraph → para_start_y drifts up cumulatively →
+                            // InFrontOfText label boxes (positioned at para_start_y + vertOffset)
+                            // land on top of the wrong rows (doc 09 page-1 cover TOC). Match the
+                            // cached extent so render == typeset.
                             let seg_lh: f64 = para
                                 .line_segs
                                 .iter()
-                                .map(|seg| hwpunit_to_px(seg.line_height, self.dpi))
+                                .map(|seg| {
+                                    hwpunit_to_px(seg.line_height, self.dpi)
+                                        + hwpunit_to_px(seg.line_spacing, self.dpi)
+                                })
                                 .fold(0.0f64, f64::max);
+                            // === [/Mindlogic patch] ===
                             let shape_max_h: f64 = para
                                 .controls
                                 .iter()
