@@ -91,6 +91,29 @@ fn k_star_p14_renders_committee_footer() {
     }
 }
 
+#[test]
+fn small_04_trailing_blank_stays_on_page1() {
+    // BUG (cell-height cluster / trailing-blank-page): the document's final
+    // paragraph is an empty blank line (vpos=61120) whose 13.3px line
+    // overflows the page-1 text area by 12.8px — just past the 10px
+    // LAYOUT_DRIFT_SAFETY_PX window the existing trailing-empty-paragraph
+    // guard used — so rhwp spawned a phantom blank page 2. Hancom collapses
+    // a trailing blank line at the page bottom and renders 1 page. After the
+    // terminal-empty-paragraph absorb fix the page count must be 1 and the
+    // last body sentence ("다섯째") must be on page 1.
+    let doc = load_sample("small_04_trailing_blank.hwpx");
+    assert_eq!(doc.page_count(), 1, "doc must paginate to 1 page (no trailing blank page)");
+
+    let svg = doc.render_page_svg_native(0).expect("render page 1");
+    let page_text = svg_text(&svg);
+    let dense = page_text.replace(' ', "");
+    assert!(
+        dense.contains("다섯째"),
+        "page 1 must contain the final body paragraph '다섯째' — the trailing \
+         blank line must not push content (or itself) onto a phantom page 2",
+    );
+}
+
 // [Bucket C] #[ignore]'d 2026-05-29. The cross-paragraph vpos-reset detector
 // (hwpx_cross_para_reset_breaks) DOES move the infographic onto page 4 as this
 // test requires — but it also cascades a phantom page (rhwp -> 12 pages, Hancom
