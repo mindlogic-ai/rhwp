@@ -478,10 +478,86 @@ impl Paginator {
             }
             // === [end Bucket C patch] ===
 
+            // === [Mindlogic patch — Cluster EF: subhead-before-table keep-with-next] ===
+            // Tightly-scoped variant of Bucket C that fires independently of the
+            // hwpx_cross_para_reset_breaks flag (which is OFF by default because
+            // it cascades a phantom second break in some docs). Trigger ONLY when
+            // the current paragraph is a single-line heading-shaped paragraph
+            // whose stored vpos is near top-of-page (Hancom's hint that it
+            // belongs on a new page), and whose IMMEDIATE NEXT paragraph hosts a
+            // block (non-tac) table. This narrowly captures the
+            // "dropped subhead above budget table" pattern (internship_plan.hwpx
+            // page 7) without triggering on ordinary heading→text transitions
+            // elsewhere in the corpus.
+            let mut subhead_with_table_break = false;
+            if col_count == 1 && !para.text.is_empty() {
+                let curr_first = para
+                    .line_segs
+                    .first()
+                    .filter(|ls| !is_synthetic_line_seg(ls));
+                let prev_real = prev_pagination_para.and_then(|prev_pi| {
+                    (0..=prev_pi).rev().find_map(|i| {
+                        paragraphs
+                            .get(i)
+                            .and_then(|p| p.line_segs.last())
+                            .filter(|ls| !is_synthetic_line_seg(ls))
+                            .map(|ls| (i, ls))
+                    })
+                });
+                // Compute body height in HWPUNIT for the gating threshold even
+                // when the upstream flag is OFF.
+                let body_h_hu = page_def.height.saturating_sub(
+                    page_def
+                        .margin_top
+                        .saturating_add(page_def.margin_bottom)
+                        .saturating_add(page_def.margin_header)
+                        .saturating_add(page_def.margin_footer),
+                ) as i32;
+                if let (Some((_prev_idx, prev_last)), Some(curr_first)) =
+                    (prev_real, curr_first)
+                {
+                    let prev_end = prev_last
+                        .vertical_pos
+                        .saturating_add(prev_last.line_height);
+                    let curr_hosts_table = para
+                        .controls
+                        .iter()
+                        .any(|c| matches!(c, Control::Table(_)));
+                    let curr_is_short_heading = !curr_hosts_table
+                        && para.line_segs.len() == 1
+                        && curr_first.vertical_pos >= 0
+                        && curr_first.vertical_pos <= 1500;
+                    let prev_at_page_bottom =
+                        body_h_hu > 0 && prev_end >= body_h_hu * 90 / 100;
+                    // Next paragraph hosts a *block* table (non-treat_as_char
+                    // table that owns the next page break). We DO NOT want this
+                    // to fire when next-para is just text — that would cascade
+                    // the same phantom break that disqualified the full Bucket C
+                    // flag.
+                    let next_hosts_block_table =
+                        paragraphs.get(para_idx + 1).is_some_and(|next_para| {
+                            next_para.controls.iter().any(|c| {
+                                matches!(
+                                    c,
+                                    Control::Table(t) if !t.common.treat_as_char
+                                )
+                            })
+                        });
+                    if curr_is_short_heading
+                        && prev_at_page_bottom
+                        && next_hosts_block_table
+                    {
+                        subhead_with_table_break = true;
+                    }
+                }
+            }
+            // === [end Cluster EF patch] ===
+
             if (force_page_break
                 || para_style_break
                 || variant_vpos_reset_break
-                || hwpx_vpos_reset_break)
+                || hwpx_vpos_reset_break
+                || subhead_with_table_break)
                 && !st.current_items.is_empty()
             {
                 self.process_page_break(&mut st);

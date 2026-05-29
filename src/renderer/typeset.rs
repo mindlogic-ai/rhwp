@@ -898,10 +898,75 @@ impl TypesetEngine {
             }
             // === [end Bucket C patch] ===
 
+            // === [Mindlogic patch — Cluster EF: subhead-before-table keep-with-next] ===
+            // Mirrors the same detector in pagination/engine.rs. Fires only on
+            // the narrow "short heading paragraph with top-of-page vpos hint,
+            // sitting between a page-bottom-filling paragraph and a paragraph
+            // that hosts a block table" pattern — captures the dropped subhead
+            // on internship_plan.hwpx page 7 without enabling the broader
+            // hwpx_cross_para_reset_breaks flag (which cascades phantom breaks).
+            let mut subhead_with_table_break = false;
+            if col_count == 1 && !para.text.is_empty() {
+                let curr_first = para
+                    .line_segs
+                    .first()
+                    .filter(|ls| !is_synthetic_line_seg(ls));
+                let prev_real = variant_prev_para_idx.and_then(|prev_pi| {
+                    (0..=prev_pi).rev().find_map(|i| {
+                        paragraphs
+                            .get(i)
+                            .and_then(|p| p.line_segs.last())
+                            .filter(|ls| !is_synthetic_line_seg(ls))
+                            .map(|ls| (i, ls))
+                    })
+                });
+                let body_h_hu = page_def.height.saturating_sub(
+                    page_def
+                        .margin_top
+                        .saturating_add(page_def.margin_bottom)
+                        .saturating_add(page_def.margin_header)
+                        .saturating_add(page_def.margin_footer),
+                ) as i32;
+                if let (Some((_prev_idx, prev_last)), Some(curr_first)) =
+                    (prev_real, curr_first)
+                {
+                    let prev_end = prev_last
+                        .vertical_pos
+                        .saturating_add(prev_last.line_height);
+                    let curr_hosts_table = para
+                        .controls
+                        .iter()
+                        .any(|c| matches!(c, Control::Table(_)));
+                    let curr_is_short_heading = !curr_hosts_table
+                        && para.line_segs.len() == 1
+                        && curr_first.vertical_pos >= 0
+                        && curr_first.vertical_pos <= 1500;
+                    let prev_at_page_bottom =
+                        body_h_hu > 0 && prev_end >= body_h_hu * 90 / 100;
+                    let next_hosts_block_table =
+                        paragraphs.get(para_idx + 1).is_some_and(|next_para| {
+                            next_para.controls.iter().any(|c| {
+                                matches!(
+                                    c,
+                                    Control::Table(t) if !t.common.treat_as_char
+                                )
+                            })
+                        });
+                    if curr_is_short_heading
+                        && prev_at_page_bottom
+                        && next_hosts_block_table
+                    {
+                        subhead_with_table_break = true;
+                    }
+                }
+            }
+            // === [end Cluster EF patch] ===
+
             if (force_page_break
                 || para_style_break
                 || variant_vpos_reset_break
-                || hwpx_vpos_reset_break)
+                || hwpx_vpos_reset_break
+                || subhead_with_table_break)
                 && !st.current_items.is_empty()
             {
                 st.force_new_page();
