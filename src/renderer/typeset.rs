@@ -2412,6 +2412,28 @@ impl TypesetEngine {
             let is_empty_para = trimmed.trim().is_empty() && para.controls.is_empty();
             if is_empty_para {
                 let total_h = st.current_height + fmt.height_for_fit;
+                // === [Mindlogic patch — cell-height: small_04 trailing-blank-page] ===
+                // A single trailing empty paragraph that is the VERY LAST
+                // paragraph of the document must never spawn a standalone
+                // page: Hancom collapses a trailing blank line at the page
+                // bottom rather than paginating for content that renders
+                // nothing. The existing Task #676 guard only absorbs within
+                // LAYOUT_DRIFT_SAFETY_PX (10px); small_04's trailing blank
+                // line overflows by 12.8px (one blank line ≈ 13.3px), just
+                // past that window → phantom page 2. Widen the absorb for the
+                // terminal-empty-paragraph case to the blank line's own
+                // height-for-fit (it can hide no real content, so it's safe).
+                let is_last_para_in_doc = para_idx + 1 == paragraphs.len();
+                if is_last_para_in_doc
+                    && total_h > available
+                    && total_h <= available + fmt.height_for_fit.max(LAYOUT_DRIFT_SAFETY_PX)
+                {
+                    st.current_items.push(PageItem::FullParagraph {
+                        para_index: para_idx,
+                    });
+                    return;
+                }
+                // === [/Mindlogic patch] =============================================
                 let fit_fail_within_safety =
                     total_h > available && total_h <= available + LAYOUT_DRIFT_SAFETY_PX;
                 let prior_trailing_drift = st.current_height > available
