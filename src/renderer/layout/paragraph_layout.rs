@@ -3802,6 +3802,28 @@ impl LayoutEngine {
             // wrap zone 호스트 paragraph 만 영향.
             let runs_all_whitespace = comp_line.runs.iter().all(|r| r.text.trim().is_empty());
             let skip_advance_empty_wrap = has_picture_shape_square_wrap && runs_all_whitespace;
+            // [Mindlogic patch — wrap-zone dup-vpos advance skip] ============
+            // Mirror the typeset dedup (typeset.rs `unique_segs`): when a line's
+            // LINE_SEG shares its vertical_pos with the previous LINE_SEG, the
+            // two are a wrap-zone split (text flowing left+right of an anchored
+            // object) — ONE logical line, not two. typeset already collapses
+            // these by vpos, so the render path must too or it advances y twice
+            // and the paragraph renders ~2× too tall (cover-page emblem case:
+            // empty spacer paras whose text wraps around an emblem anchored in
+            // an EARLIER paragraph, so the per-para `has_picture_shape_square_wrap`
+            // gate above never fires for them). Gated on whitespace-only so a
+            // dup-vpos line carrying real text keeps the old advance.
+            let skip_advance_dup_vpos = runs_all_whitespace
+                && line_idx > 0
+                && para
+                    .and_then(|p| {
+                        let cur = p.line_segs.get(line_idx)?;
+                        let prev = p.line_segs.get(line_idx - 1)?;
+                        Some(cur.vertical_pos == prev.vertical_pos)
+                    })
+                    .unwrap_or(false);
+            let skip_advance_empty_wrap = skip_advance_empty_wrap || skip_advance_dup_vpos;
+            // === [/Mindlogic patch] =========================================
             // [Task #1046 Stage 3 Class D] 본문 문단(셀 밖)의 콘텐츠 하단(=현재 줄 텍스트
             // 바닥, trailing 줄간격/spacing_after 제외) 기록. overflow 검출이 페이지 바닥
             // 후행 줄간격을 콘텐츠 초과로 오판하지 않도록 한다(페이지네이터의 마지막 줄
