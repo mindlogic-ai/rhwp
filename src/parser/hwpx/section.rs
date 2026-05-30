@@ -225,12 +225,22 @@ fn parse_page_pr(e: &quick_xml::events::BytesStart, page: &mut PageDef) {
         match attr.key.as_ref() {
             b"width" => page.width = parse_u32(&attr),
             b"height" => page.height = parse_u32(&attr),
-            // HWPX에서는 landscape 플래그를 false로 유지한다.
-            // HWPX의 width/height는 이미 실제 용지 방향대로 저장되어 있어
-            // 렌더러가 추가로 교환(swap)할 필요가 없다.
-            // HWP 바이너리는 항상 짧은변=width, 긴변=height로 저장하고
-            // landscape=true일 때 렌더러가 교환하지만, HWPX는 다른 규약을 따른다.
-            b"landscape" => { /* 무시: landscape = false 유지 */ }
+            // === [Mindlogic patch — HWPX landscape orientation] ===
+            // HWPX도 HWP 바이너리와 동일하게 width/height를 세로 기준
+            // (짧은변=width, 긴변=height)으로 저장하고, 방향은 landscape
+            // 속성으로만 구분한다. (코퍼스 57개 전수 확인: 모든 문서가
+            // width=59528<height=84186 으로 동일하고, Hancom doc2pdf 출력
+            // 방향은 이 플래그로만 갈렸다.)
+            //   landscape="NARROWLY" → 가로(landscape) → 렌더러가 교환
+            //   landscape="WIDELY"   → 세로(portrait)  → 교환 없음
+            // (영문 명칭과 실제 의미가 반대라 직관과 다르다 — 방향은
+            //  Hancom 변환 결과와 대조해 실측으로 확정했다.)
+            // 이전 구현은 landscape를 무시(false 고정)했는데, 테스트 문서가
+            // 전부 WIDELY(세로)라 우연히 맞았을 뿐 NARROWLY(가로) 문서는
+            // 세로로 잘못 렌더링됐다.
+            b"landscape" => {
+                page.landscape = attr_str(&attr) == "NARROWLY";
+            }
             b"gutterType" => {
                 let value = attr_str(&attr);
                 let binding_code = match value.as_str() {
