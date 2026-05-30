@@ -40,18 +40,26 @@ pub(crate) fn find_bin_data<'a>(
 /// `SHAPE_COMPONENT.current_width/current_height`가 실제 한컴 표시 크기에 가깝다.
 /// 기존 도형 경로와 동일하게 current 값이 더 큰 축만 채택해 축소 회귀 위험을 줄인다.
 pub(crate) fn picture_display_size_hu(picture: &Picture) -> (i32, i32) {
-    let mut width = picture.common.width as i32;
-    let mut height = picture.common.height as i32;
-
-    let current_width = picture.shape_attr.current_width as i32;
-    if current_width > 0 && current_width > width {
-        width = current_width;
-    }
-
-    let current_height = picture.shape_attr.current_height as i32;
-    if current_height > 0 && current_height > height {
-        height = current_height;
-    }
+    // === [Mindlogic patch — hp:sz frame is the display size] ===
+    // The shape frame <hp:sz> (common.width/height) is the on-page display box;
+    // shape_attr.current_width/height is the source image's stored size and must
+    // only fill in when the frame is absent (0). The previous "use whichever is
+    // larger" rule blew up a small framed picture pointing at a large source
+    // image (e.g. a QR scaled into a 5556hu square box, doc 02 → rendered at the
+    // 10156hu source size). When the frame >= source (the normal, un-resized
+    // case) this is a no-op since the old code also kept the frame.
+    let frame_w = picture.common.width as i32;
+    let frame_h = picture.common.height as i32;
+    let width = if frame_w > 0 {
+        frame_w
+    } else {
+        picture.shape_attr.current_width as i32
+    };
+    let height = if frame_h > 0 {
+        frame_h
+    } else {
+        picture.shape_attr.current_height as i32
+    };
 
     (width, height)
 }
