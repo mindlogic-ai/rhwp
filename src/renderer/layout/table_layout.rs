@@ -35,6 +35,22 @@ fn effective_margin_left_line(margin_left: f64, indent: f64, line_n: usize) -> f
     margin_left + line_indent
 }
 
+fn nested_table_y_start(
+    nested_is_overlay: bool,
+    has_preceding_text: bool,
+    para_y: f64,
+    inner_area_y: f64,
+    cell_content_top: f64,
+) -> f64 {
+    if nested_is_overlay {
+        cell_content_top
+    } else if has_preceding_text {
+        para_y
+    } else {
+        inner_area_y
+    }
+}
+
 use super::super::composer::effective_text_for_metrics;
 use super::super::{hwpunit_to_px, ShapeStyle};
 use super::border_rendering::{
@@ -2762,11 +2778,18 @@ impl LayoutEngine {
                             }
                             Control::Table(nested_table) => {
                                 let is_tac_table = nested_table.common.treat_as_char;
-                                let nested_y = if has_preceding_text {
-                                    para_y
-                                } else {
-                                    inner_area.y
-                                };
+                                let nested_is_overlay = matches!(
+                                    nested_table.common.text_wrap,
+                                    crate::model::shape::TextWrap::InFrontOfText
+                                        | crate::model::shape::TextWrap::BehindText
+                                );
+                                let nested_y = nested_table_y_start(
+                                    nested_is_overlay,
+                                    has_preceding_text,
+                                    para_y,
+                                    inner_area.y,
+                                    cell_y + pad_top,
+                                );
                                 let nested_ctx = cell_context.as_ref().map(|ctx| {
                                     let mut new_ctx = ctx.clone();
                                     new_ctx.path.push(CellPathEntry {
@@ -4422,7 +4445,7 @@ impl LayoutEngine {
 
 #[cfg(test)]
 mod row_cut_tests {
-    use super::LayoutEngine;
+    use super::{nested_table_y_start, LayoutEngine};
     use crate::model::paragraph::{LineSeg, Paragraph};
     use crate::model::table::{Cell, Table};
     use crate::renderer::style_resolver::ResolvedStyleSet;
@@ -4464,6 +4487,22 @@ mod row_cut_tests {
             cells,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn overlay_nested_table_ignores_centered_text_origin() {
+        assert_eq!(
+            nested_table_y_start(true, false, 300.0, 450.0, 120.0),
+            120.0
+        );
+        assert_eq!(
+            nested_table_y_start(false, false, 300.0, 450.0, 120.0),
+            450.0
+        );
+        assert_eq!(
+            nested_table_y_start(false, true, 300.0, 450.0, 120.0),
+            300.0
+        );
     }
 
     #[test]
