@@ -3757,6 +3757,7 @@ fn parse_field_begin_attrs(e: &quick_xml::events::BytesStart) -> Field {
 fn parse_num_type(s: &str) -> AutoNumberType {
     match s {
         "PAGE" => AutoNumberType::Page,
+        "TOTAL_PAGE" => AutoNumberType::TotalPage,
         "FOOTNOTE" => AutoNumberType::Footnote,
         "ENDNOTE" => AutoNumberType::Endnote,
         "FIGURE" | "PICTURE" => AutoNumberType::Picture,

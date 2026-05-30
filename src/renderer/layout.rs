@@ -1007,6 +1007,9 @@ impl LayoutEngine {
         }
 
         let page_str = page_number.to_string();
+        // [Mindlogic patch — TOTAL_PAGE] total-page autoNums substitute the
+        // document page count, not the current page.
+        let total_str = self.total_pages.get().to_string();
 
         for line in &mut comp.lines {
             for run in &mut line.runs {
@@ -1017,28 +1020,34 @@ impl LayoutEngine {
             }
         }
 
+        // (placeholder position, is_total_page) for each PAGE / TOTAL_PAGE autoNum.
         let mut positions = self.page_auto_number_placeholder_positions(para);
-        positions.sort_unstable();
-        positions.dedup();
-        for pos in positions.into_iter().rev() {
-            Self::replace_composed_char(comp, pos, &page_str);
+        positions.sort_by_key(|(pos, _)| *pos);
+        positions.dedup_by_key(|(pos, _)| *pos);
+        // Replace right-to-left so earlier substitutions don't shift later positions.
+        for (pos, is_total) in positions.into_iter().rev() {
+            let value = if is_total { &total_str } else { &page_str };
+            Self::replace_composed_char(comp, pos, value);
         }
     }
 
-    fn page_auto_number_placeholder_positions(&self, para: &Paragraph) -> Vec<usize> {
+    /// 쪽번호/전체쪽수 autoNum placeholder 위치 + 전체쪽수 여부.
+    /// `(placeholder char index, is_total_page)` — Page → false, TotalPage → true.
+    fn page_auto_number_placeholder_positions(&self, para: &Paragraph) -> Vec<(usize, bool)> {
+        use crate::model::control::AutoNumberType;
         let ctrl_positions = crate::document_core::helpers::find_control_text_positions(para);
         let text_chars: Vec<char> = para.text.chars().collect();
         let mut positions = Vec::new();
         let mut search_from = 0usize;
 
         for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
-            if !matches!(
-                ctrl,
-                Control::AutoNumber(an)
-                    if an.number_type == crate::model::control::AutoNumberType::Page
-            ) {
-                continue;
-            }
+            // [Mindlogic patch — TOTAL_PAGE] match both PAGE and TOTAL_PAGE
+            // autoNums; remember which so the caller picks page# vs total#.
+            let is_total = match ctrl {
+                Control::AutoNumber(an) if an.number_type == AutoNumberType::Page => false,
+                Control::AutoNumber(an) if an.number_type == AutoNumberType::TotalPage => true,
+                _ => continue,
+            };
 
             let direct_pos = ctrl_positions.get(ctrl_idx).copied().filter(|&pos| {
                 text_chars
@@ -1051,7 +1060,7 @@ impl LayoutEngine {
             });
 
             if let Some(pos) = pos {
-                positions.push(pos);
+                positions.push((pos, is_total));
                 search_from = pos.saturating_add(1);
             }
         }

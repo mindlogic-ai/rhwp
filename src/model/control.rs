@@ -116,6 +116,9 @@ pub enum AutoNumberType {
     Picture,
     Table,
     Equation,
+    /// 전체 쪽수 (HWPX numType="TOTAL_PAGE", HWP5 binary type 6).
+    /// 현재 쪽이 아니라 문서 전체 쪽수로 치환된다.
+    TotalPage,
 }
 
 /// 새 번호 지정 ('nwno' 컨트롤)

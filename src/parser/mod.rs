@@ -713,6 +713,9 @@ pub(crate) fn assign_auto_numbers(doc: &mut Document) {
             AutoNumberType::Picture => 3,
             AutoNumberType::Table => 4,
             AutoNumberType::Equation => 5,
+            // TotalPage는 카운터 슬롯이 없음 — 렌더 시 total_pages로 치환되므로
+            // 파스 단계 assigned_number는 무의미. page 슬롯(0)로 매핑(무해).
+            AutoNumberType::TotalPage => 0,
         }
     }
 

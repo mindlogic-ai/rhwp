@@ -768,6 +768,12 @@ impl AutoNumberCounter {
                 self.page += 1;
                 self.page
             }
+            // TotalPage는 증가형 카운터가 아님 — 렌더 시 문서 전체 쪽수로 치환됨.
+            // 카운터 경로에서는 page와 동일 취급 (실치환은 total_pages 사용).
+            AutoNumberType::TotalPage => {
+                self.page += 1;
+                self.page
+            }
         }
     }
 
@@ -779,7 +785,7 @@ impl AutoNumberCounter {
             AutoNumberType::Equation => self.equation,
             AutoNumberType::Footnote => self.footnote,
             AutoNumberType::Endnote => self.endnote,
-            AutoNumberType::Page => self.page,
+            AutoNumberType::Page | AutoNumberType::TotalPage => self.page,
         }
     }
 
