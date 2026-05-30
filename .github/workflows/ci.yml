@@ -83,6 +83,9 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      - name: Renderer overfit guard
+        run: python3 scripts/check_renderer_overfit.py
+
       - name: Build
         run: cargo build --verbose
 

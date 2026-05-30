@@ -10,6 +10,8 @@ on:
       - 'src/renderer/**'
       - 'src/document_core/queries/rendering.rs'
       - 'src/wasm_api.rs'
+      - 'scripts/check_renderer_overfit.py'
+      - 'scripts/renderer_overfit_baseline.txt'
       - 'rhwp-studio/**'
       - '.github/workflows/render-diff.yml'
   workflow_dispatch:
@@ -92,6 +94,9 @@ jobs:
         run: |
           node --check e2e/canvas-render-diff.test.mjs
           node --check e2e/run-render-diff.mjs
+
+      - name: Renderer overfit guard
+        run: python3 scripts/check_renderer_overfit.py
 
       - name: Run canvas visual diff
         working-directory: rhwp-studio

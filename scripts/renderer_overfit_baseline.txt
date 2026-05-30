@@ -1,0 +1,10 @@
+# Known renderer content-fingerprint debt. Do not add new entries casually.
+# A valid fidelity fix should delete entries from this file, not grow it.
+content-text-probe|src/renderer/composer.rs|contains:BCP:Business Continuity Planning) 수립
+content-text-probe|src/renderer/pagination/engine.rs|contains:계약상대자는 통합DB서버에서 운영될 주요업무에 대해 Active-Active
+content-text-probe|src/renderer/typeset.rs|contains:계약상대자는 통합DB서버에서 운영될 주요업무에 대해 Active-Active
+fixture-identifier|src/renderer/composer.rs|is_sample16_2022_bcp_orphan_tail_lineseg
+fixture-identifier|src/renderer/pagination/engine.rs|is_sample16_integrated_db_cluster_tail_paragraph
+fixture-identifier|src/renderer/pagination/engine.rs|sample16_missing_lineseg_tail_break_line
+fixture-identifier|src/renderer/typeset.rs|is_sample16_integrated_db_cluster_tail_paragraph
+fixture-identifier|src/renderer/typeset.rs|sample16_missing_lineseg_tail_break_line
