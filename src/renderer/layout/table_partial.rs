@@ -679,7 +679,38 @@ impl LayoutEngine {
                         &cell.paragraphs,
                         styles,
                     );
-                    vpos_h.max(line_h)
+                    // [Mindlogic patch — vertical-center nested-table content height]
+                    // `last_seg_end` (host paragraph seg vpos + line_height) only
+                    // captures a nested table's height when a paragraph FOLLOWS it
+                    // (the vpos jump). When the nested table is the cell's last/only
+                    // content, vpos_h collapses to the host paragraph's one-line
+                    // height; a vertically-centered cell then centers the box as if
+                    // it were one line and pushes it down by ~half the row slack, so
+                    // the box overflows its row and overlaps the next row (doc 13
+                    // 서식4: 작성 유의사항 box vs the "2. 연구 논문 목록" heading).
+                    // Account for the nested table directly. `_for_flow` keeps true
+                    // overlays (InFrontOfText/BehindText) at 0, and max() leaves
+                    // trailing-paragraph cells unchanged — this only raises content
+                    // height for a last-content nested table, pulling the centered
+                    // box back toward the cell top.
+                    let mut nested_based: f64 = 0.0;
+                    for p in &cell.paragraphs {
+                        let para_top = p
+                            .line_segs
+                            .first()
+                            .map(|s| hwpunit_to_px(s.vertical_pos, self.dpi))
+                            .unwrap_or(0.0);
+                        for ctrl in &p.controls {
+                            if let Control::Table(t) = ctrl {
+                                let cand =
+                                    para_top + self.calc_nested_table_height_for_flow(t, styles);
+                                if cand > nested_based {
+                                    nested_based = cand;
+                                }
+                            }
+                        }
+                    }
+                    vpos_h.max(line_h).max(nested_based)
                 } else {
                     self.calc_composed_paras_content_height(
                         &composed_paras,
