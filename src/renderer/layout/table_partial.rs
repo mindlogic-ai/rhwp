@@ -734,7 +734,20 @@ impl LayoutEngine {
             } else {
                 false
             };
-            let effective_align = if is_in_split_row && cell_was_split {
+            // [Mindlogic patch — split nested-table cell anchors to top]
+            // A cell whose nested table spans a page break must top-anchor on
+            // each split page (the table continues from the top). The existing
+            // `cell_was_split` guard only fires when text LINES were trimmed; a
+            // nested table is a single un-trimmed unit, so a split table cell
+            // stayed Center and its (line-only) content height left a large
+            // centering offset that pushed the table far down the page (doc 13
+            // 서식4: ~170px gap above each 논문/학술대회 grid). Force Top for any
+            // nested-table cell in a split row.
+            let cell_has_nested = cell
+                .paragraphs
+                .iter()
+                .any(|p| p.controls.iter().any(|c| matches!(c, Control::Table(_))));
+            let effective_align = if is_in_split_row && (cell_was_split || cell_has_nested) {
                 VerticalAlign::Top
             } else {
                 cell.vertical_align
