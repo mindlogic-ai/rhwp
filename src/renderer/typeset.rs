@@ -4183,11 +4183,29 @@ impl TypesetEngine {
                     // [Mindlogic patch — last-row orphan guard]
                     // Mirror of the intra-cell region-tail guard (table_layout.rs):
                     // if this is the table's final row and it overflows the page by
-                    // only a hair (sub-line), keep it here rather than orphaning a
-                    // tiny final row onto a near-empty page. Hancom fits these; rhwp
+                    // only a hair (sub-line), keep it here rather than orphaning the
+                    // final row onto a near-empty page. Hancom fits these; rhwp
                     // spills by a few px (rounding) and manufactures a phantom page.
+                    //
+                    // Two sub-line orphan shapes qualify, both gated on the same
+                    // ≤2%-page OVERFLOW cap (a true rounding/sub-line spill):
+                    //   (a) a tiny tail row (≤15% of avail) — the original form_25
+                    //       case: a small final row stranded on a near-empty page.
+                    //   (b) a large row that needs ≥85% of the remaining space and
+                    //       overflows it by a hair — a tight fit Hancom packs
+                    //       (fit-to-print). doc 07: a 377px opinion-box content row
+                    //       (93% of avail) overflowed by 5.1px and was stranded on a
+                    //       40%-full continuation page, cascading every later page +1.
+                    // A mid-size row (e.g. 25% of avail) that overflows is NOT
+                    // absorbed: the page filled from OTHER rows and the natural break
+                    // is before it (doc 13 keeps such a row on the next page, as
+                    // Hancom does). The fraction keys on row-vs-remaining-space
+                    // geometry, never on document content; the corpus gate guards any
+                    // page-count move past these thresholds.
+                    let row_fits_tightly = row_total <= avail_for_rows * 0.15
+                        || row_total >= avail_for_rows * 0.85;
                     if r + 1 == row_count
-                        && row_total <= avail_for_rows * 0.15
+                        && row_fits_tightly
                         && consumed + cs_before + row_total - avail_for_rows
                             <= avail_for_rows * 0.02
                     {
