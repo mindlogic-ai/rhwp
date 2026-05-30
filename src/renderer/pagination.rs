@@ -610,6 +610,11 @@ pub struct PaginationOpts {
     /// transitions where the current paragraph hosts a partial table, per
     /// issue #418 mitigation).
     pub hwpx_cross_para_reset_breaks: bool,
+    /// [Mindlogic patch — page-start-number] SectionDef.page_num: explicit
+    /// section starting page number (HWPX <hp:startNum page=N>). 0 = continue
+    /// from previous section (start at 1). >0 = page-number footer fields are
+    /// offset by this (page="3" → physical page 1 shows "3").
+    pub page_start_num: u16,
 }
 
 /// 페이지 분할 엔진

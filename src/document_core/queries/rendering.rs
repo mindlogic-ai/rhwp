@@ -1708,6 +1708,9 @@ impl DocumentCore {
                         is_hwp3_variant: self.document.is_hwp3_variant,
                         // [Mindlogic patch — Bucket C] wire from doc state.
                         hwpx_cross_para_reset_breaks: self.hwpx_cross_para_reset_breaks,
+                        // [Mindlogic patch — page-start-number] explicit section
+                        // start page number (Hancom honors <hp:startNum page=N>).
+                        page_start_num: section.section_def.page_num,
                     },
                 )
             } else {
@@ -1728,6 +1731,9 @@ impl DocumentCore {
                     force_breaks.get(idx).unwrap_or(&empty_breaks),
                     // [Mindlogic patch — Bucket C] wire from doc state (production path).
                     self.hwpx_cross_para_reset_breaks,
+                    // [Mindlogic patch — page-start-number] explicit section start
+                    // page number (Hancom honors <hp:startNum page=N>).
+                    section.section_def.page_num,
                 )
             };
 

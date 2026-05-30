@@ -553,6 +553,9 @@ impl TypesetEngine {
             // HWPX cross-para breaks here; caller goes through the doc-state
             // wired path in rendering.rs.
             false,
+            // [Mindlogic patch — page-start-number] this thin delegate has no
+            // SectionDef; the production path (rendering.rs) wires page_num.
+            0,
         )
     }
 
@@ -583,6 +586,12 @@ impl TypesetEngine {
         // paragraph ends near page bottom AND the next paragraph starts near
         // page top — Hancom's encoded page break outside ColumnBreakType::Page.
         hwpx_cross_para_reset_breaks: bool,
+        // [Mindlogic patch — page-start-number] SectionDef.page_num: explicit
+        // section starting page number (HWPX <hp:startNum page=N> / HWP secPr).
+        // 0 = continue from previous section (→ start at 1 here). >0 = Hancom
+        // renders page-number footer fields with this offset (e.g. page="3"
+        // means physical page 1 shows "3"). Threaded into PageNumberAssigner.
+        page_start_num: u16,
     ) -> PaginationResult {
         let layout = PageLayoutInfo::from_page_def(page_def, column_def, self.dpi);
         let col_count = column_def.column_count.max(1);
@@ -2060,6 +2069,7 @@ impl TypesetEngine {
             &new_page_numbers,
             &page_hides,
             section_index,
+            page_start_num,
         );
 
         PaginationResult {
@@ -4767,12 +4777,21 @@ impl TypesetEngine {
         new_page_numbers: &[(usize, u16)],
         page_hides: &[(usize, crate::model::control::PageHide)],
         _section_index: usize,
+        page_start_num: u16,
     ) {
         // 쪽번호: PageNumberAssigner 가 NewNumber 1회 적용 + 단조 증가를 보장 (Issue #353)
         let mut current_header: Option<HeaderFooterRef> = None;
         let mut current_footer: Option<HeaderFooterRef> = None;
+        // [Mindlogic patch — page-start-number] SectionDef.page_num > 0 sets the
+        // section's explicit starting page number (Hancom honors <hp:startNum
+        // page=N>); 0 means continue from the previous section → default 1.
+        let initial = if page_start_num > 0 {
+            page_start_num as u32
+        } else {
+            1
+        };
         let mut assigner =
-            crate::renderer::page_number::PageNumberAssigner::new(new_page_numbers, 1);
+            crate::renderer::page_number::PageNumberAssigner::new(new_page_numbers, initial);
 
         for page in pages.iter_mut() {
             let page_num = assigner.assign(page);

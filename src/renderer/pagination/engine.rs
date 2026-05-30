@@ -1065,6 +1065,7 @@ impl Paginator {
             &page_hides,
             &new_page_numbers,
             section_index,
+            opts.page_start_num,
         );
 
         PaginationResult {
@@ -2786,10 +2787,17 @@ impl Paginator {
         page_hides: &[(usize, crate::model::control::PageHide)],
         new_page_numbers: &[(usize, u16)],
         _section_index: usize,
+        page_start_num: u16,
     ) {
         // 쪽번호: PageNumberAssigner 가 NewNumber 1회 적용 + 단조 증가를 보장 (Issue #353)
+        // [Mindlogic patch — page-start-number] honor SectionDef.page_num > 0.
+        let initial = if page_start_num > 0 {
+            page_start_num as u32
+        } else {
+            1
+        };
         let mut assigner =
-            crate::renderer::page_number::PageNumberAssigner::new(new_page_numbers, 1);
+            crate::renderer::page_number::PageNumberAssigner::new(new_page_numbers, initial);
         // 머리말/꼬리말은 한번 설정되면 이후 페이지에도 유지 (누적)
         let mut header_both: Option<HeaderFooterRef> = None;
         let mut header_even: Option<HeaderFooterRef> = None;
