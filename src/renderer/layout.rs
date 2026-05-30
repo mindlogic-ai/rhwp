@@ -846,6 +846,13 @@ impl LayoutEngine {
                 self.substitute_hf_field_markers(&mut comp, page_number);
                 if comp.tac_controls.is_empty() {
                     // 머리말/꼬리말 내 Picture: header/footer area 기준 배치
+                    // === [Mindlogic patch — 비-TAC float 그림 옆 머리말 텍스트] ===
+                    // 그림이 떠 있는(float) 문단의 자체 텍스트(예: 로고 옆
+                    // "[서식2]" 라벨)는 아래 그림 루프에서 렌더링되지 않아
+                    // 통째로 누락됐다. has_shape 분기처럼 텍스트도 함께 그린다.
+                    // 그림 루프가 y_offset 을 전진시키므로, 라벨은 그림 이전의
+                    // 문단 기준선(y_text_start)에 두어 머리말 같은 줄에 오게 한다.
+                    let y_text_start = y_offset;
                     for (ci, ctrl) in para.controls.iter().enumerate() {
                         if let Control::Picture(pic) = ctrl {
                             let pic_container = LayoutRect {
@@ -871,6 +878,25 @@ impl LayoutEngine {
                             let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                             y_offset += pic_h;
                         }
+                    }
+                    if !para.text.is_empty() {
+                        let mut comp_text = compose_paragraph(para);
+                        self.substitute_hf_field_markers(&mut comp_text, page_number);
+                        let text_y = self.layout_paragraph(
+                            tree,
+                            area_node,
+                            para,
+                            Some(&comp_text),
+                            styles,
+                            area,
+                            y_text_start,
+                            0,
+                            usize::MAX - i,
+                            None,
+                            None,
+                            None,
+                        );
+                        y_offset = y_offset.max(text_y);
                     }
                 } else {
                     // TAC Picture: layout_paragraph에서 인라인 배치
