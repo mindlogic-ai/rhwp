@@ -878,7 +878,37 @@ impl HeightMeasurer {
                         .map(|s| s.vertical_pos + s.line_height)
                         .max()
                         .unwrap_or(0);
-                    hwpunit_to_px(last_seg_end, self.dpi).max(text_height)
+                    let vpos_based = hwpunit_to_px(last_seg_end, self.dpi).max(text_height);
+                    // [Mindlogic patch — nested-table cell height] last_seg_end only
+                    // captures a nested table when a paragraph FOLLOWS it (vpos jump).
+                    // When the table is the cell's last content (form section rows),
+                    // it collapses to the host paragraph's one line → the cell/row is
+                    // far too short and the nested grid renders collapsed/overlapping
+                    // (doc 13 서식3, non-split → rendered via resolve_row_heights).
+                    let mut nested_based: f64 = 0.0;
+                    for p in &cell.paragraphs {
+                        let para_top = p
+                            .line_segs
+                            .first()
+                            .map(|s| hwpunit_to_px(s.vertical_pos, self.dpi))
+                            .unwrap_or(0.0);
+                        for ctrl in &p.controls {
+                            if let Control::Table(t) = ctrl {
+                                let nested = self.measure_table_impl(
+                                    t,
+                                    para_index,
+                                    control_index,
+                                    styles,
+                                    depth + 1,
+                                );
+                                let cand = para_top + nested.total_height;
+                                if cand > nested_based {
+                                    nested_based = cand;
+                                }
+                            }
+                        }
+                    }
+                    vpos_based.max(nested_based)
                 } else {
                     // 단, 비-인라인 이미지/도형은 LINE_SEG에 미포함이므로 별도 합산
                     let non_inline_h = self.measure_non_inline_controls_height(&cell.paragraphs);
