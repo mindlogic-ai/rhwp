@@ -4231,7 +4231,7 @@ pub fn map_pua_bullet_char(ch: char) -> char {
     match w {
         // 도형/기호 (0x6C~0x7E)
         0x6C => '\u{25CF}', // ● Black circle
-        0x6D => '\u{25CF}', // ● (Lower right shadowed white circle → 근사값)
+        0x6D => '\u{25CB}', // ○ White circle (Wingdings 'm' = shadowed WHITE circle; Hancom renders hollow ○, not ●)
         0x6E => '\u{25A0}', // ■ Black square
         0x6F => '\u{25A1}', // □ White square
         0x70 => '\u{25A1}', // □ (Bold white square → 근사값)
