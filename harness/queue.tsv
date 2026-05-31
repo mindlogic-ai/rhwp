@@ -1,0 +1,14 @@
+# doc	rhwp	hancom	category	status	notes
+# status: pending | blocked | done    category drives strategy
+13_3763367_k_star_visa_track_plan	20	19	overflow+drift	pending	5.1px overflow P1; -32/-33 top tables
+form_07_______________41KB	13	11	cumulative-drift	pending	para=64 table NOT the cause (Hancom renders equally tall, verified)
+form_22____________________270KB	38	37	cumulative-drift	pending	tiny mixed per-page diffs accumulate
+med_03____________4MB	48	47	metric-lie	pending	needs drift.py truth signal, not dump-pages
+09_3766093_natural_sci_planning_committee_260527	53	51	metric-lie+cover	pending	prior wrong-fix reverted; cover float overlap is separate
+huge_01_DNA________33MB	46	41	cumulative-drift	pending	same family as form_07
+huge_02_DNA_______75MB	73	67	cumulative-drift	pending	same family
+15_3740450_research_admin_innovation_meeting_template	6	5	image-pagination	pending	identical render to meeting
+meeting	6	5	image-pagination	pending	p3/p4 image-heavy
+report_form	5	6	under-paginate	pending	rhwp packs more than Hancom
+large_01_____________16MB	37	39	under-paginate	pending	7 overflow markers
+accountability_eval	4	11	needs-feature	blocked	wide-table reflow: Hancom width-fits+re-wraps; rhwp draws literal. Needs NEW capability, not a fix.
