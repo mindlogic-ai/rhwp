@@ -179,7 +179,11 @@ impl LayoutEngine {
         let para_trust_cache =
             !para.line_segs.is_empty() && para.line_segs.iter().all(|s| s.line_height > 0);
         let (spacing_before, spacing_after) = if para_trust_cache {
-            (0.0, 0.0)
+            // [Mindlogic 2026-06-01] keep paraPr spaceAfter — Hancom renders it;
+            // the cache vpos delta omits it (probe-proven on form_02/04). Sister
+            // of the typeset.rs change so pagination & render agree. sb stays 0
+            // (SNU bakes sb into the cache delta). SNU sa==0 → no-op for SNU.
+            (0.0, raw_spacing_after)
         } else {
             (raw_spacing_before, raw_spacing_after)
         };
@@ -989,7 +993,11 @@ impl LayoutEngine {
             .map(|p| !p.line_segs.is_empty() && p.line_segs.iter().all(|s| s.line_height > 0))
             .unwrap_or(false);
         let (spacing_before, spacing_after) = if para_trust_cache {
-            (0.0, 0.0)
+            // [Mindlogic 2026-06-01] keep paraPr spaceAfter — Hancom renders it;
+            // the cache vpos delta omits it (probe-proven on form_02/04). Sister
+            // of the typeset.rs change so pagination & render agree. sb stays 0
+            // (SNU bakes sb into the cache delta). SNU sa==0 → no-op for SNU.
+            (0.0, raw_spacing_after)
         } else {
             (raw_spacing_before, raw_spacing_after)
         };

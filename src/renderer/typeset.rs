@@ -2335,8 +2335,17 @@ impl TypesetEngine {
         // consistent with the pagination decision (otherwise typeset
         // thinks a para is X px tall but layout draws it at X+13 → visible
         // bottom-of-page overflow).
+        // [Mindlogic 2026-06-01] trust-cache keeps paraPr spaceAfter.
+        // Probe-proven on form_02/form_04: the cached lineseg
+        // inter-paragraph delta == lh+ls (sa is NOT baked into vertical_pos),
+        // yet Hancom renders lh+ls+sa (form_02 body gaps 28pt vs rhwp 18pt).
+        // The earlier 5870b034 zeroed sa to stabilise page COUNT, but that
+        // dropped the 10pt Hancom actually draws → the wild "form_*" tight-
+        // spacing cluster. SNU docs carry sa==0, so keeping sa is a no-op for
+        // them (gate-safe by construction). sb stays zeroed: SNU bakes sb into
+        // the cache delta, so un-zeroing it would double-count.
         let (spacing_before, spacing_after) = if trust_cache {
-            (0.0, 0.0)
+            (0.0, spacing_after)
         } else {
             (spacing_before, spacing_after)
         };
