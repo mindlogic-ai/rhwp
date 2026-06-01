@@ -61,19 +61,23 @@ appropriate to blind-land unattended, which is precisely why they're the residua
 
 ## Recommended next targets (for a SUPERVISED session, in order of tractability)
 
-1. **large_01 in-cell height (best mechanism — but suspect #1 already DISPROVEN this
-   session).** Probed with RHWP_CELLPIC_DIAG: adding `non_inline_h` in the
-   `has_nested_table_in_cell` branch (height_measurer.rs:872) is WRONG — double-counts.
-   `vpos_based` (last lineseg vpos+lh) ALREADY captures the TopAndBottom pic's flow space
-   (para_tops show vpos jumps past pics; non_inline mostly 0.0; where 159, vpos_based is
-   already binding). Most cells already grow ABOVE declared. The real −2 is a SUBTLE
-   residual: the one cell measuring UNDER declared is **pi=66 (content 815.1 < declared
-   854.7)** — likely `vpos_based` under-captures ~27px when a pic is the cell's TRAILING
-   content (no lineseg after it to push vpos past the pic). NEXT (dedicated session):
-   per-table compare rhwp cell content_height to Hancom's ACTUAL cell y-extent from the
-   SVG; focus pi=66 + any cell whose LAST control is a TopAndBottom pic. Also suspect #2
-   (untested): SQUARE-wrap pics dropped by `measure_non_inline_controls_height` (line 478,
-   TopAndBottom-only). vpos_based edge-case surgery on the shared path — NOT a ~3-build fix.
+1. **large_01 — SUPERVISED ATTEMPT made (2026-06-02); diagnosis now sharp, no safe fix
+   landed.** look.py: 2 slip points (p15, p19), both the same class — rhwp packs a tall
+   diagram-table + the FOLLOWING table onto one page where Hancom breaks after the diagram.
+   Slip 1 = rhwp splits table pi=67 (org-chart flowchart) onto p15+p16 while Hancom keeps
+   it whole on p16; the room comes from pi=66 (the L·I·F·E triangle 2x2 table). CELLINV
+   probe: pi=66 row1 = 2 nested TAC tables + a **315.7px treat_as_char TopAndBottom triangle
+   pic**; content 815.1 < declared 854.7 → row floored at declared 854.7 (rhwp already uses
+   the full declared height — NOT a gross under-measure; suspect #1 stays disproven).
+   DECISIVE: Hancom renders pi=66 row1 **~78px TALLER** (fills ~the whole 933px page) — that
+   slack is exactly what rhwp uses to start pi=67. So it's a HEIGHT-GROWTH divergence, not
+   split-policy. Growth SOURCE still ambiguous (3 candidates: pic intrinsic>declared / nested
+   tables taller in Hancom / cached element positions under-stating re-flow spacing — do NOT
+   assume width-fit, the pic is treat_as_char/inline). NEXT (focused follow-up, free first):
+   measure each in-cell element's y-extent in Hancom p15 PDF vs rhwp p15 SVG to see WHICH
+   grows, then probe that element's dims. Fix is on the shared cell-height path → high-blast,
+   gate + multi-table-doc visual pass. ~2-3 more builds; a focused follow-up, NOT a blind land.
+   (Full detail in the `large01-cell-undermeasure` memory.)
 2. **report_form vpos-snap rejection.** Instrument `applied=false` cause on its
    lazy-path body paras; if the rejection is a narrow backward-clamp/lazy-base
    under-computation (not the sb route), a targeted vpos_adjust fix may land with a
