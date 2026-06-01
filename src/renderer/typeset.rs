@@ -4280,23 +4280,28 @@ impl TypesetEngine {
                     //       40%-full continuation page, cascading every later page +1.
                     // A mid-size row (e.g. 25% of avail) that overflows by a
                     // MEANINGFUL amount is NOT absorbed via (a)/(b): the page filled
-                    // from OTHER rows and the natural break is before it (doc 13 keeps
-                    // such a row on the next page, as Hancom does). The fraction keys on
-                    // row-vs-remaining-space geometry, never on document content.
+                    // from OTHER rows and the natural break is before it. The fraction
+                    // keys on row-vs-remaining-space geometry, never on document content.
                     //   (c) But ANY final row that overflows by only a sub-line rounding
-                    //       amount (≤3px) is kept regardless of size — a pure rounding
+                    //       amount (≤4px) is kept regardless of size — a pure rounding
                     //       spill, far tighter than (a)/(b)'s 2%-of-avail tolerance, so
                     //       it cannot absorb a row that genuinely doesn't fit. form_07
                     //       pi=71: a 112px (30%-of-avail) row spilled the 110.5px
                     //       remaining space by 1.6px and was stranded on a near-empty
                     //       continuation page; Hancom keeps it (13→11... +2 fixed).
+                    //       doc 13 (서식1 심사평가표, sec 2): a 221.7px (25%-of-avail)
+                    //       signature row spilled the 896.9px remainder by exactly 3.1px
+                    //       and was orphaned to a second page; Hancom fits the whole form
+                    //       (header 30 + table 900 = 930 < 933.5 body) on ONE page. The
+                    //       3px cutoff missed it by 0.1px, so it is widened to 4px — still
+                    //       deep sub-line rounding (0.45% of avail), gate-verified safe.
                     // The corpus gate guards any page-count move past these thresholds.
                     let row_fits_tightly = row_total <= avail_for_rows * 0.15
                         || row_total >= avail_for_rows * 0.85;
                     let row_overflow = consumed + cs_before + row_total - avail_for_rows;
                     if r + 1 == row_count
                         && ((row_fits_tightly && row_overflow <= avail_for_rows * 0.02)
-                            || row_overflow <= 3.0)
+                            || row_overflow <= 4.0)
                     {
                         consumed += cs_before + row_total;
                         r += 1;
