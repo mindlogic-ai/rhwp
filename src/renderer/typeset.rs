@@ -133,6 +133,9 @@ struct TypesetState {
     /// [Task #359] 다음 pi 가 vpos-reset 가드를 발동할 예정 → 현재 pi 의 fit 안전마진 비활성화.
     /// 단독 항목 페이지 발생 차단용.
     skip_safety_margin_once: bool,
+    /// [Mindlogic] 직전에 flush 된 페이지의 used_height (px). near-empty vpos-reset
+    /// 가드가 "직전 페이지가 가득 찼는가(=spillover orphan)" 를 판정하는 데 사용.
+    prev_flushed_used_height: f64,
     /// [Task #1007] HWP3-origin HWP5 변환본 여부 — widow 방지 등 variant-specific
     /// behavior 분기에 사용.
     is_hwp3_variant: bool,
@@ -308,6 +311,7 @@ impl TypesetState {
             on_first_multicolumn_page: false,
             pending_body_wide_top_reserve: 0.0,
             skip_safety_margin_once: false,
+            prev_flushed_used_height: 0.0,
             is_hwp3_variant: false,
             hide_empty_line: false,
             hidden_empty_lines: 0,
@@ -373,6 +377,9 @@ impl TypesetState {
         if self.current_items.is_empty() && self.current_column_wrap_around_paras.is_empty() {
             return;
         }
+        // [Mindlogic] 단일 단에서는 flush_column 1회 = 1페이지 완료. 직전 페이지의
+        // 채움 높이를 기록해 near-empty vpos-reset 가드가 spillover 여부를 판정한다.
+        self.prev_flushed_used_height = self.current_height;
         let col_content = ColumnContent {
             column_index: self.current_column,
             items: std::mem::take(&mut self.current_items),
@@ -1113,7 +1120,35 @@ impl TypesetEngine {
                             st.wrap_around_any_seg = false;
                         }
                         if st.wrap_around_cs < 0 {
-                            st.advance_column_or_new_page();
+                            // === [Mindlogic patch — near-empty vpos-reset guard (med_03 48→47)] ===
+                            // A vpos-reset normally encodes Hancom's intended page break. But when
+                            // the current page holds only a small orphaned tail (a few lines that
+                            // overflowed off the prior page by a sub-line amount), forcing the break
+                            // here manufactures a near-empty page Hancom never produces — Hancom fit
+                            // that tail on the prior page, so its new region begins a fresh full
+                            // page. In that single-column near-empty case, let the new region flow
+                            // onto the current page (re-anchoring the vpos cursor) instead.
+                            // Orphan spillover signature, three structural conditions:
+                            //   (a) near_empty   — the current page holds only a small tail;
+                            //   (b) prior_full   — the *prior* page was nearly full, so this tail
+                            //                       overflowed off a full page (a genuine spillover),
+                            //                       not an intentionally short page (cover/section)
+                            //                       that Hancom keeps separate;
+                            //   (c) reset para has visible text — the new region begins with real
+                            //       content. When the reset paragraph is an empty spacer (med_02
+                            //       pi=63), Hancom places it at the top of a fresh page (a real
+                            //       break), so we must NOT merge. (a)+(b) overlap between orphans
+                            //       and med_02's legit breaks; (c) is what tells them apart.
+                            let avail = st.available_height();
+                            let near_empty = st.col_count == 1
+                                && st.current_height > 0.0
+                                && st.current_height < avail * 0.2;
+                            let prior_full = st.prev_flushed_used_height >= avail * 0.85;
+                            if near_empty && prior_full && para_has_visible_text(para) {
+                                st.reset_vpos_cursor();
+                            } else {
+                                st.advance_column_or_new_page();
+                            }
                         }
                     }
                 }
