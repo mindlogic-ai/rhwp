@@ -4229,9 +4229,42 @@ impl LayoutEngine {
             } else {
                 0.0
             };
+            // [Mindlogic 2026-06-01 photo-cell row-height] a block picture is
+            // rendered CLAMPED into the cell box, so a whole-row picture cell's
+            // rendered height is its stored cell.height — NOT the raw picture
+            // height the unit sum reports (meeting/15: photo row content 277.9px
+            // vs Hancom cell.height 204.6px → +1 phantom page). For picture cells
+            // with a valid stored height, trust cell.height. Text cells keep the
+            // reflow-safe max(content, cell_h) (text legitimately exceeds the
+            // stored height when rhwp wraps to more lines than Hancom).
+            let cell_has_picture = cell
+                .paragraphs
+                .iter()
+                .flat_map(|p| &p.controls)
+                .any(|c| matches!(c, Control::Picture(_)));
+            // A picture clamped INTO its cell over-measures by a substantial but
+            // BOUNDED amount (meeting/15: +73px, 1.36×). Two other regimes must NOT
+            // clamp: a picture rendering at ~native height where the cell barely
+            // grew (form_27: +9.6px, 1.06× — clamping loses a page), and a text-
+            // dominated cell with a small embedded picture (form_25: 24× — cell_h
+            // is stale, content is the real reflow height). So require a meaningful
+            // absolute excess AND a bounded ratio. Thresholds are geometry, not
+            // content (no fingerprint): 30px ≈ one+ text line; 2× = "picture, not
+            // a grown text cell."
+            const CLAMP_MIN_EXCESS_PX: f64 = 30.0;
+            const CLAMP_MAX_RATIO: f64 = 2.0;
+            let want = content + pad_cell;
+            let clamp_picture = cell_has_picture
+                && cell_h_px > 0.0
+                && want > cell_h_px + CLAMP_MIN_EXCESS_PX
+                && want <= cell_h_px * CLAMP_MAX_RATIO;
             let h = if is_whole_row {
-                // HeightMeasurer required_height + row 단계 1 cell.height max 정합.
-                (content + pad_cell).max(cell_h_px)
+                if clamp_picture {
+                    cell_h_px
+                } else {
+                    // HeightMeasurer required_height + row 단계 1 cell.height max 정합.
+                    (content + pad_cell).max(cell_h_px)
+                }
             } else {
                 // 분할 행 — cell.height 강제 없음.
                 content + pad_cell
