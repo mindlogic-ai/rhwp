@@ -1,0 +1,56 @@
+diff --git a/src/renderer/height_cursor.rs b/src/renderer/height_cursor.rs
+index 4a0e172e..15547f8f 100644
+--- a/src/renderer/height_cursor.rs
++++ b/src/renderer/height_cursor.rs
+@@ -174,6 +174,42 @@ impl HeightCursor {
+             .and_then(|p| styles.para_styles.get(p.para_shape_id as usize))
+             .map(|ps| ps.spacing_before)
+             .unwrap_or(0.0);
++        // [Mindlogic 2026-06-01 — cache-gap aware sb pre-deduction] ===========
++        // vpos_corrected_end_y pre-deducts curr_sb from the cached position,
++        // assuming the render path re-adds spacing_before. Trust-cache paragraphs
++        // render with spacing_before=0, so the pre-deduction is only correct when
++        // Hancom's cache encoded the gap INLINE (curr_first_vpos already sits where
++        // the paragraph starts after sb). When the cache instead leaves an explicit
++        // gap (curr_first_vpos ≈ prev_vpos_end + curr_sb), pre-deducting curr_sb
++        // double-removes it → paragraph renders curr_sb px too high → short inter-
++        // para gaps + under-pagination (report_form 5v6, gaps −13.3/−8px). Detect
++        // that structurally and skip the pre-deduction for the gap case only.
++        // Continuous-cache docs (gap ≈ 0, e.g. form_04 / SNU curr_sb≈0) are
++        // unchanged. Shared by typeset + render (both call vpos_adjust), so they
++        // stay consistent by construction.
++        let cache_gap_px = match curr_first_vpos {
++            Some(v) if v > prev_vpos_end => {
++                crate::renderer::hwpunit_to_px(v - prev_vpos_end, self.dpi)
++            }
++            _ => 0.0,
++        };
++        // Skip the pre-deduction when the cache left a real inter-paragraph gap
++        // (curr_first_vpos sits a positive distance below prev_vpos_end). In that
++        // case the cached position already encodes the spaceBefore, so deducting
++        // curr_sb (which the trust-cache render never re-adds) would double-remove
++        // it → short gaps + under-pagination (report_form 5v6). Continuous-cache
++        // docs (gap≈0, form_04/SNU) keep the existing pre-deduction unchanged.
++        // Cap at 24px: a real spaceBefore gap is small (report_form bullets 8–13px).
++        // A larger curr_first_vpos−prev_vpos_end is a region/group jump, not sb;
++        // skipping the pre-deduction there shifts content down and overflows
++        // (form_24/org_diagnosis). So fire only for small sb-magnitude gaps.
++        let effective_sb = if curr_sb > 0.0 && cache_gap_px >= curr_sb * 0.5 && cache_gap_px <= 24.0
++        {
++            0.0
++        } else {
++            curr_sb
++        };
++        // === [/Mindlogic patch] =============================================
+         // [Task #874 #8] stale table-host(TopAndBottom+vert=Para) 판정.
+         let curr_has_topbottom_para_table = paragraphs
+             .get(item_para)
+@@ -194,7 +230,7 @@ impl HeightCursor {
+             self.col_area_height,
+             vpos_end,
+             base,
+-            curr_sb,
++            effective_sb,
+             y_offset,
+             curr_has_topbottom_para_table,
+             self.skip_spacing_before_prededuct,

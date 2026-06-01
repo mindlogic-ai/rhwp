@@ -1,0 +1,29 @@
+# doc	kind	tier	hancom_pages	rhwp_pages	note
+# tier:
+#   quick  = first pass, manageable visual/debug loop
+#   medium = useful but likely shared drift/table path or longer visual review
+#   giant  = skip until simple gains are exhausted
+15_3740450_research_admin_innovation_meeting_template	snu	quick	5	6	photo-grid/page-count; manageable SNU regression target
+20_3727659_resume_2605_ai	snu	quick	1	1	one-page visual/overflow sanity check
+accountability_eval	samples	quick	11	4	severe table row-height/line-height under-measure
+form_01______________49KB	wild	quick	2	2	tight spacing/table row visual drift
+form_04______________15KB	wild	quick	3	3	short form visual drift check
+form_07_______________41KB	wild	quick	11	13	page-count drift but still small enough for first pass
+form_15_____________59KB	wild	quick	3	3	short table/form visual drift check
+form_17_______________81KB	wild	quick	9	9	page-count OK; verify visual drift before deeper fixes
+med_02____2_4MB	wild	quick	6	6	line-height/float-flow candidate; manageable page count
+meeting	wild	quick	5	6	image pagination/page-count drift
+meeting_summary	samples	quick	3	3	line-height drift, short doc
+overseas_training	samples	quick	4	4	row-height/line-height drift, short doc
+report_form	samples	quick	6	5	under-paginates; short high-signal doc
+tiny_03_______38KB	wild	quick	3	3	short visual sanity check
+05_3781559_medschool_car_2bu_je_plan	snu	quick	4	4	SNU known-good/visual guard in focus set
+form_22____________________270KB	wild	medium	37	38	longer cumulative drift; defer until quick cluster moves
+form_24_____4MB	wild	medium	84	84	long page-count OK visual drift; expensive review
+form_27_______________58MB	wild	medium	8	8	large file despite short page count; review after quick pass
+13_3763367_k_star_visa_track_plan	snu	medium	19	20	K-STAR table drift/page-count; high-value but complex
+09_3766093_natural_sci_planning_committee_260527	snu	giant	51	54	long agenda; known trap/intentional short-page risk
+huge_01_DNA________33MB	wild	giant	41	46	giant cumulative drift
+huge_02_DNA_______75MB	wild	giant	67	73	giant cumulative drift
+large_01_____________16MB	wild	giant	39	37	large under-paginate + overflow markers
+med_03____________4MB	wild	giant	47	48	long cumulative drift

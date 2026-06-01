@@ -3147,8 +3147,36 @@ impl TypesetEngine {
             fmt.total_height
         };
 
+        // [Mindlogic patch — tac-host pre-reset flush height (form_22 +1)]
+        // When a single-TAC host paragraph carries an intra-paragraph vpos-reset
+        // (a later line restarts at vpos 0 = Hancom places it on the next page),
+        // the flush decision must weigh only the PRE-RESET height (the table
+        // line), not the full paragraph height_for_fit. The post-reset trailing
+        // line breaks to the next page regardless, so counting it forces the
+        // whole (fitting) table off a page that has room — under-filling it and
+        // manufacturing a +1 (form_22 p28→p29: table 358.5px fits the 368px
+        // remainder, but an 8px trailing reset-line pushed h_for_fit to 376.4 and
+        // flushed everything). Structural signal only — keys on a lineseg whose
+        // vertical_pos resets to 0, never on document content.
+        let flush_height = if has_tac && tac_count == 1 && st.col_count == 1 {
+            let reset_line = para
+                .line_segs
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, s)| s.vertical_pos == 0 && !is_synthetic_line_seg(s))
+                .map(|(i, _)| i);
+            match reset_line {
+                Some(k) if k > 0 && k <= fmt.line_heights.len() => {
+                    fmt.line_advances_sum(0..k).max(0.0)
+                }
+                _ => height_for_fit,
+            }
+        } else {
+            height_for_fit
+        };
         // 넘치면 flush (단일 TAC 표만)
-        if st.current_height + height_for_fit > st.available_height()
+        if st.current_height + flush_height > st.available_height()
             && !st.current_items.is_empty()
             && has_tac
             && tac_count <= 1
