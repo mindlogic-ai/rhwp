@@ -4250,18 +4250,25 @@ impl TypesetEngine {
                     //       (fit-to-print). doc 07: a 377px opinion-box content row
                     //       (93% of avail) overflowed by 5.1px and was stranded on a
                     //       40%-full continuation page, cascading every later page +1.
-                    // A mid-size row (e.g. 25% of avail) that overflows is NOT
-                    // absorbed: the page filled from OTHER rows and the natural break
-                    // is before it (doc 13 keeps such a row on the next page, as
-                    // Hancom does). The fraction keys on row-vs-remaining-space
-                    // geometry, never on document content; the corpus gate guards any
-                    // page-count move past these thresholds.
+                    // A mid-size row (e.g. 25% of avail) that overflows by a
+                    // MEANINGFUL amount is NOT absorbed via (a)/(b): the page filled
+                    // from OTHER rows and the natural break is before it (doc 13 keeps
+                    // such a row on the next page, as Hancom does). The fraction keys on
+                    // row-vs-remaining-space geometry, never on document content.
+                    //   (c) But ANY final row that overflows by only a sub-line rounding
+                    //       amount (≤3px) is kept regardless of size — a pure rounding
+                    //       spill, far tighter than (a)/(b)'s 2%-of-avail tolerance, so
+                    //       it cannot absorb a row that genuinely doesn't fit. form_07
+                    //       pi=71: a 112px (30%-of-avail) row spilled the 110.5px
+                    //       remaining space by 1.6px and was stranded on a near-empty
+                    //       continuation page; Hancom keeps it (13→11... +2 fixed).
+                    // The corpus gate guards any page-count move past these thresholds.
                     let row_fits_tightly = row_total <= avail_for_rows * 0.15
                         || row_total >= avail_for_rows * 0.85;
+                    let row_overflow = consumed + cs_before + row_total - avail_for_rows;
                     if r + 1 == row_count
-                        && row_fits_tightly
-                        && consumed + cs_before + row_total - avail_for_rows
-                            <= avail_for_rows * 0.02
+                        && ((row_fits_tightly && row_overflow <= avail_for_rows * 0.02)
+                            || row_overflow <= 3.0)
                     {
                         consumed += cs_before + row_total;
                         r += 1;
