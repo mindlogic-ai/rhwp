@@ -1,14 +1,14 @@
 # doc	rhwp	hancom	category	status	notes
 # status: pending | blocked | done    category drives strategy
-13_3763367_k_star_visa_track_plan	20	19	overflow+drift	pending	5.1px overflow P1; -32/-33 top tables
-form_07_______________41KB	13	11	cumulative-drift	pending	para=64 table NOT the cause (Hancom renders equally tall, verified)
-form_22____________________270KB	38	37	cumulative-drift	pending	tiny mixed per-page diffs accumulate
-med_03____________4MB	48	47	metric-lie	pending	needs drift.py truth signal, not dump-pages
-09_3766093_natural_sci_planning_committee_260527	53	51	metric-lie+cover	pending	prior wrong-fix reverted; cover float overlap is separate
-huge_01_DNA________33MB	46	41	cumulative-drift	pending	same family as form_07
-huge_02_DNA_______75MB	73	67	cumulative-drift	pending	same family
-15_3740450_research_admin_innovation_meeting_template	6	5	image-pagination	pending	identical render to meeting
-meeting	6	5	image-pagination	pending	p3/p4 image-heavy
-report_form	5	6	under-paginate	pending	rhwp packs more than Hancom
-large_01_____________16MB	37	39	under-paginate	pending	7 overflow markers
-accountability_eval	4	11	needs-feature	blocked	wide-table reflow: Hancom width-fits+re-wraps; rhwp draws literal. Needs NEW capability, not a fix.
+huge_01_DNA________33MB	41	41	cumulative-drift	done	FIXED 8ca24c17 near-empty vpos-reset orphan 46->41
+huge_02_DNA_______75MB	67	67	cumulative-drift	done	FIXED 8ca24c17 73->67
+med_03____________4MB	47	47	metric-lie	done	FIXED 8ca24c17 48->47
+15_3740450_research_admin_innovation_meeting_template	5	5	image-pagination	done	FIXED cb43772c photo-cell row-height 6->5
+meeting	5	5	image-pagination	done	FIXED cb43772c 6->5
+09_3766093_natural_sci_planning_committee_260527	51	51	metric-lie+cover	done	page-count 53->51 (8ca24c17). RESIDUAL render-only: cover 보고사항 float overlap (separate from page-count; needs a VISUAL gate, tractable next target)
+form_07_______________41KB	12	11	cache-divergence	blocked	13->12 landed 48f310ab (sub-line last-row). residual +1 = rhwp honors INFLATED cached common_h (397 vs content 277); cache-divergence not geometry. See table-rowheight-drift-cluster memory.
+form_22____________________270KB	38	37	cache-divergence	blocked	cumulative ~9px drift + vpos-reset on stacked page; render matches at suspected page. cache-fidelity not geometry.
+large_01_____________16MB	37	39	cache-divergence	blocked	PROVEN trust-cache path (measure_table_impl never fires); cached linesegs UNDER-state grouped-diagram height. cache-fidelity not geometry.
+report_form	5	6	cache-divergence	blocked	under-paginate; cache-staleness known-stuck. See report-form-sb-zeroing memory.
+13_3763367_k_star_visa_track_plan	19	19	source-mismatch	blocked	look.py renders 19=19 (oracle). gate counts 20 via source_converted.hwpx (HWP-binary vs converted paginate differently). measurement artifact not a render bug.
+accountability_eval	4	11	needs-feature	blocked	wide-table reflow: Hancom width-fits+re-wraps; rhwp draws literal. Needs NEW width-fit capability not a fix.
