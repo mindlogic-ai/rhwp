@@ -186,6 +186,40 @@ impl HeightCursor {
                 })
             })
             .unwrap_or(false);
+        // === [Mindlogic — trust-cache: don't pre-deduct sb the render never re-adds] ===
+        // vpos_corrected_end_y subtracts curr_sb from the cached target, assuming the
+        // render path re-applies spacing_before. But trust-cache render ZEROES sb, so
+        // every corrected para lands curr_sb px too high → the visible ~12% line/row
+        // tightening (report_form, overseas_training). Skip the pre-deduction ONLY when
+        // the cached inter-paragraph gap demonstrably reserved this para's sb (deficit ≈
+        // sb, pure text→text). form_24's deficit≈0 gaps fail the test → unchanged.
+        // Purely structural (cached geometry vs declared sa); no doc-content branch.
+        let reserved_sb_skip_pd = {
+            let controls_clear = paragraphs
+                .get(item_para)
+                .map(|p| p.controls.is_empty())
+                .unwrap_or(false)
+                && prev_para.controls.is_empty();
+            if controls_clear && curr_sb > 0.0 {
+                match curr_first_vpos {
+                    Some(cfv) if cfv > prev_vpos_end => {
+                        let gap_px = crate::renderer::hwpunit_to_px(cfv - prev_vpos_end, self.dpi);
+                        let prev_sa = styles
+                            .para_styles
+                            .get(prev_para.para_shape_id as usize)
+                            .map(|ps| ps.spacing_after)
+                            .unwrap_or(0.0);
+                        let deficit = gap_px - prev_sa;
+                        deficit > 3.0 && deficit < 60.0
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        };
+        let skip_prededuct = self.skip_spacing_before_prededuct || reserved_sb_skip_pd;
+        // === [/Mindlogic patch] ===
         // [Task #1027 Stage A] 공유 클램프 함수.
         let (end_y, applied) = vpos_corrected_end_y(
             is_page_path,
@@ -197,7 +231,7 @@ impl HeightCursor {
             curr_sb,
             y_offset,
             curr_has_topbottom_para_table,
-            self.skip_spacing_before_prededuct,
+            skip_prededuct,
             self.dpi,
         );
         if std::env::var("RHWP_VPOS_DEBUG").is_ok() {

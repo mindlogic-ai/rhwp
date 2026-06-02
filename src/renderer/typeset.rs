@@ -1559,8 +1559,40 @@ impl TypesetEngine {
                     .get(st.current_column as usize)
                     .map(|a| a.width)
                     .unwrap_or(st.layout.body_area.width);
-                let formatted =
+                let mut formatted =
                     self.format_paragraph(para, composed.get(para_idx), styles, Some(col_w));
+                // === [Mindlogic — trust-cache: restore reserved sb into fit height] ===
+                // Sister of the height_cursor pre-deduction skip. trust-cache zeroes
+                // spacing_before, so the fit estimate is too short and list/form docs
+                // under-paginate (report_form 5/6). When the NEXT para's cached first_vpos
+                // sits a meaningful amount below this para's cached bottom + kept sa (same
+                // band, pure text→text), add that reserved deficit back into the fit
+                // height. Same structural discriminator as the render side → they agree.
+                // deficit≈0 docs (SNU, form_24) untouched; can't make a page airier than
+                // Hancom's own cache shows.
+                if let (Some(last), Some(next_first)) = (
+                    para.line_segs.last(),
+                    paragraphs
+                        .get(para_idx + 1)
+                        .filter(|p| p.controls.is_empty())
+                        .and_then(|p| p.line_segs.first()),
+                ) {
+                    if para.controls.is_empty() {
+                        let this_bottom_hu =
+                            last.vertical_pos + last.line_height + last.line_spacing;
+                        let gap_hu = next_first.vertical_pos - this_bottom_hu;
+                        if gap_hu > 0 {
+                            let reserved =
+                                hwpunit_to_px(gap_hu, self.dpi) - formatted.spacing_after;
+                            if reserved > 3.0 && reserved < 60.0 {
+                                formatted.spacing_after += reserved;
+                                formatted.total_height += reserved;
+                                formatted.height_for_fit += reserved;
+                            }
+                        }
+                    }
+                }
+                // === [/Mindlogic patch] ===
                 let is_last_in_section = para_idx + 1 == paragraphs.len();
                 // [Task #1027 Stage D] fit 직전 vpos 스냅으로 누적 drift 제거 (렌더러 정합).
                 self.vpos_snap_current_height(&mut st, para_idx, paragraphs, styles);

@@ -1,0 +1,131 @@
+diff --git a/src/renderer/mod.rs b/src/renderer/mod.rs
+index 16c7933a..250f396e 100644
+--- a/src/renderer/mod.rs
++++ b/src/renderer/mod.rs
+@@ -572,13 +572,26 @@ pub fn corrected_line_height(
+     ls_val: f64,
+ ) -> f64 {
+     if max_fs > 0.0 && raw_lh < max_fs {
+-        match ls_type {
++        let out = match ls_type {
+             LineSpacingType::Percent => max_fs * ls_val / 100.0,
+             LineSpacingType::Fixed => ls_val.max(max_fs),
+             LineSpacingType::SpaceOnly => max_fs + ls_val,
+             LineSpacingType::Minimum => ls_val.max(max_fs),
++        };
++        if std::env::var("RHWP_LH_DIAG").is_ok() {
++            eprintln!(
++                "LH_FALLBACK ls_type={:?} raw_lh={:.2} max_fs={:.2} ls_val={:.1} -> out={:.2}",
++                ls_type, raw_lh, max_fs, ls_val, out
++            );
+         }
++        out
+     } else {
++        if std::env::var("RHWP_LH_DIAG").is_ok() {
++            eprintln!(
++                "LH_PASSTHRU ls_type={:?} raw_lh={:.2} max_fs={:.2} ls_val={:.1}",
++                ls_type, raw_lh, max_fs, ls_val
++            );
++        }
+         raw_lh
+     }
+ }
+diff --git a/src/renderer/typeset.rs b/src/renderer/typeset.rs
+index 35ca492c..7f68889c 100644
+--- a/src/renderer/typeset.rs
++++ b/src/renderer/typeset.rs
+@@ -1559,8 +1559,48 @@ impl TypesetEngine {
+                     .get(st.current_column as usize)
+                     .map(|a| a.width)
+                     .unwrap_or(st.layout.body_area.width);
+-                let formatted =
++                let mut formatted =
+                     self.format_paragraph(para, composed.get(para_idx), styles, Some(col_w));
++                // === [Mindlogic patch — trust-cache: restore reserved sb (fit height)] ===
++                // Trust-cache zeroes spacing_before (5870b034) on the premise the
++                // cached vpos delta already embodies it. That premise holds when the
++                // cached inter-paragraph gap == this para's kept sa (deficit≈0, e.g.
++                // SNU). It FAILS on wild list/form docs where Hancom's cache reserves
++                // sa + sb (deficit≈sb>0) but rhwp's fit-height drops the sb, so more
++                // paragraphs fit per page and the doc under-paginates (report_form 5/6).
++                // Fix: when the NEXT paragraph's cached first_vpos sits a meaningful
++                // amount below this para's cached bottom + kept sa (same vpos band, not
++                // a reset), add that reserved deficit back into the fit height. Purely
++                // structural (cached geometry only); deficit≈0 docs are untouched, so
++                // it can never make a page airier than Hancom's own cache shows.
++                let next_para = paragraphs.get(para_idx + 1);
++                // Only pure text→text gaps carry sb. If either paragraph anchors a
++                // control (table/picture/shape), the cached vpos gap includes that
++                // object's height, not paragraph spacing — restoring it as sb would
++                // phantom-inflate (doc13 k_star_visa_track_plan 19->21 regression).
++                let gap_is_pure_text = para.controls.is_empty()
++                    && next_para.map(|p| p.controls.is_empty()).unwrap_or(false);
++                if let (true, Some(last), Some(next_first)) = (
++                    gap_is_pure_text,
++                    para.line_segs.last(),
++                    next_para.and_then(|p| p.line_segs.first()),
++                ) {
++                    let this_bottom_hu =
++                        last.vertical_pos + last.line_height + last.line_spacing;
++                    let gap_hu = next_first.vertical_pos - this_bottom_hu;
++                    if gap_hu > 0 {
++                        let gap_px = hwpunit_to_px(gap_hu, self.dpi);
++                        let reserved = gap_px - formatted.spacing_after;
++                        // 3px floor avoids reacting to rounding; 60px ceiling avoids
++                        // absorbing a genuine large structural gap (cover spacers etc).
++                        if reserved > 3.0 && reserved < 60.0 {
++                            formatted.spacing_after += reserved;
++                            formatted.total_height += reserved;
++                            formatted.height_for_fit += reserved;
++                        }
++                    }
++                }
++                // === [/Mindlogic patch] ===
+                 let is_last_in_section = para_idx + 1 == paragraphs.len();
+                 // [Task #1027 Stage D] fit 직전 vpos 스냅으로 누적 drift 제거 (렌더러 정합).
+                 self.vpos_snap_current_height(&mut st, para_idx, paragraphs, styles);
+@@ -2485,6 +2525,44 @@ impl TypesetEngine {
+                 st.current_height, available,
+             );
+ 
++            // [SBSA discriminator probe] cached inter-paragraph gap vs declared sb/sa.
++            // gap = next_para.first_seg.vpos - (this.last_seg.vpos + lh + ls).
++            // If gap≈0 → Hancom did NOT bake sb/sa into vpos (rhwp must add them).
++            // If gap≈(this.sa + next.sb) → fully baked (zeroing both is correct).
++            if std::env::var("RHWP_SBSA_DIAG").is_ok() {
++                if let (Some(last), Some(next)) = (
++                    para.line_segs.last(),
++                    paragraphs
++                        .get(para_idx + 1)
++                        .and_then(|p| p.line_segs.first()),
++                ) {
++                    // Hancom's inter-paragraph gap (from cached vpos) vs what rhwp
++                    // renders (this para's kept sa; next para's sb is zeroed for
++                    // trust_cache). deficit = the space Hancom drew that rhwp dropped.
++                    let this_bottom_hu =
++                        last.vertical_pos + last.line_height + last.line_spacing;
++                    let gap_hu = next.vertical_pos - this_bottom_hu;
++                    let gap_px = crate::renderer::hwpunit_to_px(gap_hu, self.dpi);
++                    let deficit = gap_px - fmt.spacing_after;
++                    let next_p = paragraphs.get(para_idx + 1);
++                    let next_empty = next_p
++                        .map(|p| p.text.trim().is_empty())
++                        .unwrap_or(true);
++                    let next_lines = next_p.map(|p| p.line_segs.len()).unwrap_or(0);
++                    let next_ctrls = next_p.map(|p| p.controls.len()).unwrap_or(0);
++                    // does THIS para's last seg sit at a vpos-reset (multi-band) boundary?
++                    let this_vreset = para
++                        .line_segs
++                        .windows(2)
++                        .any(|w| w[1].vertical_pos < w[0].vertical_pos);
++                    eprintln!(
++                        "SBSA_GAP: pi={} sa={:.1} gap={:+.1} deficit={:+.1} next_empty={} next_lines={} next_ctrls={} this_vreset={}",
++                        para_idx, fmt.spacing_after, gap_px, deficit,
++                        next_empty, next_lines, next_ctrls, this_vreset,
++                    );
++                }
++            }
++
+             // 옵션: per-line 분해 (LINE_SEG 와 비교)
+             if std::env::var("RHWP_TYPESET_DRIFT_LINES").is_ok() {
+                 for (li, (lh, ls)) in fmt
