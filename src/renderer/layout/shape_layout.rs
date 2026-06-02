@@ -1795,10 +1795,33 @@ impl LayoutEngine {
             return;
         }
 
+        // 글상자 번호 카운터는 본문 흐름과 독립(별도 프레임)이어야 한다. 글상자 문단의
+        // 번호 전진이 본문 NUMBER/Outline 시퀀스를 밀지 않도록, 적용 전후로 상태를 보존·복원.
+        let saved_numbering_state = self.numbering_state.borrow().clone();
         let mut composed_paras: Vec<_> = text_box.paragraphs[..para_count]
             .iter()
-            .map(|p| compose_paragraph(p))
+            .map(|p| {
+                // [Mindlogic patch — 글상자 문단 자동 번호(NUMBER/Outline) 머리표]
+                // 본문 경로는 apply_paragraph_numbering 으로 NUMBER/Outline heading 의 "1." "2."
+                // 머리표를 붙이지만, 글상자 텍스트 경로는 compose_paragraph 만 호출해 번호가
+                // 누락됐다 (wc03: 글상자 안 NUMBER heading 의 1./2. 미표시). 본문과 동일하게
+                // 번호를 계산하되, 글상자 렌더 경로가 numbering_text 필드를 그리지 않으므로
+                // 번호를 첫 줄 첫 run 앞에 직접 합쳐 일반 텍스트로 그려지게 한다. 구조(head_type)
+                // 기반 — 문서 내용 비의존. head_type=None 문단은 무변화.
+                let base = compose_paragraph(p);
+                let mut comp = self
+                    .apply_paragraph_numbering(Some(&base), p, styles, 0)
+                    .unwrap_or(base);
+                if let Some(num) = comp.numbering_text.take() {
+                    if let Some(first_run) = comp.lines.first_mut().and_then(|l| l.runs.first_mut())
+                    {
+                        first_run.text = format!("{}{}", num, first_run.text);
+                    }
+                }
+                comp
+            })
             .collect();
+        *self.numbering_state.borrow_mut() = saved_numbering_state;
 
         // AutoNumber(Page) 치환: 글상자 안의 쪽번호 필드를 현재 페이지 번호로 변환
         let current_pn = self.current_page_number.get();
