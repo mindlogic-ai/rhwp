@@ -2015,8 +2015,15 @@ fn parse_picture(
     // 이미지 속성 읽기
     let mut has_pos = false; // <pos> 파싱 여부 — <offset>이 덮어쓰지 않도록 방지
     let mut buf = Vec::new();
+    let mut pic_caption: Option<crate::model::shape::Caption> = None;
     loop {
         match reader.read_event_into(&mut buf) {
+            // [Mindlogic patch] <hp:caption> 파싱 — 표(table.caption)와 동일하게 그림에도
+            // 캡션을 채운다. 기존 parse_picture 는 caption 자식을 무시해 pic.caption=None →
+            // 인라인 그림 캡션이 전부 누락됐다 (wc32: 그림 "출처:…" 캡션 7개).
+            Ok(Event::Start(ref ce)) if local_name(ce.name().as_ref()) == b"caption" => {
+                pic_caption = Some(parse_table_caption(ce, reader)?);
+            }
             Ok(Event::Start(ref ce)) if local_name(ce.name().as_ref()) == b"imgRect" => {
                 parse_picture_img_rect(reader, &mut border_x, &mut border_y)?;
             }
@@ -2273,6 +2280,7 @@ fn parse_picture(
     pic.border_x = border_x;
     pic.border_y = border_y;
     pic.instance_id = picture_instance_id;
+    pic.caption = pic_caption;
 
     Ok(Control::Picture(Box::new(pic)))
 }
