@@ -4131,6 +4131,25 @@ impl LayoutEngine {
         // 렌더링 시 별도 TextRunNode로 생성하여 char_offset에 영향을 주지 않는다.
         let comp = composed?;
         let mut modified = comp.clone();
+        // === [Mindlogic patch — Number/Outline 머리표와 본문 사이 간격] ===
+        // 한컴은 "1. 본문" 처럼 개요/번호 머리표 뒤에 간격을 둔다. Bullet 경로는 이미
+        // text_distance 로 공백을 붙이지만(위), Outline/Number 경로는 누락돼 "1.본문" 으로
+        // 붙어 렌더됐다 (wb04/wb19: 모든 번호 항목이 번호-본문 밀착). 본문 첫 run 이 이미
+        // 공백으로 시작하지 않을 때만 공백을 추가해 이중 공백을 피한다. 구조(head_type) 기반.
+        let head_text = if matches!(para_style.head_type, HeadType::Outline | HeadType::Number)
+            && !head_text.ends_with(' ')
+            && !modified
+                .lines
+                .first()
+                .and_then(|l| l.runs.first())
+                .map(|r| r.text.starts_with(|c: char| c.is_whitespace()))
+                .unwrap_or(false)
+        {
+            format!("{} ", head_text)
+        } else {
+            head_text
+        };
+        // === [/Mindlogic patch] ===
         modified.numbering_text = Some(head_text);
 
         Some(modified)
