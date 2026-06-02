@@ -4838,7 +4838,47 @@ impl LayoutEngine {
                                 .get(para_style_id)
                                 .map(|s| s.alignment)
                                 .unwrap_or(Alignment::Left);
-                            let pic_y = tac_effective_anchor;
+                            // === [Mindlogic patch — stack TopAndBottom para-floats sharing an anchor] ===
+                            // 여러 개의 non-treat_as_char TopAndBottom float 이 같은 (빈) 앵커
+                            // 문단에 묶이면 세로로 쌓여야 한다. 기존엔 모두 앵커 원점(tac_effective_anchor)
+                            // 에 그려져 겹쳤다 (wc28: 1·2·3차 흡광도 차트 3개가 한 자리로 붕괴).
+                            // 같은 문단의 control_index 이전 TopAndBottom non-tac float 높이 합만큼
+                            // 아래로 내려 배치한다. 구조(컨트롤 종류·순서) 기반 — 문서 내용 비의존.
+                            // float 1개 문단(prior=0)은 무변화.
+                            let prior_tab_float_h: f64 = if is_para_topbottom_float(&pic.common) {
+                                let cur_x0 = signed_hwpunit(pic.common.horizontal_offset);
+                                let cur_x1 = cur_x0 + signed_hwpunit(pic.common.width);
+                                para.controls
+                                    .iter()
+                                    .take(control_index)
+                                    .filter_map(|c| {
+                                        let common = match c {
+                                            Control::Picture(p) if !p.common.treat_as_char => &p.common,
+                                            Control::Shape(s) if !s.common().treat_as_char => s.common(),
+                                            Control::Table(t) if !t.common.treat_as_char => &t.common,
+                                            _ => return None,
+                                        };
+                                        if !is_para_topbottom_float(common) {
+                                            return None;
+                                        }
+                                        // 가로 범위가 겹치는 prior float 만 세로로 쌓는다. 가로로
+                                        // 나란히(side-by-side, 겹침 없음) 배치된 float 은 같은 줄에
+                                        // 들어가므로 높이를 더하지 않는다 (huge_01/02 DNA 그림 쌍
+                                        // 회귀 방지 — typeset.rs:1788 side-by-side dedup 동일 원리).
+                                        let px0 = signed_hwpunit(common.horizontal_offset);
+                                        let px1 = px0 + signed_hwpunit(common.width);
+                                        if px0 < cur_x1 && cur_x0 < px1 {
+                                            Some(hwpunit_to_px(common.height as i32, self.dpi))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .sum()
+                            } else {
+                                0.0
+                            };
+                            let pic_y = tac_effective_anchor + prior_tab_float_h;
+                            // === [/Mindlogic patch] ===
                             let pic_container = LayoutRect {
                                 x: col_area.x,
                                 y: pic_y,
