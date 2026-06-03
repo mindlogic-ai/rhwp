@@ -1061,17 +1061,32 @@ impl LayoutEngine {
         let tac_pic_line: Vec<usize> = if tac_offsets_px.is_empty() {
             Vec::new()
         } else {
-            let n_lines = composed.lines.len().max(1);
+            // Map width-wrap rows onto the composed lines that hold no REAL
+            // (non-whitespace) text — those are the gallery's pic rows. A LEADING
+            // caption/text line (wc01 "스티커 참여활동 보드판 예시") must be skipped so a
+            // pic on its own empty LINE_SEG after the caption maps to THAT line, not
+            // row 0 (which is the caption line → emit never fires → pic dropped).
+            // Pure galleries (wc05/wc29: line 0 whitespace-only or empty) are
+            // unchanged since their line 0 is itself a pic row.
+            let pic_lines: Vec<usize> = composed
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| !l.runs.iter().any(|r| !r.text.trim().is_empty()))
+                .map(|(i, _)| i)
+                .collect();
+            let n_rows = pic_lines.len().max(1);
+            let last_pic_line = pic_lines.last().copied().unwrap_or(0);
             let col_w = (col_area.width - margin_left - margin_right).max(1.0);
             let mut out = Vec::with_capacity(tac_offsets_px.len());
-            let mut li = 0usize;
+            let mut row = 0usize;
             let mut row_w = 0.0f64;
             for (_, w, _) in &tac_offsets_px {
-                if row_w > 0.0 && row_w + w > col_w + 1.0 && li + 1 < n_lines {
-                    li += 1;
+                if row_w > 0.0 && row_w + w > col_w + 1.0 && row + 1 < n_rows {
+                    row += 1;
                     row_w = 0.0;
                 }
-                out.push(li);
+                out.push(pic_lines.get(row).copied().unwrap_or(last_pic_line));
                 row_w += w;
             }
             out
