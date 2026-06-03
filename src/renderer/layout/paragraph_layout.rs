@@ -1042,6 +1042,41 @@ impl LayoutEngine {
             v
         };
 
+        // [Mindlogic patch — TAC picture-grid row assignment] =============
+        // Empty-runs paragraphs that carry a vertical stack / grid of
+        // treat_as_char pictures (a photo gallery — one LINE_SEG per row) used
+        // to draw EVERY pic at line `start_line`'s y, advancing x only. With
+        // full-width photos that piled them off-canvas (only the first visible)
+        // and the per-page emit gate (`line_idx == start_line`) dropped the
+        // trailing rows/pages entirely (wc29 lost 6 of 11 photos; wc05 lost
+        // pages 3-7). Hancom flows the pictures left-to-right and wraps to the
+        // next row (LINE_SEG) when the next pic would exceed the column width —
+        // exactly text-line wrapping with the pictures as "characters".
+        // Width-wrap reproduces the observed grids: six ~280px pics in a 567px
+        // column wrap to 2-per-row (wc05 2×3 grid); full-width photos (≥col_w)
+        // each take their own row → 1:1 with the saved LINE_SEGs (wc29 11
+        // photos / 11 rows). char_start is NOT a reliable per-row signal (the
+        // composer leaves it 0 or merely sequential regardless of the visual
+        // grid), so map each pic to its row by accumulating width, not char.
+        let tac_pic_line: Vec<usize> = if tac_offsets_px.is_empty() {
+            Vec::new()
+        } else {
+            let n_lines = composed.lines.len().max(1);
+            let col_w = (col_area.width - margin_left - margin_right).max(1.0);
+            let mut out = Vec::with_capacity(tac_offsets_px.len());
+            let mut li = 0usize;
+            let mut row_w = 0.0f64;
+            for (_, w, _) in &tac_offsets_px {
+                if row_w > 0.0 && row_w + w > col_w + 1.0 && li + 1 < n_lines {
+                    li += 1;
+                    row_w = 0.0;
+                }
+                out.push(li);
+                row_w += w;
+            }
+            out
+        };
+
         // 문단 배경색: border_fill_id 조회
         let para_border_fill_id = para_style.map(|s| s.border_fill_id).unwrap_or(0);
         let para_fill_color = if para_border_fill_id > 0 {
@@ -1084,12 +1119,6 @@ impl LayoutEngine {
                 y += vpos0_px;
             }
         }
-
-        // 문단 전체에서 모든 라인의 runs가 비어있는지 확인
-        // (텍스트 없이 TAC 이미지만 있는 문단)
-        let all_runs_empty = composed.lines[start_line..end]
-            .iter()
-            .all(|l| l.runs.is_empty());
 
         // 개요 번호/글머리표 마커 폭 사전 계산 (첫 줄 가용폭 차감용)
         let numbering_width = if start_line == 0 {
@@ -3180,14 +3209,24 @@ impl LayoutEngine {
                 // runs가 없는 빈 줄에서 treat_as_char 이미지 렌더링
                 // 테이블 셀 내부에서는 table_layout.rs가 layout_picture로 이미 처리하므로 스킵.
                 // 셀 외부에서 텍스트 없이 TAC만 있는 문단인 경우에만 여기서 렌더링.
-                if cell_ctx.is_none()
-                    && all_runs_empty
-                    && !tac_offsets_px.is_empty()
-                    && line_idx == start_line
-                {
+                if cell_ctx.is_none() && !tac_offsets_px.is_empty() {
+                    // [Mindlogic patch — TAC picture-grid per-row emit] =======
+                    // Emit only the pics assigned to THIS composed line (row),
+                    // at this line's y; align each row by its own total width.
+                    // Was: all pics at line `start_line`, which piled full-width
+                    // photos off-canvas (only the first visible) and the
+                    // `line_idx == start_line` gate dropped every trailing row /
+                    // continuation page. tac_pic_line maps pic→row (see above).
+                    let row_pics: Vec<(f64, usize)> = tac_offsets_px
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| tac_pic_line.get(*i).copied() == Some(line_idx))
+                        .map(|(_, &(_, w, ci))| (w, ci))
+                        .collect();
                     if let (Some(p), Some(bdc)) = (para, bin_data_content) {
-                        // TAC 이미지 전체 폭 계산 후 문단 정렬 적용
-                        let total_tac_width: f64 = tac_offsets_px.iter().map(|(_, w, _)| w).sum();
+                        if !row_pics.is_empty() {
+                        // TAC 이미지 전체 폭 계산 후 문단 정렬 적용 (이 행 기준)
+                        let total_tac_width: f64 = row_pics.iter().map(|(w, _)| w).sum();
                         let align_offset = match alignment {
                             Alignment::Center | Alignment::Distribute => {
                                 (available_width - total_tac_width).max(0.0) / 2.0
@@ -3196,7 +3235,7 @@ impl LayoutEngine {
                             _ => 0.0, // Left, Justify
                         };
                         let mut img_x = effective_col_x + effective_margin_left + align_offset;
-                        for &(_, tac_w, tac_ci) in &tac_offsets_px {
+                        for &(tac_w, tac_ci) in &row_pics {
                             if let Some(ctrl) = p.controls.get(tac_ci) {
                                 // [Issue #476] 빈 문단 + 인라인 Shape: inline_pos 등록 후 shape_layout 이 그리도록 위임.
                                 // 등록하지 않으면 layout_shape 가 inline_pos=None 으로 받아 fallback 위치에 그리거나,
@@ -3280,6 +3319,7 @@ impl LayoutEngine {
                                 }
                             }
                         }
+                        } // [Mindlogic] /if !row_pics.is_empty()
                     }
                 }
 
@@ -3827,7 +3867,13 @@ impl LayoutEngine {
                     .and_then(|p| {
                         let cur = p.line_segs.get(line_idx)?;
                         let prev = p.line_segs.get(line_idx - 1)?;
-                        Some(cur.vertical_pos == prev.vertical_pos)
+                        // [Mindlogic patch] vpos==0 is a vpos-RESET sentinel (a new
+                        // row, e.g. a stacked TAC picture grid), NOT a wrap-zone dup.
+                        // Repeated vpos==0 lines (wc29 photo rows 6/7/8) must each
+                        // advance y by their own row height — only collapse the
+                        // advance for true left/right wrap splits sharing a NONZERO
+                        // vpos. Sister of the typeset.rs `unique_segs` change.
+                        Some(cur.vertical_pos != 0 && cur.vertical_pos == prev.vertical_pos)
                     })
                     .unwrap_or(false);
             let skip_advance_empty_wrap = skip_advance_empty_wrap || skip_advance_dup_vpos;

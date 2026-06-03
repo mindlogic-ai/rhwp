@@ -2573,6 +2573,18 @@ impl TypesetEngine {
             para.line_segs
                 .iter()
                 .filter(|s| {
+                    // [Mindlogic patch — vpos-reset sentinel not a wrap-zone dup]
+                    // vertical_pos == 0 is a vpos-RESET sentinel: each marks the
+                    // start of a NEW region/row (e.g. a stacked full-width
+                    // treat_as_char picture grid where each photo restarts the
+                    // flow at the top of a new page). It is NOT a wrap-zone split
+                    // sharing one logical line's vpos. Collapsing repeated vpos==0
+                    // segs dropped 6 of 11 photo rows on wc29 (line_count 11→5 →
+                    // pagination truncated 4 pages instead of 9). Only dedup
+                    // linesegs that share a *nonzero* vpos (true left/right wrap).
+                    if s.vertical_pos == 0 {
+                        return true;
+                    }
                     if seen_vpos.contains(&s.vertical_pos) {
                         false
                     } else {
@@ -3018,6 +3030,25 @@ impl TypesetEngine {
             st.advance_column_or_new_page();
         }
 
+        // [Mindlogic patch — single-col TAC picture-grid vpos-reset break] ===
+        // A paragraph that stacks ≥2 treat_as_char pictures with NO text runs
+        // is a photo gallery. HWP encodes each photo's page via LINE_SEG vpos:
+        // vpos==0 marks a NEW page top, vpos>0 continues below the prior photo
+        // on the same page. The normal single-col split (cumulative + Task #631
+        // hwp_authoritative) over-packs these because a reset line's vpos+lh
+        // isn't an absolute page coordinate (wc29 crammed 5 photos onto one
+        // page). Honor the vpos-reset the same way multi-column does (forced
+        // break at interior vpos==0). Gated to empty-runs + ≥2 TAC pictures so
+        // it can't reach the single-col text/table split that issue #418
+        // protects (those paragraphs carry text and never satisfy this).
+        let is_tac_picture_grid = para.text.trim().is_empty()
+            && para
+                .controls
+                .iter()
+                .filter(|c| matches!(c, Control::Picture(p) if p.common.treat_as_char))
+                .count()
+                >= 2;
+
         // 줄 단위 분할 루프
         let mut cursor_line: usize = 0;
         while cursor_line < line_count {
@@ -3059,7 +3090,9 @@ impl TypesetEngine {
                 // line_segs[li].vertical_pos == 0 (li>0) 은 HWP 가 해당 line 을
                 // 다음 단/페이지 최상단에 배치하도록 인코딩한 신호.
                 // 다단 한정 적용 — 단일 단은 partial-table split 회귀 (issue #418) 차단 위해 미적용.
-                if st.col_count > 1
+                // [Mindlogic] 단일 단에서도 TAC 사진 갤러리(is_tac_picture_grid)는
+                // vpos==0 을 페이지 경계로 honor — 사진 over-pack 방지 (wc29).
+                if (st.col_count > 1 || is_tac_picture_grid)
                     && li > cursor_line
                     && para
                         .line_segs
