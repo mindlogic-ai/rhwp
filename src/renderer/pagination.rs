@@ -39,6 +39,10 @@ pub struct PaginationResult {
     pub wrap_around_paras: Vec<WrapAroundPara>,
     /// 빈 줄 감추기로 높이 0 처리된 문단 인덱스 집합
     pub hidden_empty_paras: std::collections::HashSet<usize>,
+    /// [Mindlogic — sa double-count] cached vpos-delta 가 이미 inter-para gap 을
+    /// 포함해 spacing_after 를 0 으로 처리한 trust-cache paragraph 인덱스 집합.
+    /// 렌더러가 동일 paragraph 의 sa 를 0 으로 그리도록 전달 (typeset/layout 정합).
+    pub sa_baked_paras: std::collections::HashSet<usize>,
     /// 섹션별 미주 목록 (문서 끝 또는 섹션 끝에 렌더)
     pub endnotes: Vec<EndnoteRef>,
     /// [Task #836] 미주 paragraphs (endnote_para_base + idx 로 lookup)
@@ -585,6 +589,12 @@ impl PaginationResult {
             new_hidden.insert((pi as i64 + offset as i64).max(0) as usize);
         }
         self.hidden_empty_paras = new_hidden;
+        // sa_baked_paras offset (mirror hidden_empty_paras)
+        let mut new_sa_baked = std::collections::HashSet::new();
+        for &pi in &old.sa_baked_paras {
+            new_sa_baked.insert((pi as i64 + offset as i64).max(0) as usize);
+        }
+        self.sa_baked_paras = new_sa_baked;
     }
 }
 

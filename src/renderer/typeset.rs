@@ -148,6 +148,11 @@ struct TypesetState {
     hidden_empty_page_idx: usize,
     /// [Task #362] hide_empty_line 으로 감춘 paragraph 인덱스 (PaginationResult 에 포함).
     hidden_empty_paras: std::collections::HashSet<usize>,
+    /// [Mindlogic — sa double-count] trust-cache paragraph 인덱스 중 cached vpos-delta 가
+    /// 이미 inter-para gap(== spacing_after) 을 포함해 sa 를 0 으로 처리한 집합.
+    /// 렌더러(paragraph_layout)도 동일 paragraph 의 sa 를 0 으로 그려야 typeset/layout
+    /// 페이지네이션이 일치한다 → PaginationResult 로 전달.
+    sa_baked_paras: std::collections::HashSet<usize>,
     /// [Task #836] 미주 목록 (섹션별 수집, 문서 끝에 렌더).
     endnotes: Vec<EndnoteRef>,
     endnote_paragraphs: Vec<Paragraph>,
@@ -317,6 +322,7 @@ impl TypesetState {
             hidden_empty_lines: 0,
             hidden_empty_page_idx: usize::MAX,
             hidden_empty_paras: std::collections::HashSet::new(),
+            sa_baked_paras: std::collections::HashSet::new(),
             endnotes: Vec::new(),
             endnote_paragraphs: Vec::new(),
             wrap_around_cs: -1,
@@ -1620,12 +1626,36 @@ impl TypesetEngine {
                             last.vertical_pos + last.line_height + last.line_spacing;
                         let gap_hu = next_first.vertical_pos - this_bottom_hu;
                         if gap_hu > 0 {
-                            let reserved =
-                                hwpunit_to_px(gap_hu, self.dpi) - formatted.spacing_after;
+                            let gap_px = hwpunit_to_px(gap_hu, self.dpi);
+                            let reserved = gap_px - formatted.spacing_after;
                             if reserved > 3.0 && reserved < 60.0 {
                                 formatted.spacing_after += reserved;
                                 formatted.total_height += reserved;
                                 formatted.height_for_fit += reserved;
+                            } else if formatted.spacing_after > 3.0 && reserved.abs() <= 2.0 {
+                                // === [Mindlogic — sa double-count zero] ============
+                                // The cached vpos puts the NEXT para exactly `sa`
+                                // below this para's line-bottom (gap_px ≈ sa). So
+                                // Hancom's saved linesegs ALREADY encode the
+                                // inter-paragraph gap; the kept spacing_after
+                                // (2026-06-01 form_02 change) double-counts it,
+                                // inflating each page until the trailing line
+                                // orphans onto a near-empty page (wc04 6→4,
+                                // wc42/43/44/45 −1). Distinct from the report_form
+                                // branch above (gap_px > sa → cache reserves EXTRA
+                                // sb → add it) and from form_02 (gap_px ≈ 0 → sa not
+                                // baked → keep it). Structural, content-free: keys
+                                // only on the cached vpos delta vs sa. Record the
+                                // index so paragraph_layout zeros sa for the SAME
+                                // para (render/pagination must agree, else the
+                                // render overflows the page box — 5870b034 lesson).
+                                let sa = formatted.spacing_after;
+                                formatted.total_height -= sa;
+                                formatted.height_for_fit =
+                                    (formatted.height_for_fit - sa).max(0.0);
+                                formatted.spacing_after = 0.0;
+                                st.sa_baked_paras.insert(para_idx);
+                                // === [/Mindlogic patch] ===========================
                             }
                         }
                     }
@@ -2504,6 +2534,7 @@ impl TypesetEngine {
             pages: st.pages,
             wrap_around_paras,
             hidden_empty_paras: st.hidden_empty_paras,
+            sa_baked_paras: st.sa_baked_paras,
             endnotes: st.endnotes,
             endnote_paragraphs: st.endnote_paragraphs,
         }

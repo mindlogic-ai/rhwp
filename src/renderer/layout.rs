@@ -351,6 +351,10 @@ pub struct LayoutEngine {
     last_item_content_bottom: std::cell::Cell<f64>,
     /// 빈 줄 감추기로 높이 0 처리된 문단 인덱스 집합
     hidden_empty_paras: std::cell::RefCell<std::collections::HashSet<usize>>,
+    /// [Mindlogic — sa double-count] typeset 이 sa 를 0 으로 처리한 trust-cache
+    /// paragraph 인덱스 집합. 렌더러도 동일 paragraph 의 spacing_after 를 0 으로
+    /// 그려야 페이지네이션 결정과 일치한다 (PaginationResult 에서 섹션별로 주입).
+    sa_baked_paras: std::cell::RefCell<std::collections::HashSet<usize>>,
     /// 현재 활성 필드 위치 — 안내문 렌더링 스킵용
     /// (section_idx, para_idx, control_idx, cell_path)
     /// cell_path: 셀 내 필드일 경우 Some(Vec<(ctrl, cell, para)>)
@@ -416,6 +420,7 @@ impl LayoutEngine {
             layout_overflows: std::cell::RefCell::new(Vec::new()),
             last_item_content_bottom: std::cell::Cell::new(f64::NAN),
             hidden_empty_paras: std::cell::RefCell::new(std::collections::HashSet::new()),
+            sa_baked_paras: std::cell::RefCell::new(std::collections::HashSet::new()),
             active_field: std::cell::RefCell::new(None),
             show_control_codes: std::cell::Cell::new(false),
             current_paper_width: std::cell::Cell::new(0.0),
@@ -444,6 +449,11 @@ impl LayoutEngine {
     /// 빈 줄 감추기 문단 집합 설정
     pub fn set_hidden_empty_paras(&self, paras: &std::collections::HashSet<usize>) {
         *self.hidden_empty_paras.borrow_mut() = paras.clone();
+    }
+
+    /// [Mindlogic — sa double-count] sa 를 0 으로 그릴 문단 집합 설정 (섹션별).
+    pub fn set_sa_baked_paras(&self, paras: &std::collections::HashSet<usize>) {
+        *self.sa_baked_paras.borrow_mut() = paras.clone();
     }
 
     /// 번호 상태를 초기화한다.

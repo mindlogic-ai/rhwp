@@ -992,12 +992,19 @@ impl LayoutEngine {
         let para_trust_cache = para
             .map(|p| !p.line_segs.is_empty() && p.line_segs.iter().all(|s| s.line_height > 0))
             .unwrap_or(false);
+        // [Mindlogic — sa double-count] typeset 이 이 문단의 cached vpos-delta 가
+        // 이미 inter-para gap 을 포함한다고 판단해 sa 를 0 으로 처리했다면, 렌더러도
+        // sa 를 0 으로 그려야 한다. 그렇지 않으면 typeset 은 sa 없이 페이지에 채우는데
+        // 렌더러는 sa 만큼 더 내려 그려 페이지 박스를 넘어선다 (5870b034 교훈).
+        let sa_baked = self.sa_baked_paras.borrow().contains(&para_index);
         let (spacing_before, spacing_after) = if para_trust_cache {
             // [Mindlogic 2026-06-01] keep paraPr spaceAfter — Hancom renders it;
             // the cache vpos delta omits it (probe-proven on form_02/04). Sister
             // of the typeset.rs change so pagination & render agree. sb stays 0
             // (SNU bakes sb into the cache delta). SNU sa==0 → no-op for SNU.
-            (0.0, raw_spacing_after)
+            // EXCEPT when typeset flagged the cache as already encoding the gap
+            // (sa_baked) → zero sa to avoid the double-count.
+            (0.0, if sa_baked { 0.0 } else { raw_spacing_after })
         } else {
             (raw_spacing_before, raw_spacing_after)
         };

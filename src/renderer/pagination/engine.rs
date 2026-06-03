@@ -1072,6 +1072,9 @@ impl Paginator {
             pages: st.pages,
             wrap_around_paras: all_wrap_around_paras,
             hidden_empty_paras,
+            // sa double-count handling lives in the typeset paginator; the
+            // legacy engine paginator leaves it empty (no-op for its docs).
+            sa_baked_paras: std::collections::HashSet::new(),
             endnotes: Vec::new(),
             endnote_paragraphs: Vec::new(),
         }

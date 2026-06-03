@@ -1564,6 +1564,7 @@ impl DocumentCore {
                 pages: Vec::new(),
                 wrap_around_paras: Vec::new(),
                 hidden_empty_paras: std::collections::HashSet::new(),
+                sa_baked_paras: std::collections::HashSet::new(),
                 endnotes: Vec::new(),
                 endnote_paragraphs: Vec::new(),
             });
@@ -2736,6 +2737,9 @@ impl DocumentCore {
         if let Some(pr) = self.pagination.get(sec_idx) {
             self.layout_engine
                 .set_hidden_empty_paras(&pr.hidden_empty_paras);
+            // [Mindlogic — sa double-count] typeset 이 sa 를 0 으로 처리한 문단을
+            // 렌더러도 동일하게 그리도록 전달 (pagination/render 정합).
+            self.layout_engine.set_sa_baked_paras(&pr.sa_baked_paras);
         }
 
         // [Task #836] 미주 paragraphs를 본문 paragraphs 뒤에 합쳐서 전달
