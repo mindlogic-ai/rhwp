@@ -1799,7 +1799,20 @@ impl TypesetEngine {
             for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
                 match ctrl {
                     Control::Shape(_) | Control::Picture(_) | Control::Equation(_) => {
-                        if !has_table {
+                        // [Mindlogic patch — tac-inline shape on table paragraph (wc60 Ⅳ banner)]
+                        // The `!has_table` guard suppresses BODY FLOATS on a paragraph that
+                        // also hosts a table. But a treat_as_char (inline) shape/picture is part
+                        // of the text flow and must still be emitted — otherwise a banner group
+                        // sharing the paragraph with its budget table (wc60 para 145: ctrl0=Table,
+                        // ctrl1/2=Ⅳ banner Group, tac=true) is silently dropped. Banners on
+                        // standalone paragraphs (Ⅰ/Ⅱ/Ⅲ, has_table=false) already emit. Structural
+                        // discriminator: tac controls always emit; non-tac body floats keep the guard.
+                        let is_tac_inline = match ctrl {
+                            Control::Shape(s) => s.common().treat_as_char,
+                            Control::Picture(p) => p.common.treat_as_char,
+                            _ => false,
+                        };
+                        if !has_table || is_tac_inline {
                             // [Issue #476] treat_as_char Shape 는 박스가 속한 line 이 라우팅된
                             // 페이지/단에 등록. paragraph 가 페이지 분할되면 이 시점의
                             // st.current_items 는 마지막 페이지 상태이므로, 그대로 push 하면
@@ -1821,20 +1834,34 @@ impl TypesetEngine {
                                 para_index: para_idx,
                                 control_index: ctrl_idx,
                             };
+                            // [Mindlogic patch — dedup tac-shape emission across vpos-reset bands]
+                            // A paragraph carrying an intra-paragraph vpos-reset is walked once
+                            // per band, so its tac Shape controls would be pushed twice (wc60 Ⅳ
+                            // banner pi=145 → 2× overlapping draws). Skip the push if an identical
+                            // (para,ctrl) Shape already lives in the target column.
+                            let already_in = |items: &[PageItem]| {
+                                items.iter().any(|it| matches!(it,
+                                    PageItem::Shape { para_index, control_index }
+                                        if *para_index == para_idx && *control_index == ctrl_idx))
+                            };
                             match routed {
                                 Some((page_idx, col_idx)) => {
                                     if let Some(page) = st.pages.get_mut(page_idx) {
                                         if let Some(col) = page.column_contents.get_mut(col_idx) {
-                                            col.items.push(item);
-                                        } else {
+                                            if !already_in(&col.items) {
+                                                col.items.push(item);
+                                            }
+                                        } else if !already_in(&st.current_items) {
                                             st.current_items.push(item);
                                         }
-                                    } else {
+                                    } else if !already_in(&st.current_items) {
                                         st.current_items.push(item);
                                     }
                                 }
                                 None => {
-                                    st.current_items.push(item);
+                                    if !already_in(&st.current_items) {
+                                        st.current_items.push(item);
+                                    }
                                 }
                             }
                             // [Task #1052] 글상자 내 각주 수집 (engine.rs:1376-1398 동등)

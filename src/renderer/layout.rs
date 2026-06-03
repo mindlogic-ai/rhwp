@@ -5025,26 +5025,37 @@ impl LayoutEngine {
                             )
                             .is_some();
 
-                        if !has_real_text {
+                        // [Task #990] 해당 문단에 PageItem::FullParagraph 가
+                        // 발행되었으면(빈 문단이 호스트인 RFP 형) layout_paragraph
+                        // 가 이미 LINE_SEG advance 를 마쳤으므로, Shape 항목은
+                        // 글상자를 호스트 문단 시작(para_start)에 배치하고 재진행
+                        // 하지 않는다 — 이중 가산 방지(Task #974 c3e32151 회귀).
+                        // FullParagraph 항목이 없으면(선행 표 등에 이어 붙은
+                        // Shape, 예: hy-001 pi=27) Task #974 동작을 유지한다.
+                        let has_full_para_item =
+                            page_content.column_contents.iter().any(|cc| {
+                                cc.items.iter().any(|it| {
+                                    matches!(
+                                        it,
+                                        PageItem::FullParagraph { para_index: pi }
+                                            if *pi == para_index
+                                    )
+                                })
+                            });
+
+                        // [Mindlogic patch — tac-inline shape on table paragraph (wc60 Ⅳ banner)]
+                        // Normally a tac shape's inline_pos is registered by paragraph_layout
+                        // (which runs when the para has a FullParagraph item). When the
+                        // paragraph hosts a table, NO FullParagraph item is emitted, so
+                        // paragraph_layout never runs and the position is never registered —
+                        // layout_shape then hits the #476 guard (tac + no inline_pos → skip)
+                        // and the banner is dropped. The pre-existing branch only registered
+                        // for empty (no-real-text) host paragraphs; extend it to ALSO register
+                        // when paragraph_layout won't run for this para (no FullParagraph item),
+                        // regardless of real text. Structural discriminator: !has_full_para_item.
+                        if !has_real_text || !has_full_para_item {
                             let shape_w = hwpunit_to_px(common.width as i32, self.dpi);
                             let shape_h = hwpunit_to_px(common.height as i32, self.dpi);
-                            // [Task #990] 해당 문단에 PageItem::FullParagraph 가
-                            // 발행되었으면(빈 문단이 호스트인 RFP 형) layout_paragraph
-                            // 가 이미 LINE_SEG advance 를 마쳤으므로, Shape 항목은
-                            // 글상자를 호스트 문단 시작(para_start)에 배치하고 재진행
-                            // 하지 않는다 — 이중 가산 방지(Task #974 c3e32151 회귀).
-                            // FullParagraph 항목이 없으면(선행 표 등에 이어 붙은
-                            // Shape, 예: hy-001 pi=27) Task #974 동작을 유지한다.
-                            let has_full_para_item =
-                                page_content.column_contents.iter().any(|cc| {
-                                    cc.items.iter().any(|it| {
-                                        matches!(
-                                            it,
-                                            PageItem::FullParagraph { para_index: pi }
-                                                if *pi == para_index
-                                        )
-                                    })
-                                });
                             let para_start =
                                 para_start_y.get(&para_index).copied().unwrap_or(y_offset);
                             let shape_y = if has_full_para_item {
