@@ -2000,6 +2000,99 @@ impl TypesetEngine {
                                     st.advance_column_or_new_page();
                                 }
                             }
+                            // [Mindlogic patch — single large non-tac float page-break-before (wc37)]
+                            // A SINGLE full-width non-tac TopAndBottom (or full-width SQUARE) Para
+                            // float anchored LOW on a page overflows the page bottom; the renderer
+                            // then draws it clipped off-canvas (wc37: the "이런 신호" slide image
+                            // anchored at vpos≈865px on an 895px page → dropped, page 8 rendered
+                            // BLANK = content loss). The is_stack_float path above already flushes
+                            // ≥2-float galleries before they overflow; a single such float had no
+                            // equivalent guard. Hancom pushes the anchor (and its float) to the next
+                            // page. Mirror the stack flush for one float: if it won't fit the
+                            // remaining page space AND the file vpos doesn't already reserve it
+                            // (else vpos placement handles it — same `already_accounted` test as the
+                            // pushdown arm, wc49 pi=8), break to a fresh page before placing it.
+                            // Structural: wrap/relto/width + overflow magnitude only.
+                            if !is_stack_float {
+                                use crate::model::shape::{TextWrap, VertRelTo};
+                                let col_w_px = st
+                                    .layout
+                                    .column_areas
+                                    .get(st.current_column as usize)
+                                    .map(|a| a.width)
+                                    .unwrap_or(st.layout.body_area.width);
+                                let single_float_obj_h: Option<f64> = match ctrl {
+                                    Control::Picture(p)
+                                        if !p.common.treat_as_char
+                                            && matches!(p.common.vert_rel_to, VertRelTo::Para)
+                                            && (matches!(
+                                                p.common.text_wrap,
+                                                TextWrap::TopAndBottom
+                                            ) || (matches!(
+                                                p.common.text_wrap,
+                                                TextWrap::Square
+                                            ) && col_w_px > 0.0
+                                                && hwpunit_to_px(p.common.width as i32, self.dpi)
+                                                    >= col_w_px * 0.9)) =>
+                                    {
+                                        Some(hwpunit_to_px(p.common.height as i32, self.dpi))
+                                    }
+                                    Control::Shape(s)
+                                        if !s.common().treat_as_char
+                                            && matches!(
+                                                s.common().vert_rel_to,
+                                                VertRelTo::Para
+                                            )
+                                            && matches!(
+                                                s.common().text_wrap,
+                                                TextWrap::TopAndBottom
+                                            ) =>
+                                    {
+                                        Some(hwpunit_to_px(s.common().height as i32, self.dpi))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(obj_h) = single_float_obj_h {
+                                    let already_accounted = para_idx > 0 && {
+                                        let v_cur =
+                                            para.line_segs.first().map(|s| s.vertical_pos);
+                                        let prev_end = paragraphs[para_idx - 1]
+                                            .line_segs
+                                            .last()
+                                            .map(|s| s.vertical_pos + s.line_height);
+                                        match (v_cur, prev_end) {
+                                            (Some(vc), Some(pe)) if vc > pe => {
+                                                hwpunit_to_px((vc - pe) as i32, self.dpi)
+                                                    >= obj_h - 8.0
+                                            }
+                                            _ => false,
+                                        }
+                                    };
+                                    // Magnitude discriminator (probe-tuned across wc37 + 5
+                                    // would-be regressors): only break when a LARGE float
+                                    // (≥0.6× page) arrives on a NEARLY-FULL page (≥0.95× used).
+                                    // A big float with no room left genuinely can't share the
+                                    // page → break (wc37 obj=0.68 cur=1.01). Small floats on a
+                                    // full page (wild_01 pi=549 obj=0.21) and big floats on a
+                                    // half-empty page (wild_01 pi=535 cur=0.69) are tucked into
+                                    // the bottom margin by Hancom — flushing them manufactures a
+                                    // page (huge_02/wb18/wc03/wc38/wild_01 regressed without
+                                    // these bounds). Structural ratios only, no content.
+                                    let avail = st.available_height();
+                                    let obj_ratio = if avail > 0.0 { obj_h / avail } else { 0.0 };
+                                    let cur_ratio = if avail > 0.0 {
+                                        st.current_height / avail
+                                    } else {
+                                        0.0
+                                    };
+                                    if !already_accounted
+                                        && obj_ratio > 0.6
+                                        && cur_ratio > 0.95
+                                    {
+                                        st.advance_column_or_new_page();
+                                    }
+                                }
+                            }
                             // [Issue #476] treat_as_char Shape 는 박스가 속한 line 이 라우팅된
                             // 페이지/단에 등록. paragraph 가 페이지 분할되면 이 시점의
                             // st.current_items 는 마지막 페이지 상태이므로, 그대로 push 하면
