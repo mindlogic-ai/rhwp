@@ -1828,6 +1828,61 @@ impl TypesetEngine {
             // floats are unaffected. Without this, huge_02-style multi-image rows
             // count each image's full height (+274..+347px/page).
             let mut pushdown_groups: Vec<(f64, f64, f64)> = Vec::new();
+            // [Mindlogic patch — multi full-width SQUARE float stacking + page-split (wc19/wc51)]
+            // Hancom flows N full-width SQUARE floats anchored on ONE paragraph DOWN the
+            // page, breaking to a new page when one no longer fits. rhwp's side-by-side
+            // dedup below collapses same-offset full-width floats into one reserved height
+            // and the renderer piles them at the anchor → fewer pages than Hancom + the
+            // overflow drops off-canvas. When ≥2 such floats share an anchor, stack them
+            // sequentially in current_height and flush the page mid-loop so each PageItem
+            // lands on its correct page (the renderer mirrors this via page-local stacking
+            // in layout_column_shapes_pass). A SINGLE full-width SQUARE keeps the wc47 path
+            // (len < 2 → untouched); narrow side-by-side floats (huge_01/02, < 0.9·col) and
+            // TopAndBottom (wc28) fail the discriminator and are unaffected.
+            let stack_col_w_px = st
+                .layout
+                .column_areas
+                .get(st.current_column as usize)
+                .map(|a| a.width)
+                .unwrap_or(st.layout.body_area.width);
+            let fw_square_float_ctrls: Vec<usize> = para
+                .controls
+                .iter()
+                .enumerate()
+                .filter_map(|(ci, c)| {
+                    let cm = match c {
+                        Control::Picture(p) => Some(&p.common),
+                        Control::Shape(s) => match s.as_ref() {
+                            crate::model::shape::ShapeObject::Picture(p) => Some(&p.common),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    cm.filter(|cm| {
+                        !cm.treat_as_char
+                            && matches!(cm.text_wrap, crate::model::shape::TextWrap::Square)
+                            && matches!(cm.vert_rel_to, crate::model::shape::VertRelTo::Para)
+                            && stack_col_w_px > 0.0
+                            && hwpunit_to_px(cm.width as i32, self.dpi) >= stack_col_w_px * 0.9
+                    })
+                    .map(|_| ci)
+                })
+                .collect();
+            // [Mindlogic — terminal-gallery discriminator] Only stack+split when this
+            // anchor is the section's TERMINAL content paragraph (a trailing image
+            // gallery) — nothing substantial follows it. wc19 (doc-final 5-photo
+            // gallery) qualifies; an EMBEDDED stack like wb18 para844 (followed by
+            // worksheet paragraphs) does NOT, so its pagination stays at baseline (no
+            // regression). Splitting an embedded stack would cascade extra pages
+            // because flushing wastes the anchor page's tail. Structural property
+            // (no later content paragraph), not document content.
+            let anchor_is_terminal = paragraphs[para_idx + 1..].iter().all(|p| {
+                p.controls.is_empty()
+                    && p.text
+                        .chars()
+                        .all(|c| c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace())
+            });
+            let stack_fw = fw_square_float_ctrls.len() >= 2 && anchor_is_terminal;
             for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
                 match ctrl {
                     Control::Shape(_) | Control::Picture(_) | Control::Equation(_) => {
@@ -1845,6 +1900,45 @@ impl TypesetEngine {
                             _ => false,
                         };
                         if !has_table || is_tac_inline {
+                            // [Mindlogic — stack+split full-width SQUARE floats (wc19/wc51)]
+                            // For each stacked full-width float, reserve its height in
+                            // current_height sequentially and flush to a new page when the
+                            // next one would overflow — so each PageItem::Shape is pushed
+                            // into the correct page's current_items. A float that won't fit
+                            // in the column's remaining space flushes to a fresh page —
+                            // UNLESS the column is already empty (current_height == 0), where
+                            // it starts here (a float taller than the page can't be helped by
+                            // another break). This includes the FIRST stacked float: if its
+                            // anchor page is nearly full it must move to a clean page rather
+                            // than overflow off the bottom (wb18 para844 pic0 hung at y≈948).
+                            let is_stack_float = stack_fw && fw_square_float_ctrls.contains(&ctrl_idx);
+                            let stack_h_px = if is_stack_float {
+                                let cm = match ctrl {
+                                    Control::Picture(p) => Some(&p.common),
+                                    Control::Shape(s) => match s.as_ref() {
+                                        crate::model::shape::ShapeObject::Picture(p) => {
+                                            Some(&p.common)
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                cm.map(|cm| {
+                                    hwpunit_to_px(cm.height as i32, self.dpi)
+                                        + hwpunit_to_px(cm.margin.bottom as i32, self.dpi)
+                                })
+                                .unwrap_or(0.0)
+                            } else {
+                                0.0
+                            };
+                            if is_stack_float {
+                                let avail = st.available_height();
+                                if st.current_height > 0.0
+                                    && st.current_height + stack_h_px > avail
+                                {
+                                    st.advance_column_or_new_page();
+                                }
+                            }
                             // [Issue #476] treat_as_char Shape 는 박스가 속한 line 이 라우팅된
                             // 페이지/단에 등록. paragraph 가 페이지 분할되면 이 시점의
                             // st.current_items 는 마지막 페이지 상태이므로, 그대로 push 하면
@@ -1895,6 +1989,14 @@ impl TypesetEngine {
                                         st.current_items.push(item);
                                     }
                                 }
+                            }
+                            // [Mindlogic — stack+split full-width SQUARE floats] advance the
+                            // flow cursor by this float's reserved height so the next one
+                            // stacks below it (and triggers the flush above when it would
+                            // overflow). Replaces the generic side-by-side pushdown for
+                            // these floats (guarded out below).
+                            if is_stack_float {
+                                st.current_height += stack_h_px;
                             }
                             // [Task #1052] 글상자 내 각주 수집 (engine.rs:1376-1398 동등)
                             // footnote-tbox-01.hwpx 의 글상자 안 각주 본문이 페이지 하단 영역
@@ -1998,7 +2100,8 @@ impl TypesetEngine {
                                 }
                                 _ => None,
                             };
-                            if let Some((obj_h, extra, voff)) = pushdown_h {
+                            if let Some((obj_h, extra, voff)) = pushdown_h.filter(|_| !is_stack_float)
+                            {
                                 // [Task #1079] 파일 vpos 가 이미 그림 공간을 반영(그림 para 줄
                                 // 앞 gap ≥ 그림 높이)하면 VPOS_CORR sync 가 그 공간을 따르므로
                                 // pushdown 가산은 이중 계상. gap 이 그림 높이 미만(파일 vpos

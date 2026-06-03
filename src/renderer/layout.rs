@@ -4878,7 +4878,77 @@ impl LayoutEngine {
                             } else {
                                 0.0
                             };
-                            let pic_y = tac_effective_anchor + prior_tab_float_h;
+                            // [Mindlogic patch — multi full-width SQUARE float stacking +
+                            // page-split (wc19/wc51)] When ≥2 full-width SQUARE Para floats
+                            // share one (empty) anchor paragraph, the paginator distributes
+                            // them across pages and stacks their heights; here we mirror that
+                            // by drawing each at the LIVE per-page flow cursor (y_offset) and
+                            // advancing result_y past it below — so successive floats stack
+                            // down the page and continuation-page floats start at the column
+                            // top (y_offset resets per page). The stale tac_effective_anchor
+                            // (or_insert pins it to the anchor page) can't express this. A
+                            // single full-width SQUARE keeps the wc47 path (count < 2);
+                            // narrow side-by-side and TopAndBottom fail the discriminator.
+                            let fw_square_stack_count = para
+                                .controls
+                                .iter()
+                                .filter(|c| {
+                                    let cm = match c {
+                                        Control::Picture(p) => Some(&p.common),
+                                        Control::Shape(s) => match s.as_ref() {
+                                            crate::model::shape::ShapeObject::Picture(p) => {
+                                                Some(&p.common)
+                                            }
+                                            _ => None,
+                                        },
+                                        _ => None,
+                                    };
+                                    cm.map(|cm| {
+                                        !cm.treat_as_char
+                                            && matches!(
+                                                cm.text_wrap,
+                                                crate::model::shape::TextWrap::Square
+                                            )
+                                            && matches!(
+                                                cm.vert_rel_to,
+                                                crate::model::shape::VertRelTo::Para
+                                            )
+                                            && col_area.width > 0.0
+                                            && hwpunit_to_px(cm.width as i32, self.dpi)
+                                                >= col_area.width * 0.9
+                                    })
+                                    .unwrap_or(false)
+                                })
+                                .count();
+                            // Same terminal-gallery gate as typeset.rs: only stack when this
+                            // anchor is the section's last content paragraph (nothing
+                            // substantial follows). Keeps embedded stacks (wb18) on the
+                            // baseline path so render matches pagination exactly.
+                            let anchor_is_terminal = paragraphs[para_index + 1..].iter().all(|p| {
+                                p.controls.is_empty()
+                                    && p.text.chars().all(|c| {
+                                        c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace()
+                                    })
+                            });
+                            let is_fw_square_stack_float = fw_square_stack_count >= 2
+                                && anchor_is_terminal
+                                && !pic.common.treat_as_char
+                                && matches!(
+                                    pic.common.text_wrap,
+                                    crate::model::shape::TextWrap::Square
+                                )
+                                && matches!(
+                                    pic.common.vert_rel_to,
+                                    crate::model::shape::VertRelTo::Para
+                                )
+                                && col_area.width > 0.0
+                                && hwpunit_to_px(pic.common.width as i32, self.dpi)
+                                    >= col_area.width * 0.9;
+                            let pic_y = if is_fw_square_stack_float {
+                                y_offset
+                            } else {
+                                tac_effective_anchor + prior_tab_float_h
+                            };
                             // === [/Mindlogic patch] ===
                             let pic_container = LayoutRect {
                                 x: col_area.x,
@@ -4931,6 +5001,20 @@ impl LayoutEngine {
                                 control_index,
                                 vpos_accounts_for_height,
                             );
+                            // [Mindlogic patch — multi full-width SQUARE float stacking] a
+                            // stacked full-width float must ADVANCE the flow cursor by its own
+                            // height so the next float on this page (next layout_shape_item
+                            // call inherits this result_y) draws below it instead of on top.
+                            // Square floats normally leave the cursor put (text wraps beside
+                            // them); these are column-wide so there is no beside-flow.
+                            if is_fw_square_stack_float {
+                                let adv = pic_y
+                                    + hwpunit_to_px(pic.common.height as i32, self.dpi)
+                                    + hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi);
+                                if adv > result_y {
+                                    result_y = adv;
+                                }
+                            }
                             // [Task #959] horz_rel_to=Column 의 picture 가 col_area 우측을
                             // 초과하는 위치에 emit 되면 한컴 viewer 는 column flow 에
                             // reservation 하지 않음. rhwp 는 cursor 를 picture height 만큼
