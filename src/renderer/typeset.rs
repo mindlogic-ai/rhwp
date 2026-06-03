@@ -153,6 +153,11 @@ struct TypesetState {
     /// 렌더러(paragraph_layout)도 동일 paragraph 의 sa 를 0 으로 그려야 typeset/layout
     /// 페이지네이션이 일치한다 → PaginationResult 로 전달.
     sa_baked_paras: std::collections::HashSet<usize>,
+    /// [Mindlogic — wc35 narrow Square float] 다음 문단의 cached first-lineseg
+    /// vertical_pos (HWPUNIT). 메인 루프에서 para 마다 갱신 — 좁은 비-tac Square
+    /// 표(어울림 float)가 본문 흐름을 다음 anchor 의 vpos 까지만 진행시키도록
+    /// place_table_with_text 에서 읽는다 (full table height 대신).
+    pending_next_para_first_vpos: Option<i32>,
     /// [Task #836] 미주 목록 (섹션별 수집, 문서 끝에 렌더).
     endnotes: Vec<EndnoteRef>,
     endnote_paragraphs: Vec<Paragraph>,
@@ -323,6 +328,7 @@ impl TypesetState {
             hidden_empty_page_idx: usize::MAX,
             hidden_empty_paras: std::collections::HashSet::new(),
             sa_baked_paras: std::collections::HashSet::new(),
+            pending_next_para_first_vpos: None,
             endnotes: Vec::new(),
             endnote_paragraphs: Vec::new(),
             wrap_around_cs: -1,
@@ -1594,6 +1600,14 @@ impl TypesetEngine {
                     }
                 }
             }
+
+            // [Mindlogic — wc35 narrow Square float] stash next para's cached
+            // first-lineseg vpos so place_table_with_text can advance flow to the
+            // next anchor instead of over-counting a beside-flowing Square float.
+            st.pending_next_para_first_vpos = paragraphs
+                .get(para_idx + 1)
+                .and_then(|p| p.line_segs.first())
+                .map(|s| s.vertical_pos);
 
             if !has_table {
                 // --- 핵심: format → fits → place/split ---
@@ -4106,7 +4120,39 @@ impl TypesetEngine {
         } else if tac_wrap_split {
             st.current_height += table_total_height;
         } else {
-            st.current_height += pre_height + table_total_height;
+            // [Mindlogic — wc35 narrow Square float band-overlap]
+            // A narrow non-tac Square table with no pre-text floats BESIDE the
+            // following content (the existing Square max-policy above only fires
+            // when pre-text exists). Advancing flow by the float's full height
+            // over-counts the band: Hancom's cached vpos only advances to the
+            // next anchor (wc35 pi=76/81: full 60.8px vs vpos-delta 29.3px →
+            // cur_h drifts +38px → trailing Quiz line orphans, +3 pages). When
+            // the next anchor's cached vpos sits ABOVE the float bottom (the
+            // float overlaps the following band), advance flow to that vpos
+            // instead. Narrowed by width<0.5·body to leave full-width Square
+            // blocks (which DO consume their full height) untouched. Structural
+            // (wrap type + width + cached vpos delta), never content-keyed.
+            let full_advance = pre_height + table_total_height;
+            let advance = if is_wrap_around_table {
+                let body_w = st.layout.body_area.width;
+                let tbl_w_px =
+                    crate::renderer::hwpunit_to_px(table.common.width as i32, self.dpi);
+                let host_vpos = para.line_segs.first().map(|s| s.vertical_pos);
+                match (host_vpos, st.pending_next_para_first_vpos) {
+                    (Some(hv), Some(nv)) if tbl_w_px < body_w * 0.5 && nv > hv => {
+                        let delta_px = crate::renderer::hwpunit_to_px(nv - hv, self.dpi);
+                        if delta_px > 0.0 && delta_px < full_advance {
+                            delta_px
+                        } else {
+                            full_advance
+                        }
+                    }
+                    _ => full_advance,
+                }
+            } else {
+                full_advance
+            };
+            st.current_height += advance;
         }
 
         // post-table 텍스트
