@@ -1859,8 +1859,17 @@ impl TypesetEngine {
                         _ => None,
                     };
                     cm.filter(|cm| {
+                        // Square OR TopAndBottom: a full-width float of either wrap has no
+                        // beside-flow room, so a terminal gallery of them stacks+splits the
+                        // same way (wc19 = SQUARE photos, wc51 = TopAndBottom scatter plots).
+                        // The full-width (≥0.9·col) test excludes side-by-side TopAndBottom
+                        // pairs (huge_01/02 DNA, each < full-width) so they never stack here.
                         !cm.treat_as_char
-                            && matches!(cm.text_wrap, crate::model::shape::TextWrap::Square)
+                            && matches!(
+                                cm.text_wrap,
+                                crate::model::shape::TextWrap::Square
+                                    | crate::model::shape::TextWrap::TopAndBottom
+                            )
                             && matches!(cm.vert_rel_to, crate::model::shape::VertRelTo::Para)
                             && stack_col_w_px > 0.0
                             && hwpunit_to_px(cm.width as i32, self.dpi) >= stack_col_w_px * 0.9
@@ -1882,7 +1891,21 @@ impl TypesetEngine {
                         .chars()
                         .all(|c| c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace())
             });
-            let stack_fw = fw_square_float_ctrls.len() >= 2 && anchor_is_terminal;
+            // ...AND preceded by document content (a TRAILING gallery in a flowing doc).
+            // A whole-document poster whose sole content is the gallery (wc63: para0,
+            // nothing before it) lives in a different layout regime — its anchor renders
+            // off the cached vpos, not the flow cursor, so render's y_offset diverges from
+            // the paginator's current_height and the stack mis-positions. Requiring earlier
+            // content keeps wc19/wc51 (galleries after pages of text) and excludes the poster.
+            let anchor_has_preceding_content = paragraphs[..para_idx].iter().any(|p| {
+                !p.controls.is_empty()
+                    || p.text
+                        .chars()
+                        .any(|c| c > '\u{001F}' && c != '\u{FFFC}' && !c.is_whitespace())
+            });
+            let stack_fw = fw_square_float_ctrls.len() >= 2
+                && anchor_is_terminal
+                && anchor_has_preceding_content;
             for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
                 match ctrl {
                     Control::Shape(_) | Control::Picture(_) | Control::Equation(_) => {

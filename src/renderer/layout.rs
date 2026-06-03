@@ -4908,6 +4908,7 @@ impl LayoutEngine {
                                             && matches!(
                                                 cm.text_wrap,
                                                 crate::model::shape::TextWrap::Square
+                                                    | crate::model::shape::TextWrap::TopAndBottom
                                             )
                                             && matches!(
                                                 cm.vert_rel_to,
@@ -4930,12 +4931,23 @@ impl LayoutEngine {
                                         c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace()
                                     })
                             });
+                            // ...and preceded by content (trailing gallery, not a whole-doc
+                            // poster like wc63 whose anchor renders off cached vpos, not flow).
+                            let anchor_has_preceding_content =
+                                paragraphs[..para_index].iter().any(|p| {
+                                    !p.controls.is_empty()
+                                        || p.text.chars().any(|c| {
+                                            c > '\u{001F}' && c != '\u{FFFC}' && !c.is_whitespace()
+                                        })
+                                });
                             let is_fw_square_stack_float = fw_square_stack_count >= 2
                                 && anchor_is_terminal
+                                && anchor_has_preceding_content
                                 && !pic.common.treat_as_char
                                 && matches!(
                                     pic.common.text_wrap,
                                     crate::model::shape::TextWrap::Square
+                                        | crate::model::shape::TextWrap::TopAndBottom
                                 )
                                 && matches!(
                                     pic.common.vert_rel_to,
@@ -5051,14 +5063,21 @@ impl LayoutEngine {
                             // 그림 다음에 paragraph 의 line baseline 1줄(line_height + line_spacing)
                             // 을 추가 진행하나 rhwp 기본 layout 은 image_height 만 진행하여
                             // cluster 거리가 1 line 부족 (pr-149.hwp 18864 HU vs 17280 HU 결함).
-                            if matches!(
-                                pic.common.text_wrap,
-                                crate::model::shape::TextWrap::TopAndBottom
-                            ) && matches!(
-                                pic.common.vert_rel_to,
-                                crate::model::shape::VertRelTo::Para
-                            ) && pic.caption.is_none()
+                            if !is_fw_square_stack_float
+                                && matches!(
+                                    pic.common.text_wrap,
+                                    crate::model::shape::TextWrap::TopAndBottom
+                                )
+                                && matches!(
+                                    pic.common.vert_rel_to,
+                                    crate::model::shape::VertRelTo::Para
+                                )
+                                && pic.caption.is_none()
                             {
+                                // [Mindlogic] stacked terminal-gallery floats are spaced by
+                                // exactly height+margin (matching the paginator's reservation)
+                                // — skip the per-float baseline-line advance so render and
+                                // pagination agree and the split lands on the same pages.
                                 let has_visible_text =
                                     para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}');
                                 if !has_visible_text {
