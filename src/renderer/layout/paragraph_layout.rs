@@ -1308,7 +1308,38 @@ impl LayoutEngine {
                         })
                     })
                     .unwrap_or(false);
-            let (line_height, baseline) = if has_tac_shape && raw_lh > max_fs * 1.5 {
+            // [Mindlogic — wc33 tac TopAndBottom block table off-canvas]
+            // A treat_as_char TopAndBottom table that is NOT inline (a full
+            // block, e.g. a 23-row table) bakes its full height into the host
+            // line's line_height, but the table renders in a SEPARATE pass (the
+            // Table PageItem). Without correcting the host text line to a
+            // font-based height, the host paragraph advances by a whole
+            // table-height and the Table then draws that far down → off the page
+            // bottom (wc33 p1: entire body table invisible, page-count gate
+            // blind). Same fix as the inline-Shape correction just above; gated
+            // by treat_as_char + TopAndBottom + !inline so true inline tac tables
+            // (drawn on the line) and normal block tables (treat_as_char=false)
+            // are untouched. The raw_lh>max_fs*1.5 guard fires only on the
+            // table-bearing line, leaving the para's plain text lines alone.
+            let has_block_tac_table = para
+                .map(|p| {
+                    let seg_w0 = p.line_segs.first().map(|s| s.segment_width).unwrap_or(0);
+                    p.controls.iter().any(|c| {
+                        matches!(c, Control::Table(t)
+                            if t.common.treat_as_char
+                                && matches!(
+                                    t.common.text_wrap,
+                                    crate::model::shape::TextWrap::TopAndBottom
+                                )
+                                && !crate::renderer::height_measurer::is_tac_table_inline(
+                                    t, seg_w0, &p.text, &p.controls,
+                                ))
+                    })
+                })
+                .unwrap_or(false);
+            let (line_height, baseline) = if (has_tac_shape || has_block_tac_table)
+                && raw_lh > max_fs * 1.5
+            {
                 // Shape 높이가 line_height에 포함 → 폰트 기반 line_height 사용
                 let font_lh = max_fs * 1.2; // 폰트 크기의 120%
                 let font_bl = max_fs * 0.85;
