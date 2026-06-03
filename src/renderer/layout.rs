@@ -874,6 +874,7 @@ impl LayoutEngine {
                                 Some(i),
                                 Some(ci),
                                 outer_hf_ref.clone(),
+                                false,
                             );
                             let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                             y_offset += pic_h;

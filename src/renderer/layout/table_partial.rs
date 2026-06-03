@@ -1009,7 +1009,11 @@ impl LayoutEngine {
                                             .max(0.0),
                                         ..inner_area
                                     };
-                                    self.layout_picture(
+                                    // [Mindlogic patch — wc24/wc25] clamp into the cell:
+                                    // a non-TAC in-cell picture with a large negative vertOffset
+                                    // (Para anchor reset to page-top on a continuation row) was
+                                    // landing off-canvas at negative y. clamp_to_container_top=true.
+                                    self.layout_picture_full(
                                         tree,
                                         &mut cell_node,
                                         pic,
@@ -1019,6 +1023,8 @@ impl LayoutEngine {
                                         None,
                                         None,
                                         None,
+                                        None,
+                                        true,
                                     );
                                     let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                                     para_y += pic_h;

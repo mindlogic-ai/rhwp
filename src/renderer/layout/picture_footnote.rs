@@ -47,6 +47,7 @@ impl LayoutEngine {
             para_index,
             control_index,
             None,
+            false,
         );
     }
 
@@ -66,6 +67,13 @@ impl LayoutEngine {
         para_index: Option<usize>,
         control_index: Option<usize>,
         header_footer_ref: Option<crate::renderer::render_tree::HeaderFooterImageRef>,
+        // [Mindlogic patch — in-cell negative-offset clamp (wc24/wc25)]
+        // When a non-TAC picture sits inside a table cell and its vertical_offset
+        // would push it ABOVE the cell (e.g. a large negative vertOffset whose
+        // Para anchor reset to page-top on a continuation row), clamp the result
+        // into the container box. Body-float callers pass false → Task #412 path
+        // untouched.
+        clamp_to_container_top: bool,
     ) {
         // 그림 크기 (HWPUNIT → 픽셀)
         // CommonObjAttr의 width/height가 개체의 실제 표시 크기
@@ -103,6 +111,16 @@ impl LayoutEngine {
                 VertAlign::Bottom | VertAlign::Outside => {
                     container.y + container.height - pic_height - v_offset
                 }
+            };
+            // [Mindlogic patch — in-cell negative-offset clamp (wc24/wc25)]
+            // A picture placed wholly/partly above its cell is always wrong.
+            // Clamp into [container.y, container.y+container.height-pic_height].
+            let y = if clamp_to_container_top {
+                let lo = container.y;
+                let hi = (container.y + container.height - pic_height).max(lo);
+                y.max(lo).min(hi)
+            } else {
+                y
             };
             (x, y)
         } else {
