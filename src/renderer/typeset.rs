@@ -1336,11 +1336,40 @@ impl TypesetEngine {
                 // wrap zone 내부 paragraph 로 인정.
                 let cs_only_match =
                     st.wrap_around_any_seg && para_cs == st.wrap_around_cs && para_sw > 0;
+                // [Mindlogic — Square TABLE beside-flow match] host lineseg sw is FULL
+                // width; beside-flow paras carry NARROWED sw → never == wrap_sw. Match
+                // via table geometry (body − table width).
+                let anchor_table_match = if st.wrap_around_cs == 0
+                    && para_cs == 0
+                    && para_sw > 0
+                    && para_sw < body_w
+                {
+                    paragraphs
+                        .get(st.wrap_around_table_para)
+                        .map(|p| {
+                            p.controls.iter().any(|c| {
+                                if let Control::Table(t) = c {
+                                    matches!(t.common.text_wrap, crate::model::shape::TextWrap::Square)
+                                        && {
+                                            let tw = signed_hwpunit(t.common.width);
+                                            let expected_sw = body_w - tw;
+                                            expected_sw > 0 && (para_sw - expected_sw).abs() < 2400
+                                        }
+                                } else {
+                                    false
+                                }
+                            })
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
                 if (para_cs == st.wrap_around_cs && para_sw == st.wrap_around_sw)
                     || (any_seg_matches && (is_empty_para || st.wrap_around_any_seg))
                     || sw0_match
                     || anchor_image_match
                     || cs_only_match
+                    || anchor_table_match
                 {
                     // [Task #604 R3] wrap_around 매칭 분기를 anchor 종류 기반으로 본질화.
                     //
@@ -1426,7 +1455,16 @@ impl TypesetEngine {
                                     && s.segment_width as i32 == st.wrap_around_sw
                             })
                             .unwrap_or(false);
-                        if last_seg_match || is_empty_para {
+                        // [Mindlogic] Square TABLE beside-flow: host wrap_sw is full width
+                        // → last_seg_match never holds for narrowed beside-flow paras.
+                        // Absorb when EVERY lineseg stays narrowed (all beside the table).
+                        let table_all_segs_narrow = anchor_table_match
+                            && !para.line_segs.is_empty()
+                            && para
+                                .line_segs
+                                .iter()
+                                .all(|s| (s.segment_width as i32) > 0 && (s.segment_width as i32) < body_w - 1000);
+                        if last_seg_match || is_empty_para || table_all_segs_narrow {
                             st.current_column_wrap_around_paras.push(
                                 crate::renderer::pagination::WrapAroundPara {
                                     para_index: para_idx,
@@ -2355,9 +2393,23 @@ impl TypesetEngine {
             page_start_num,
         );
 
+        // [Mindlogic patch — aggregate per-column wrap-around paras to section level]
+        // The renderer reads the SECTION-level PaginationResult.wrap_around_paras
+        // (rendering.rs ~2729), but TypesetEngine pushes absorbed wrap paras into
+        // each ColumnContent.wrap_around_paras and previously left the section-level
+        // field empty — so NO typeset-path wrap-around-table rendering reached the
+        // renderer (latent; exposed by the Square-table beside-flow work). Collect
+        // every column's wrap paras up; the renderer filters per table via
+        // table_para_index, so a flat section-wide list is correct.
+        let wrap_around_paras: Vec<crate::renderer::pagination::WrapAroundPara> = st
+            .pages
+            .iter()
+            .flat_map(|p| p.column_contents.iter())
+            .flat_map(|cc| cc.wrap_around_paras.iter().cloned())
+            .collect();
         PaginationResult {
             pages: st.pages,
-            wrap_around_paras: Vec::new(),
+            wrap_around_paras,
             hidden_empty_paras: st.hidden_empty_paras,
             endnotes: st.endnotes,
             endnote_paragraphs: st.endnote_paragraphs,
