@@ -5002,7 +5002,19 @@ impl LayoutEngine {
                                     crate::model::shape::VertRelTo::Para
                                 )
                             {
-                                result_y = y_offset;
+                                // [Mindlogic patch — full-width SQUARE float (wc47)] a SQUARE
+                                // pic as wide as the column has no beside-flow room, so following
+                                // content must start BELOW it (not at the host anchor). Advance
+                                // result_y by the image height; narrow floats keep the collapse
+                                // (text flows beside). Discriminator matches the typeset pushdown.
+                                let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
+                                let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+                                let col_w = col_area.width;
+                                if col_w > 0.0 && pic_w >= col_w * 0.9 {
+                                    result_y = y_offset + pic_h;
+                                } else {
+                                    result_y = y_offset;
+                                }
                             }
                             // [Task #525] Picture Square wrap 의 호스트 paragraph 텍스트는
                             // 정상 PageItem::FullParagraph 경로 (layout_composed_paragraph 의

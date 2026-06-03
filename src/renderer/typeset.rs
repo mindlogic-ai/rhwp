@@ -1690,7 +1690,39 @@ impl TypesetEngine {
                     })
                     .unwrap_or(false)
                 });
-                if has_non_tac_pic_square {
+                // [Mindlogic patch — full-width SQUARE float (wc47)] a SQUARE pic as
+                // wide as the text column has no beside-flow room, so it must NOT seed
+                // the wrap-zone (which would absorb following paragraphs alongside the
+                // image → overlap). Its height is reserved via the pushdown arm below
+                // and following paragraphs flow below it. Same discriminator as the
+                // pushdown: pic width ≥ 0.9 × column width.
+                let is_full_width_pic_square = para.controls.iter().any(|c| {
+                    let cm = match c {
+                        Control::Picture(p) => Some(&p.common),
+                        Control::Shape(s) => match s.as_ref() {
+                            crate::model::shape::ShapeObject::Picture(p) => Some(&p.common),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    cm.map(|cm| {
+                        !cm.treat_as_char
+                            && matches!(cm.text_wrap, crate::model::shape::TextWrap::Square)
+                            && matches!(cm.vert_rel_to, crate::model::shape::VertRelTo::Para)
+                            && {
+                                let pw = hwpunit_to_px(cm.width as i32, self.dpi);
+                                let cw = st
+                                    .layout
+                                    .column_areas
+                                    .get(st.current_column as usize)
+                                    .map(|a| a.width)
+                                    .unwrap_or(st.layout.body_area.width);
+                                cw > 0.0 && pw >= cw * 0.9
+                            }
+                    })
+                    .unwrap_or(false)
+                });
+                if has_non_tac_pic_square && !is_full_width_pic_square {
                     let anchor_cs = para.line_segs.first().map(|s| s.column_start).unwrap_or(0);
                     let anchor_sw = para
                         .line_segs
@@ -1932,6 +1964,37 @@ impl TypesetEngine {
                                     let h = hwpunit_to_px(cm.height as i32, self.dpi);
                                     let mb = hwpunit_to_px(cm.margin.bottom as i32, self.dpi);
                                     Some((h, h + mb, cm.vertical_offset as i32))
+                                }
+                                // [Mindlogic patch — full-width SQUARE float reserves full height (wc47)]
+                                // A SQUARE-wrap Para picture as WIDE as the text column has no
+                                // side-flow room: text can't sit beside it, so its height must be
+                                // reserved in flow like TopAndBottom — else the host blank line
+                                // under-reserves and following text overlaps the image AND the doc
+                                // under-paginates (wc47: 5 pages vs Hancom 6). Narrow SQUARE floats
+                                // (genuine beside-flow) fail the width test and keep the wrap-zone
+                                // path. Discriminator: pic width ≥ 0.9 × column width (doc-identity
+                                // free). The shared `already_accounted` guard below still skips
+                                // floats whose file vpos already reserves the space (wc49 pi=8).
+                                Control::Picture(pic)
+                                    if !pic.common.treat_as_char
+                                        && matches!(pic.common.text_wrap, TextWrap::Square)
+                                        && matches!(pic.common.vert_rel_to, VertRelTo::Para)
+                                        && {
+                                            let pw =
+                                                hwpunit_to_px(pic.common.width as i32, self.dpi);
+                                            let cw = st
+                                                .layout
+                                                .column_areas
+                                                .get(st.current_column as usize)
+                                                .map(|a| a.width)
+                                                .unwrap_or(st.layout.body_area.width);
+                                            cw > 0.0 && pw >= cw * 0.9
+                                        } =>
+                                {
+                                    let h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+                                    let mb =
+                                        hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi);
+                                    Some((h, h + mb, pic.common.vertical_offset as i32))
                                 }
                                 _ => None,
                             };
