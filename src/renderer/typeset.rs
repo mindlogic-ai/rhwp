@@ -3633,7 +3633,20 @@ impl TypesetEngine {
             height_for_fit
         };
         // 넘치면 flush (단일 TAC 표만)
-        if st.current_height + flush_height > st.available_height()
+        // [Mindlogic patch — TAC sub-line flush tolerance (wc20 4→3)]
+        // The fit-check height (host LINE_SEG line_height) runs a few px larger
+        // than what the table actually renders (typeset-vs-render drift), so a
+        // single-TAC table Hancom keeps on the page spills to a near-empty next
+        // page over a sub-line overflow (wc20 pi=67: overflows avail by 1.84px
+        // on a 966px page → 참고자료 table orphaned to a lone page 4). Absorb an
+        // overflow within the engine's own typeset/render drift budget
+        // (LAYOUT_DRIFT_SAFETY_PX, Task #643) before advancing. Tighter than the
+        // sibling typeset_tac_table 1% tolerance ON PURPOSE: a wider band
+        // wrongly absorbed wc58 pi=26 (5.01px overflow = a REAL partial line
+        // that must flush; wc58 7→6 regression). 1.84<4<5.01 → clean split on
+        // overflow magnitude. Structural, not content-keyed.
+        let flush_tol = 4.0_f64; // == LAYOUT_DRIFT_SAFETY_PX
+        if st.current_height + flush_height > st.available_height() + flush_tol
             && !st.current_items.is_empty()
             && has_tac
             && tac_count <= 1
