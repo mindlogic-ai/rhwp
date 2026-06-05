@@ -24,7 +24,7 @@ Usage:
 After it runs, READ look/page-NN.png yourself for every page. The script's job
 is to put Hancom and rhwp eye-to-eye at full legibility; the judgment is yours.
 """
-import sys, os, re, glob, subprocess, json, base64, urllib.request
+import sys, os, re, glob, subprocess, json, base64, urllib.request, tempfile
 
 RHWP = "/Users/jaehoshin/Desktop/mindlogic/factchat/worktree-rhwp-poc/rhwp"
 DC = ["docker", "compose", "--env-file", ".env.docker", "run", "--rm",
@@ -64,11 +64,65 @@ def raster_rhwp(docdir):
     out = []
     for i, svg in enumerate(svgs, 1):
         png = os.path.join(docdir, f"rhwp_p-{i}.png")
+        if raster_svg_chromium(svg, png):
+            out.append(png)
+            continue
         sh(["qlmanage", "-t", "-s", "1400", svg, "-o", docdir])
         produced = os.path.join(docdir, os.path.basename(svg) + ".png")
         if os.path.exists(produced):
             os.replace(produced, png); out.append(png)
     return out
+
+
+def raster_svg_chromium(svg, png):
+    """Rasterize SVG at its real page aspect ratio.
+
+    macOS qlmanage creates square thumbnails for some SVGs, which makes the
+    review board look bottom-clipped or vertically distorted. Chromium renders
+    the SVG in a viewport matching width/height or viewBox.
+    """
+    text = open(svg, encoding="utf-8", errors="ignore").read(2048)
+    m = re.search(r"<svg[^>]*\bwidth=\"([0-9.]+)\"[^>]*\bheight=\"([0-9.]+)\"", text)
+    if not m:
+        m = re.search(r"<svg[^>]*\bviewBox=\"[0-9.]+ [0-9.]+ ([0-9.]+) ([0-9.]+)\"", text)
+    if not m:
+        return False
+    src_w, src_h = float(m.group(1)), float(m.group(2))
+    if src_w <= 0 or src_h <= 0:
+        return False
+    target_w = 1400
+    target_h = max(1, round(src_h * target_w / src_w))
+    html = (
+        "<!doctype html><meta charset='utf-8'>"
+        "<style>html,body{margin:0;background:white;overflow:hidden}"
+        "img{display:block;width:100vw;height:100vh}</style>"
+        f"<img src='file://{os.path.abspath(svg)}'>"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as f:
+        f.write(html)
+        html_path = f.name
+    js = r"""
+const { chromium } = require('playwright');
+const [html, png, w, h] = process.argv.slice(1);
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({
+    viewport: { width: Number(w), height: Number(h) },
+    deviceScaleFactor: 1,
+  });
+  await page.goto('file://' + html, { waitUntil: 'networkidle' });
+  await page.screenshot({ path: png, fullPage: false });
+  await browser.close();
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    try:
+        r = sh(["node", "-e", js, html_path, png, str(target_w), str(target_h)], cwd=RHWP)
+        return r.returncode == 0 and os.path.exists(png)
+    finally:
+        try:
+            os.remove(html_path)
+        except OSError:
+            pass
 
 
 def stitch(docdir, hancom, rhwp):
