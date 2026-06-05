@@ -239,6 +239,17 @@ fn should_block_cut_rowbreak_rowspan_block(
         && block_has_internal_hard_break
 }
 
+fn should_clip_rowbreak_rowspan_declared_slack(
+    visible_height: f64,
+    remaining_height: f64,
+    declared_row_height: f64,
+) -> bool {
+    let declared_slack = (declared_row_height - visible_height).max(0.0);
+    visible_height <= remaining_height + 1.5
+        && declared_slack >= 20.0
+        && declared_row_height >= visible_height * 1.20
+}
+
 fn is_sample16_integrated_db_cluster_tail_paragraph(para: &Paragraph) -> bool {
     para.text.starts_with('\u{F03C5}')
         && para
@@ -4784,8 +4795,15 @@ impl TypesetEngine {
                         break;
                     }
 
-                    // rowspan 셀이 걸친 행 — 컷 분할 불가, MeasuredTable 높이로
-                    // 통째 배치(컷 모델은 row_span>1 셀을 측정 못 함).
+                    // rowspan 셀이 걸친 행 — 기본은 MeasuredTable 높이로 통째 배치.
+                    //
+                    // RowBreak 표에서는 왼쪽 라벨 셀(row_span>1)이 여러 행을 걸쳐도,
+                    // 현재 행의 실제 본문 셀들은 모두 row_span==1인 경우가 많다. 이때
+                    // 저장된 cell.height의 하단 여백만 페이지 잔여 공간을 넘고 본문
+                    // 유닛은 모두 들어가면, Hancom은 그 행의 visible content를 현재
+                    // 페이지에 그리고 남은 빈 높이는 페이지/body clip으로 버린다. 큰
+                    // 라벨 rowspan 때문에 이를 통째 다음 페이지로 미루면 긴 평가표가
+                    // 빈 공간을 반복적으로 남기며 과분할된다.
                     if rowspan_touched[r] {
                         let h = cut_row_h[r];
                         if r == cursor_row || consumed + cs_before + h <= avail_for_rows {
@@ -4793,6 +4811,35 @@ impl TypesetEngine {
                             r += 1;
                             end_row = r;
                             continue;
+                        }
+                        if mt.allows_row_break_split()
+                            && can_intra_split
+                            && mt.is_row_splittable(r)
+                            && start_cut.is_empty()
+                        {
+                            let padding = mt.max_padding_for_row(r);
+                            let budget =
+                                (avail_for_rows - consumed - cs_before - padding).max(0.0);
+                            let res =
+                                layout_engine.advance_row_cut(table, r, &[], budget, styles);
+                            if res.fully_consumed && !res.end_cut.is_empty() {
+                                let visible_h = layout_engine.row_cut_content_height(
+                                    table,
+                                    r,
+                                    &[],
+                                    &res.end_cut,
+                                    styles,
+                                );
+                                let remaining = (avail_for_rows - consumed - cs_before).max(0.0);
+                                if should_clip_rowbreak_rowspan_declared_slack(
+                                    visible_h, remaining, h,
+                                ) {
+                                    consumed += cs_before + visible_h;
+                                    r += 1;
+                                    end_row = r;
+                                    continue;
+                                }
+                            }
                         }
                         end_row = r;
                         break;
@@ -5791,6 +5838,23 @@ mod tests {
         ));
         assert!(!should_block_cut_rowbreak_rowspan_block(
             true, true, 2, true, false
+        ));
+    }
+
+    #[test]
+    fn rowbreak_rowspan_declared_slack_clip_is_geometry_limited() {
+        assert!(should_clip_rowbreak_rowspan_declared_slack(
+            68.0, 69.0, 156.0
+        ));
+
+        assert!(!should_clip_rowbreak_rowspan_declared_slack(
+            75.0, 69.0, 156.0
+        ));
+        assert!(!should_clip_rowbreak_rowspan_declared_slack(
+            68.0, 69.0, 82.0
+        ));
+        assert!(!should_clip_rowbreak_rowspan_declared_slack(
+            100.0, 101.0, 115.0
         ));
     }
 
