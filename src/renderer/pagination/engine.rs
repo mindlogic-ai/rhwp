@@ -2763,6 +2763,10 @@ impl Paginator {
                 end_cut: Vec::new(),
                 is_block_split: false,
             });
+            // Non-final split pages consume real table height. Without this,
+            // ColumnContent.used_height is flushed as 0.0 for every
+            // intermediate PartialTable page even though row/cell cuts advance.
+            st.current_height += partial_height + host_spacing;
             st.advance_column_or_new_page();
 
             // 커서 전진

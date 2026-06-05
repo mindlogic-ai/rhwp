@@ -945,6 +945,26 @@ fn test_table_split_50rows_multi_page() {
     for (i, (s, e)) in partials.iter().enumerate() {
         assert!(e > s, "파트{}: start_row={} >= end_row={}", i, s, e);
     }
+
+    // Non-final PartialTable chunks must record consumed height before the
+    // column is flushed; otherwise dump-pages reports used=0.0 even as rows
+    // advance, hiding table-flow regressions.
+    for (page_idx, page) in result.pages.iter().enumerate() {
+        for col in &page.column_contents {
+            if col
+                .items
+                .iter()
+                .any(|item| matches!(item, PageItem::PartialTable { .. }))
+            {
+                assert!(
+                    col.used_height > 0.0,
+                    "PartialTable page {} column {} should have positive used_height",
+                    page_idx + 1,
+                    col.column_index
+                );
+            }
+        }
+    }
 }
 
 /// 셀 내 중첩 표가 있는 행의 분할 검증 (S3)

@@ -225,6 +225,20 @@ fn para_has_visible_flow_content(para: &Paragraph) -> bool {
             })
 }
 
+fn should_block_cut_rowbreak_rowspan_block(
+    rowbreak_table: bool,
+    block_starts_at_row: bool,
+    block_size: usize,
+    row_touches_rowspan: bool,
+    block_has_internal_hard_break: bool,
+) -> bool {
+    rowbreak_table
+        && block_starts_at_row
+        && (2..=crate::renderer::height_measurer::BLOCK_UNIT_MAX_ROWS).contains(&block_size)
+        && row_touches_rowspan
+        && block_has_internal_hard_break
+}
+
 fn is_sample16_integrated_db_cluster_tail_paragraph(para: &Paragraph) -> bool {
     para.text.starts_with('\u{F03C5}')
         && para
@@ -4680,12 +4694,20 @@ impl TypesetEngine {
                     // 셀은 셀 내부 hard-break(vpos reset) 기준으로 쪼갤 수 있어야 한다.
                     // 이때는 기존 블록 컷 경로를 재사용해 rowspan 셀과 일반 셀의 cut
                     // 인덱스를 같은 정의로 렌더러까지 전달한다.
-                    let rowbreak_rowspan_block = mt.allows_row_break_split()
+                    let rowbreak_candidate = mt.allows_row_break_split()
                         && b_start == r
                         && block_size >= 2
-                        && rowspan_touched.get(r).copied().unwrap_or(false)
+                        && rowspan_touched.get(r).copied().unwrap_or(false);
+                    let block_has_internal_hard_break = rowbreak_candidate
                         && layout_engine
                             .row_block_has_internal_hard_break(table, b_start, b_end, styles);
+                    let rowbreak_rowspan_block = should_block_cut_rowbreak_rowspan_block(
+                        mt.allows_row_break_split(),
+                        b_start == r,
+                        block_size,
+                        rowspan_touched.get(r).copied().unwrap_or(false),
+                        block_has_internal_hard_break,
+                    );
                     if (protected || rowbreak_rowspan_block) && b_start == r {
                         // [Task #1025] 연속분 커서가 블록 중간이면 블록 시작 컷을 적용.
                         let blk_start_cut: &[usize] =
@@ -4969,6 +4991,11 @@ impl TypesetEngine {
                 // [Task #1025] 이번 분할이 블록 분할이거나 start_cut 이 이미 블록 인덱스.
                 is_block_split: split_block_start.is_some() || start_cut_is_block,
             });
+            // Non-final split pages consume table height too. Without this,
+            // ColumnContent.used_height is flushed as 0.0 for pages whose
+            // PartialTable advances row/cell cuts, hiding under-pagination in
+            // dump-pages and visual gates that inspect column metrics.
+            st.current_height += partial_height;
             st.advance_column_or_new_page();
 
             // 커서 전진 — [Task #993] 컷은 절대 유닛 인덱스이므로 누적 없이 대입.
@@ -5736,6 +5763,35 @@ mod tests {
 
         assert!(breaks.contains(&2));
         assert!(!breaks.contains(&1));
+    }
+
+    #[test]
+    fn rowbreak_block_cut_is_limited_to_small_rowspan_blocks() {
+        assert!(should_block_cut_rowbreak_rowspan_block(
+            true, true, 2, true, true
+        ));
+        assert!(should_block_cut_rowbreak_rowspan_block(
+            true, true, 3, true, true
+        ));
+
+        assert!(!should_block_cut_rowbreak_rowspan_block(
+            true, true, 4, true, true
+        ));
+        assert!(!should_block_cut_rowbreak_rowspan_block(
+            true, true, 12, true, true
+        ));
+        assert!(!should_block_cut_rowbreak_rowspan_block(
+            false, true, 2, true, true
+        ));
+        assert!(!should_block_cut_rowbreak_rowspan_block(
+            true, false, 2, true, true
+        ));
+        assert!(!should_block_cut_rowbreak_rowspan_block(
+            true, true, 2, false, true
+        ));
+        assert!(!should_block_cut_rowbreak_rowspan_block(
+            true, true, 2, true, false
+        ));
     }
 
     /// 두 PaginationResult의 페이지 수와 각 페이지의 항목 수가 동일한지 비교

@@ -44,6 +44,21 @@ pub(crate) fn ensure_min_baseline(raw_baseline: f64, max_font_size: f64) -> f64 
     raw_baseline.max(min_baseline)
 }
 
+fn should_use_saved_cell_line_width(
+    para_trust_cache: bool,
+    in_cell: bool,
+    segment_width: i32,
+    column_start: i32,
+    col_area_w_hu: i32,
+) -> bool {
+    if !para_trust_cache || !in_cell || segment_width <= 0 || col_area_w_hu <= 0 {
+        return false;
+    }
+
+    let line_avail_hu = segment_width.saturating_add(column_start);
+    line_avail_hu < col_area_w_hu - 200 || (column_start > 0 && segment_width < col_area_w_hu)
+}
+
 /// run 이 `\t` 로 끝날 때, 그 마지막 `\t` 가 cross-run 우측/가운데 탭으로 동작해야 하는지 판정한다.
 ///
 /// HWP 본문 탭에는 두 가지 정보원이 있다:
@@ -1462,6 +1477,14 @@ impl LayoutEngine {
             // [Task #722] inter-image-text gap 보정 — 한컴 viewer 는 anchor image 의
             // outer margin_right (HU) 만큼 cs 에 더해 text 시작 x 결정. sw 에서 동일량
             // 차감하여 가용 폭 정합. WrapAnchorRef.anchor_image_margin_right 활용.
+            let saved_cell_line_width = wrap_anchor.is_none()
+                && should_use_saved_cell_line_width(
+                    para_trust_cache,
+                    cell_ctx.is_some(),
+                    comp_line.segment_width,
+                    comp_line.column_start,
+                    col_area_w_hu,
+                );
             let (line_cs_offset, line_avail_w_override) = if let Some(anchor) = wrap_anchor {
                 let seg = para.and_then(|p| p.line_segs.get(line_idx));
                 let cs = seg.map(|s| s.column_start as i32).unwrap_or(0);
@@ -1474,6 +1497,11 @@ impl LayoutEngine {
                     None
                 };
                 (cs_px, sw_px)
+            } else if saved_cell_line_width {
+                (
+                    hwpunit_to_px(comp_line.column_start, self.dpi),
+                    Some(hwpunit_to_px(comp_line.segment_width, self.dpi)),
+                )
             } else {
                 (0.0, None)
             };
@@ -4451,7 +4479,20 @@ fn form_color_to_css(color: u32) -> String {
 
 #[cfg(test)]
 mod pua_mapping_tests {
-    use super::map_pua_bullet_char;
+    use super::{map_pua_bullet_char, should_use_saved_cell_line_width};
+
+    #[test]
+    fn saved_cell_line_width_only_applies_to_trusted_narrow_cell_lines() {
+        assert!(should_use_saved_cell_line_width(true, true, 6_821, 0, 7_210));
+        assert!(should_use_saved_cell_line_width(
+            true, true, 3_397, 39_123, 42_520
+        ));
+
+        assert!(!should_use_saved_cell_line_width(false, true, 6_821, 0, 7_210));
+        assert!(!should_use_saved_cell_line_width(true, false, 6_821, 0, 7_210));
+        assert!(!should_use_saved_cell_line_width(true, true, 7_100, 0, 7_210));
+        assert!(!should_use_saved_cell_line_width(true, true, 0, 0, 7_210));
+    }
 
     #[test]
     fn supplementary_pua_a_passthrough_for_boxed_digits() {
