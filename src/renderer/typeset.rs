@@ -212,6 +212,19 @@ fn para_has_visible_text(para: &Paragraph) -> bool {
     para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}')
 }
 
+fn para_has_visible_flow_content(para: &Paragraph) -> bool {
+    para_has_visible_text(para)
+        || para
+            .controls
+            .iter()
+            .any(|c| {
+                !matches!(
+                    c,
+                    Control::Header(_) | Control::Footer(_) | Control::PageNumberPos(_)
+                )
+            })
+}
+
 fn is_sample16_integrated_db_cluster_tail_paragraph(para: &Paragraph) -> bool {
     para.text.starts_with('\u{F03C5}')
         && para
@@ -656,6 +669,9 @@ impl TypesetEngine {
         st.skip_spacing_before_prededuct = skip_spacing_before_prededuct;
         st.current_zone_design_spacing_px = column_def_design_spacing_px(column_def, self.dpi);
 
+        let mut effective_force_break_before = force_break_before.clone();
+        effective_force_break_before.extend(self.page_relative_scan_breaks(paragraphs, page_def));
+
         // 머리말/꼬리말/쪽 번호/새 번호/감추기 컨트롤 수집
         let (hf_entries, page_number_pos, new_page_numbers, page_hides) =
             Self::collect_header_footer_controls(paragraphs, section_index);
@@ -1019,7 +1035,7 @@ impl TypesetEngine {
             // 현재 페이지에 렌더링하지 않고 다음 페이지로 넘긴다. force_break_before 에 등록된
             // para_idx 가 현재 페이지에 이미 항목이 있으면 새 페이지를 강제 (force_page_break 등가).
             // 빈 셋(reflow hint 없음)이면 무동작 → 기존 출력 불변.
-            if force_break_before.contains(&para_idx) && !st.current_items.is_empty() {
+            if effective_force_break_before.contains(&para_idx) && !st.current_items.is_empty() {
                 st.force_new_page();
             }
 
@@ -5482,6 +5498,92 @@ impl TypesetEngine {
     fn get_table_vertical_offset(table: &crate::model::table::Table) -> u32 {
         table.common.vertical_offset as u32
     }
+
+    /// Page-relative full-page scanned pictures consume the current visual page.
+    ///
+    /// Hancom uses this pattern for photographed/scanned pages embedded in an
+    /// otherwise flowing document: one or more PAPER-relative Square pictures
+    /// are painted on the current page, and the next visible flow content starts
+    /// on the following page. Generic line-segment height metrics do not see
+    /// this because the picture paragraph itself has only a tiny text line.
+    fn page_relative_scan_breaks(
+        &self,
+        paragraphs: &[Paragraph],
+        page_def: &PageDef,
+    ) -> std::collections::HashSet<usize> {
+        let layout = PageLayoutInfo::from_page_def(page_def, &ColumnDef::default(), self.dpi);
+        let mut breaks = std::collections::HashSet::new();
+        let mut idx = 0;
+        while idx < paragraphs.len() {
+            if !self.is_page_relative_full_page_scan_para(&paragraphs[idx], &layout) {
+                idx += 1;
+                continue;
+            }
+
+            let start = idx;
+            while idx < paragraphs.len()
+                && self.is_page_relative_full_page_scan_para(&paragraphs[idx], &layout)
+            {
+                idx += 1;
+            }
+
+            if idx < paragraphs.len()
+                && paragraphs[start..idx]
+                    .iter()
+                    .any(|p| p.line_segs.first().is_some_and(|ls| ls.vertical_pos <= 1600))
+                && paragraphs[idx..].iter().any(para_has_visible_flow_content)
+            {
+                breaks.insert(idx);
+            }
+        }
+        breaks
+    }
+
+    fn is_page_relative_full_page_scan_para(
+        &self,
+        para: &Paragraph,
+        layout: &PageLayoutInfo,
+    ) -> bool {
+        if para.controls.is_empty() {
+            return false;
+        }
+        if para_has_visible_text(para) {
+            return false;
+        }
+        para.controls.iter().any(|ctrl| {
+            let common = match ctrl {
+                Control::Picture(pic) => Some(&pic.common),
+                Control::Shape(shape) => match shape.as_ref() {
+                    crate::model::shape::ShapeObject::Picture(pic) => Some(&pic.common),
+                    _ => None,
+                },
+                _ => None,
+            };
+            common.is_some_and(|common| {
+                use crate::model::shape::{HorzRelTo, TextWrap, VertRelTo};
+                if common.treat_as_char
+                    || !common.flow_with_text
+                    || !matches!(common.text_wrap, TextWrap::Square)
+                    || !matches!(common.vert_rel_to, VertRelTo::Paper)
+                    || !matches!(common.horz_rel_to, HorzRelTo::Paper | HorzRelTo::Page)
+                {
+                    return false;
+                }
+
+                let obj_w = hwpunit_to_px(common.width as i32, self.dpi);
+                let obj_h = hwpunit_to_px(common.height as i32, self.dpi);
+                let top_abs = hwpunit_to_px(common.vertical_offset as i32, self.dpi);
+                let bottom_abs = top_abs + obj_h;
+                let body_top = layout.body_area.y;
+                let body_bottom = layout.body_area.y + layout.available_body_height();
+                let overlaps_body = top_abs < body_bottom && bottom_abs > body_top;
+                let covers_body = obj_h >= layout.available_body_height() * 0.72
+                    || bottom_abs >= body_top + layout.available_body_height() * 0.92;
+                let wide_enough = obj_w >= layout.body_area.width * 0.82;
+                overlaps_body && covers_body && wide_enough
+            })
+        })
+    }
 }
 
 /// Task #321: 단일 문단의 컨트롤에서 body-wide TopAndBottom 표/도형이 차지하는 높이 계산.
@@ -5583,6 +5685,57 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn full_page_paper_scan_para() -> Paragraph {
+        use crate::model::image::Picture;
+        use crate::model::shape::{HorzRelTo, TextWrap, VertAlign, VertRelTo};
+
+        let pic = Picture {
+            common: crate::model::shape::CommonObjAttr {
+                width: 53_000,
+                height: 66_000,
+                vertical_offset: 12_000,
+                treat_as_char: false,
+                flow_with_text: true,
+                allow_overlap: true,
+                text_wrap: TextWrap::Square,
+                vert_rel_to: VertRelTo::Paper,
+                horz_rel_to: HorzRelTo::Paper,
+                vert_align: VertAlign::Top,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 1000,
+                line_spacing: 600,
+                ..Default::default()
+            }],
+            controls: vec![Control::Picture(Box::new(pic))],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn page_relative_scan_group_breaks_before_following_flow() {
+        let engine = TypesetEngine::with_default_dpi();
+        let mut following = make_paragraph_with_height(1000);
+        following.text = "following visible content".to_string();
+
+        let paragraphs = vec![
+            full_page_paper_scan_para(),
+            full_page_paper_scan_para(),
+            following,
+        ];
+
+        let breaks = engine.page_relative_scan_breaks(&paragraphs, &a4_page_def());
+
+        assert!(breaks.contains(&2));
+        assert!(!breaks.contains(&1));
     }
 
     /// 두 PaginationResult의 페이지 수와 각 페이지의 항목 수가 동일한지 비교
