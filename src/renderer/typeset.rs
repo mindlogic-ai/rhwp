@@ -250,6 +250,21 @@ fn should_clip_rowbreak_rowspan_declared_slack(
         && declared_row_height >= visible_height * 1.20
 }
 
+fn should_skip_topbottom_bridge_vpos_snap(
+    is_empty_bridge_para: bool,
+    recent_topbottom_table: bool,
+    upcoming_topbottom_table: bool,
+    current_height: f64,
+    snapped_y: f64,
+    available_height: f64,
+) -> bool {
+    is_empty_bridge_para
+        && recent_topbottom_table
+        && upcoming_topbottom_table
+        && snapped_y > current_height + available_height * 0.30
+        && snapped_y > available_height * 0.80
+}
+
 fn is_sample16_integrated_db_cluster_tail_paragraph(para: &Paragraph) -> bool {
     para.text.starts_with('\u{F03C5}')
         && para
@@ -2642,7 +2657,47 @@ impl TypesetEngine {
         let y = hc.vpos_adjust(st.current_height, para_idx, paragraphs, styles);
         // lazy_base 는 지연 산출 시 갱신될 수 있으므로 회수.
         st.vpos_lazy_base = hc.vpos_lazy_base;
-        st.current_height = y;
+        let is_empty_bridge_para = paragraphs.get(para_idx).is_some_and(|p| {
+            p.controls.is_empty()
+                && p.text
+                    .chars()
+                    .all(|c| c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace())
+        });
+        let has_topbottom_para_table = |p: &Paragraph| {
+            p.controls.iter().any(|c| {
+                matches!(c, Control::Table(t)
+                    if !t.common.treat_as_char
+                        && matches!(t.common.text_wrap, crate::model::shape::TextWrap::TopAndBottom)
+                        && matches!(t.common.vert_rel_to, crate::model::shape::VertRelTo::Para))
+            })
+        };
+        let recent_topbottom_table = para_idx > 0
+            && paragraphs[para_idx.saturating_sub(3)..para_idx]
+                .iter()
+                .any(has_topbottom_para_table);
+        let upcoming_topbottom_table = paragraphs
+            .get(para_idx + 1..(para_idx + 4).min(paragraphs.len()))
+            .is_some_and(|tail| tail.iter().any(has_topbottom_para_table));
+        if should_skip_topbottom_bridge_vpos_snap(
+            is_empty_bridge_para,
+            recent_topbottom_table,
+            upcoming_topbottom_table,
+            st.current_height,
+            y,
+            st.base_available_height(),
+        ) {
+            if std::env::var("RHWP_TYPESET_DRIFT").is_ok() {
+                eprintln!(
+                    "TYPESET_TOPBOTTOM_BRIDGE_VPOS_SKIP: pi={} cur_h={:.1} snapped_y={:.1} avail={:.1}",
+                    para_idx,
+                    st.current_height,
+                    y,
+                    st.base_available_height(),
+                );
+            }
+        } else {
+            st.current_height = y;
+        }
     }
 
     /// 기존 HeightMeasurer::measure_paragraph()와 동일한 로직.
@@ -5855,6 +5910,26 @@ mod tests {
         ));
         assert!(!should_clip_rowbreak_rowspan_declared_slack(
             100.0, 101.0, 115.0
+        ));
+    }
+
+    #[test]
+    fn topbottom_bridge_vpos_skip_requires_empty_table_bridge_and_large_snap() {
+        assert!(should_skip_topbottom_bridge_vpos_snap(
+            true, true, true, 424.0, 836.0, 877.0
+        ));
+
+        assert!(!should_skip_topbottom_bridge_vpos_snap(
+            false, true, true, 424.0, 836.0, 877.0
+        ));
+        assert!(!should_skip_topbottom_bridge_vpos_snap(
+            true, false, true, 424.0, 836.0, 877.0
+        ));
+        assert!(!should_skip_topbottom_bridge_vpos_snap(
+            true, true, false, 424.0, 836.0, 877.0
+        ));
+        assert!(!should_skip_topbottom_bridge_vpos_snap(
+            true, true, true, 424.0, 610.0, 877.0
         ));
     }
 
