@@ -499,7 +499,10 @@ impl LayoutEngine {
                     row_span: cell.row_span,
                     border_fill_id: cell.border_fill_id,
                     text_direction: cell.text_direction,
-                    clip: is_in_split_row,
+                    // Continuation fragments still render real table cells.
+                    // Clip every cell, not only intra-row split cells, so
+                    // over-wide cached cell text cannot paint across borders.
+                    clip: true,
                     model_cell_index: Some(cell_idx as u32),
                 }),
                 BoundingBox::new(cell_x, cell_y, cell_w, cell_h),

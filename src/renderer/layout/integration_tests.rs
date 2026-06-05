@@ -156,6 +156,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_partial_table_svg_clips_cells() {
+        let Some(core) = load_document("samples/hwpspec-w.hwp") else {
+            return;
+        };
+        use crate::renderer::pagination::PageItem;
+
+        let mut global_page = 0u32;
+        for result in &core.pagination {
+            for page in &result.pages {
+                let has_partial_table = page.column_contents.iter().any(|cc| {
+                    cc.items
+                        .iter()
+                        .any(|item| matches!(item, PageItem::PartialTable { .. }))
+                });
+                if has_partial_table {
+                    let svg = core.render_page_svg_native(global_page).unwrap_or_default();
+                    assert!(
+                        svg.contains("cell-clip-"),
+                        "PartialTable SVG page {} should clip table cells",
+                        global_page
+                    );
+                    return;
+                }
+                global_page += 1;
+            }
+        }
+
+        panic!("hwpspec-w.hwp에는 페이지 분할된 표(PartialTable)가 있어야 함");
+    }
+
     // ─── SVG 내보내기 검증 ───
 
     #[test]
