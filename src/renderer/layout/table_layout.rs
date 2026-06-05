@@ -907,6 +907,34 @@ impl LayoutEngine {
         col_widths
     }
 
+    pub(crate) fn is_repeated_rowbreak_photo_table(table: &crate::model::table::Table) -> bool {
+        !table.common.treat_as_char
+            && table.repeat_header
+            && matches!(
+                table.page_break,
+                crate::model::table::TablePageBreak::RowBreak
+            )
+            && matches!(
+                table.common.text_wrap,
+                crate::model::shape::TextWrap::TopAndBottom
+            )
+    }
+
+    pub(crate) fn is_picture_only_cell(cell: &crate::model::table::Cell) -> bool {
+        let mut has_picture = false;
+        let only_picture_controls = cell.paragraphs.iter().all(|p| {
+            p.text.trim().is_empty()
+                && p.controls.iter().all(|c| match c {
+                    Control::Picture(p) if !p.common.treat_as_char => {
+                        has_picture = true;
+                        true
+                    }
+                    _ => false,
+                })
+        });
+        has_picture && only_picture_controls
+    }
+
     /// 행 높이 계산 (MeasuredTable 우선, 없으면 셀/병합/컨텐츠 기반)
     pub(crate) fn resolve_row_heights(
         &self,
@@ -1086,13 +1114,13 @@ impl LayoutEngine {
                     }
                 }
                 let has_overlay_table_only = p.text.trim().is_empty()
-                    && p.controls
-                        .iter()
-                        .any(|c| matches!(c, Control::Table(t) if matches!(
+                    && p.controls.iter().any(|c| {
+                        matches!(c, Control::Table(t) if matches!(
                             t.common.text_wrap,
                             crate::model::shape::TextWrap::InFrontOfText
                                 | crate::model::shape::TextWrap::BehindText
-                        )))
+                        ))
+                    })
                     && !p.controls.iter().any(is_flow_affecting);
                 let only_overlay_tables = has_overlay_table_only;
                 if only_overlay_tables {
@@ -1139,10 +1167,7 @@ impl LayoutEngine {
                 };
                 let trust_cache = !unique_segs.is_empty()
                     && unique_segs.iter().all(|s| s.line_height > 0)
-                    && !p
-                        .controls
-                        .iter()
-                        .any(|c| matches!(c, Control::Table(_)));
+                    && !p.controls.iter().any(|c| matches!(c, Control::Table(_)));
                 if trust_cache {
                     let is_last_para = pidx + 1 == cell_para_count;
                     let line_count = unique_segs.len();
@@ -2366,6 +2391,31 @@ impl LayoutEngine {
                                 } else {
                                     // 비-인라인(자리차지/글뒤로/글앞으로) 이미지:
                                     // 본문배치 속성(가로/세로 기준, 정렬, 오프셋) 적용
+                                    if Self::is_repeated_rowbreak_photo_table(table)
+                                        && Self::is_picture_only_cell(cell)
+                                    {
+                                        let fit_area = LayoutRect {
+                                            x: inner_x,
+                                            y: cell_y + pad_top,
+                                            width: inner_width,
+                                            height: inner_height,
+                                        };
+                                        self.layout_picture_full(
+                                            tree,
+                                            &mut cell_node,
+                                            pic,
+                                            &fit_area,
+                                            bin_data_content,
+                                            para_alignment,
+                                            Some(section_index),
+                                            None,
+                                            None,
+                                            None,
+                                            true,
+                                        );
+                                        para_y += fit_area.height;
+                                        continue;
+                                    }
                                     let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
                                     let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                                     // [Task #577] TopAndBottom + vert_rel_to=Para 인 셀 내부 이미지는
@@ -4479,8 +4529,11 @@ impl LayoutEngine {
 #[cfg(test)]
 mod row_cut_tests {
     use super::{nested_table_y_start, LayoutEngine};
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
     use crate::model::paragraph::{LineSeg, Paragraph};
-    use crate::model::table::{Cell, Table};
+    use crate::model::shape::TextWrap;
+    use crate::model::table::{Cell, Table, TablePageBreak};
     use crate::renderer::style_resolver::ResolvedStyleSet;
 
     /// line_height=1200 HU (=16 px @96dpi), line_spacing=0 인 N줄 텍스트 문단.
@@ -4520,6 +4573,49 @@ mod row_cut_tests {
             cells,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn repeated_rowbreak_photo_predicate_is_structural() {
+        let mut pic = Picture::default();
+        pic.common.treat_as_char = false;
+        let picture_cell = Cell {
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(pic))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut t = table(vec![picture_cell.clone()]);
+        t.common.treat_as_char = false;
+        t.common.text_wrap = TextWrap::TopAndBottom;
+        t.page_break = TablePageBreak::RowBreak;
+        t.repeat_header = true;
+
+        assert!(LayoutEngine::is_repeated_rowbreak_photo_table(&t));
+        assert!(LayoutEngine::is_picture_only_cell(&picture_cell));
+
+        t.repeat_header = false;
+        assert!(!LayoutEngine::is_repeated_rowbreak_photo_table(&t));
+
+        let text_cell = Cell {
+            paragraphs: vec![Paragraph {
+                text: "not picture only".to_string(),
+                ..Default::default()
+            }],
+            ..picture_cell
+        };
+        assert!(!LayoutEngine::is_picture_only_cell(&text_cell));
+
+        let empty_cell = Cell {
+            paragraphs: vec![Paragraph::default()],
+            ..Default::default()
+        };
+        assert!(!LayoutEngine::is_picture_only_cell(&empty_cell));
     }
 
     #[test]

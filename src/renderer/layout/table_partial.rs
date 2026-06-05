@@ -1006,6 +1006,31 @@ impl LayoutEngine {
                                     inline_x += pic_w;
                                 } else {
                                     // 비인라인 이미지: 기존 동작
+                                    if Self::is_repeated_rowbreak_photo_table(table)
+                                        && Self::is_picture_only_cell(cell)
+                                    {
+                                        let fit_area = LayoutRect {
+                                            x: inner_x,
+                                            y: cell_y + pad_top,
+                                            width: inner_width,
+                                            height: inner_height,
+                                        };
+                                        self.layout_picture_full(
+                                            tree,
+                                            &mut cell_node,
+                                            pic,
+                                            &fit_area,
+                                            bin_data_content,
+                                            para_alignment,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            true,
+                                        );
+                                        para_y += fit_area.height;
+                                        continue;
+                                    }
                                     let pic_area = LayoutRect {
                                         y: para_y,
                                         height: (inner_area.height - (para_y - inner_area.y))

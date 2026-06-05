@@ -731,8 +731,7 @@ impl HeightMeasurer {
                             //     own size; the outer linesegs don't
                             //     embody nested-table height)
                             let unique_segs: Vec<&crate::model::paragraph::LineSeg> = {
-                                let mut seen_vpos: Vec<i32> =
-                                    Vec::with_capacity(p.line_segs.len());
+                                let mut seen_vpos: Vec<i32> = Vec::with_capacity(p.line_segs.len());
                                 p.line_segs
                                     .iter()
                                     .filter(|s| {
@@ -747,32 +746,27 @@ impl HeightMeasurer {
                             };
                             let trust_cache = !unique_segs.is_empty()
                                 && unique_segs.iter().all(|s| s.line_height > 0)
-                                && !p
-                                    .controls
-                                    .iter()
-                                    .any(|c| matches!(c, Control::Table(_)));
+                                && !p.controls.iter().any(|c| matches!(c, Control::Table(_)));
                             if trust_cache {
                                 let is_last_para = pidx + 1 == cell_para_count;
-                                let is_block_rowbreak = matches!(
-                                    table.page_break,
-                                    TablePageBreak::RowBreak
-                                ) && !table.common.treat_as_char;
+                                let is_block_rowbreak =
+                                    matches!(table.page_break, TablePageBreak::RowBreak)
+                                        && !table.common.treat_as_char;
                                 let line_count = unique_segs.len();
                                 let lines_total: f64 = unique_segs
                                     .iter()
                                     .enumerate()
                                     .map(|(i, seg)| {
                                         let h = hwpunit_to_px(seg.line_height, self.dpi);
-                                        let is_cell_last_line =
-                                            is_last_para && i + 1 == line_count;
+                                        let is_cell_last_line = is_last_para && i + 1 == line_count;
                                         // Match the trailing-ls rule from the
                                         // recompose path below (Task #874 #4
                                         // / #1086): block RowBreak tables
                                         // drop the cell's last trailing
                                         // line-spacing to match render-visible
                                         // height; everyone else keeps it.
-                                        let include_trailing_ls = !is_cell_last_line
-                                            || cell_para_count > 1;
+                                        let include_trailing_ls =
+                                            !is_cell_last_line || cell_para_count > 1;
                                         let include_trailing_ls = include_trailing_ls
                                             && (!is_cell_last_line || !is_block_rowbreak);
                                         if include_trailing_ls {
@@ -1206,8 +1200,7 @@ impl HeightMeasurer {
         //     2x1 sample 15: ratio 1.04 → no shrink (correct)
         //     3x2 sample 15: ratio 1.00 → no shrink (correct)
         //   tac=true cases unchanged (existing 2% threshold).
-        let non_tac_shrink_floor =
-            !table.common.treat_as_char && raw_table_height < common_h * 1.5;
+        let non_tac_shrink_floor = !table.common.treat_as_char && raw_table_height < common_h * 1.5;
         // === [Mindlogic patch — non-TAC shrink requires picture content] ===
         // The non-TAC TopAndBottom shrink above is the photo-grid case:
         // Hancom keeps the declared `<hp:sz>` height and scales the cell
@@ -1227,21 +1220,30 @@ impl HeightMeasurer {
                     .any(|ctrl| matches!(ctrl, Control::Picture(_)))
             })
         });
+        let is_non_tac_topbottom_picture = matches!(
+            table.common.text_wrap,
+            crate::model::shape::TextWrap::TopAndBottom
+        ) && table_has_pictures;
+        let is_repeated_rowbreak_photo_table = !table.common.treat_as_char
+            && table.repeat_header
+            && matches!(table.page_break, TablePageBreak::RowBreak)
+            && is_non_tac_topbottom_picture;
         let should_shrink = common_h > 0.0
             && raw_table_height > common_h + shrink_threshold
             && !non_tac_shrink_floor
-            && (table.common.treat_as_char
-                || (matches!(
-                    table.common.text_wrap,
-                    crate::model::shape::TextWrap::TopAndBottom
-                ) && table_has_pictures));
+            && (table.common.treat_as_char || is_non_tac_topbottom_picture);
         // === [/Mindlogic patch] ====================================
         let table_height = if should_shrink {
-            let scale = common_h / raw_table_height;
+            let target_h = if is_repeated_rowbreak_photo_table {
+                common_h + (raw_table_height - common_h) * 0.25
+            } else {
+                common_h
+            };
+            let scale = target_h / raw_table_height;
             for h in &mut row_heights {
                 *h *= scale;
             }
-            common_h
+            target_h
         } else {
             raw_table_height
         };
