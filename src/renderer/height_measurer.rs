@@ -10,7 +10,7 @@ use crate::model::control::Control;
 use crate::model::footnote::{Footnote, FootnoteShape};
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::Caption;
-use crate::model::table::{Table, TablePageBreak};
+use crate::model::table::{HwpxTablePageBreak, Table, TablePageBreak};
 
 /// treat_as_char 표가 인라인(텍스트와 나란히)인지 판별
 ///
@@ -479,19 +479,39 @@ impl HeightMeasurer {
         use crate::model::shape::TextWrap;
         let mut total = 0.0;
         for para in paragraphs {
+            let is_empty_host = para
+                .text
+                .chars()
+                .all(|c| c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace());
             for ctrl in &para.controls {
                 match ctrl {
                     Control::Picture(pic)
                         if !pic.common.treat_as_char
-                            && matches!(pic.common.text_wrap, TextWrap::TopAndBottom) =>
+                            && matches!(
+                                pic.common.text_wrap,
+                                TextWrap::TopAndBottom | TextWrap::Square
+                            )
+                            && (matches!(pic.common.text_wrap, TextWrap::TopAndBottom)
+                                || is_empty_host) =>
                     {
-                        total += hwpunit_to_px(pic.common.height as i32, self.dpi);
+                        let v_off =
+                            hwpunit_to_px(pic.common.vertical_offset as i32, self.dpi).max(0.0);
+                        let mb = hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi).max(0.0);
+                        total += v_off + hwpunit_to_px(pic.common.height as i32, self.dpi) + mb;
                     }
                     Control::Shape(shape)
                         if !shape.common().treat_as_char
-                            && matches!(shape.common().text_wrap, TextWrap::TopAndBottom) =>
+                            && matches!(
+                                shape.common().text_wrap,
+                                TextWrap::TopAndBottom | TextWrap::Square
+                            )
+                            && (matches!(shape.common().text_wrap, TextWrap::TopAndBottom)
+                                || is_empty_host) =>
                     {
-                        total += hwpunit_to_px(shape.common().height as i32, self.dpi);
+                        let common = shape.common();
+                        let v_off = hwpunit_to_px(common.vertical_offset as i32, self.dpi).max(0.0);
+                        let mb = hwpunit_to_px(common.margin.bottom as i32, self.dpi).max(0.0);
+                        total += v_off + hwpunit_to_px(common.height as i32, self.dpi) + mb;
                     }
                     _ => {}
                 }
@@ -1224,14 +1244,57 @@ impl HeightMeasurer {
             table.common.text_wrap,
             crate::model::shape::TextWrap::TopAndBottom
         ) && table_has_pictures;
+        let is_hwpx_table_break_photo_table = !table.common.treat_as_char
+            && matches!(table.hwpx_page_break, Some(HwpxTablePageBreak::Table))
+            && is_non_tac_topbottom_picture;
         let is_repeated_rowbreak_photo_table = !table.common.treat_as_char
             && table.repeat_header
             && matches!(table.page_break, TablePageBreak::RowBreak)
             && is_non_tac_topbottom_picture;
+        let has_stale_tiny_picture_cell = !table.common.treat_as_char
+            && matches!(table.page_break, TablePageBreak::RowBreak)
+            && table.cells.iter().any(|cell| {
+                if cell.row_span != 1 || cell.height >= 0x80000000 {
+                    return false;
+                }
+                let cell_h = hwpunit_to_px(cell.height as i32, self.dpi);
+                let max_pic_h = cell
+                    .paragraphs
+                    .iter()
+                    .flat_map(|para| para.controls.iter())
+                    .filter_map(|ctrl| match ctrl {
+                        Control::Picture(pic) => {
+                            Some(hwpunit_to_px(pic.common.height as i32, self.dpi))
+                        }
+                        _ => None,
+                    })
+                    .fold(0.0_f64, f64::max);
+                max_pic_h > 0.0 && cell_h < max_pic_h * 0.25
+            });
         let should_shrink = common_h > 0.0
             && raw_table_height > common_h + shrink_threshold
             && !non_tac_shrink_floor
+            && !has_stale_tiny_picture_cell
+            && !is_hwpx_table_break_photo_table
             && (table.common.treat_as_char || is_non_tac_topbottom_picture);
+        if std::env::var("RHWP_TABLE_DRIFT").is_ok()
+            && !table.common.treat_as_char
+            && is_non_tac_topbottom_picture
+            && raw_table_height > common_h + shrink_threshold
+        {
+            eprintln!(
+                "TABLE_SHRINK_INPUT: hwpx={:?} page_break={:?} repeat={} raw={:.1} common={:.1} floor={} stale={} table_break={} shrink={}",
+                table.hwpx_page_break,
+                table.page_break,
+                table.repeat_header,
+                raw_table_height,
+                common_h,
+                non_tac_shrink_floor,
+                has_stale_tiny_picture_cell,
+                is_hwpx_table_break_photo_table,
+                should_shrink,
+            );
+        }
         // === [/Mindlogic patch] ====================================
         let table_height = if should_shrink {
             let target_h = if is_repeated_rowbreak_photo_table {
@@ -2238,6 +2301,175 @@ mod tests {
         let measured = measurer.measure_table(&table, 0, 0, &styles);
         assert_eq!(measured.row_heights.len(), 2);
         assert!(measured.total_height > 0.0);
+    }
+
+    #[test]
+    fn rowbreak_square_picture_cells_override_stale_tiny_cell_height() {
+        use crate::model::control::Control;
+        use crate::model::image::Picture;
+        use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+        use crate::model::table::TablePageBreak;
+
+        let measurer = HeightMeasurer::with_default_dpi();
+        let picture = Picture {
+            common: CommonObjAttr {
+                width: 22_792,
+                height: 14_700,
+                treat_as_char: false,
+                text_wrap: TextWrap::Square,
+                vert_rel_to: VertRelTo::Para,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let picture_para = Paragraph {
+            line_segs: vec![LineSeg {
+                line_height: 900,
+                line_spacing: 540,
+                ..Default::default()
+            }],
+            controls: vec![Control::Picture(Box::new(picture))],
+            ..Default::default()
+        };
+        let mut table = Table {
+            row_count: 3,
+            col_count: 2,
+            page_break: TablePageBreak::RowBreak,
+            cells: vec![
+                Cell {
+                    row: 0,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 2,
+                    height: 2_331,
+                    width: 47_624,
+                    ..Default::default()
+                },
+                Cell {
+                    row: 1,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    height: 14_977,
+                    width: 23_812,
+                    paragraphs: vec![picture_para.clone()],
+                    ..Default::default()
+                },
+                Cell {
+                    row: 2,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    height: 282,
+                    width: 23_812,
+                    paragraphs: vec![picture_para.clone()],
+                    ..Default::default()
+                },
+                Cell {
+                    row: 2,
+                    col: 1,
+                    row_span: 1,
+                    col_span: 1,
+                    height: 282,
+                    width: 23_812,
+                    paragraphs: vec![picture_para],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        table.common.treat_as_char = false;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.common.height = 18_590;
+
+        let styles = ResolvedStyleSet::default();
+        let measured = measurer.measure_table(&table, 0, 0, &styles);
+
+        assert!(
+            measured.row_heights[2] > hwpunit_to_px(14_000, DEFAULT_DPI),
+            "stale tiny row must grow to the Square picture extent, got {:.1}",
+            measured.row_heights[2]
+        );
+        assert!(
+            measured.total_height > hwpunit_to_px(table.common.height as i32, DEFAULT_DPI) * 1.5,
+            "stale picture cells must not be shrunk back to declared table height"
+        );
+    }
+
+    #[test]
+    fn hwpx_table_break_non_tac_photo_table_keeps_raw_height_for_pagination() {
+        use crate::model::control::Control;
+        use crate::model::image::Picture;
+        use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+        use crate::model::table::{HwpxTablePageBreak, TablePageBreak};
+
+        fn picture_para() -> Paragraph {
+            Paragraph {
+                line_segs: vec![LineSeg {
+                    line_height: 900,
+                    line_spacing: 540,
+                    ..Default::default()
+                }],
+                controls: vec![Control::Picture(Box::new(Picture {
+                    common: CommonObjAttr {
+                        width: 8_000,
+                        height: 12_000,
+                        treat_as_char: false,
+                        text_wrap: TextWrap::TopAndBottom,
+                        vert_rel_to: VertRelTo::Para,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }))],
+                ..Default::default()
+            }
+        }
+
+        fn table(hwpx_page_break: HwpxTablePageBreak) -> Table {
+            let mut cells = Vec::new();
+            for row in 0..4 {
+                for col in 0..2 {
+                    cells.push(Cell {
+                        row,
+                        col,
+                        row_span: 1,
+                        col_span: 1,
+                        height: 4_000,
+                        width: 10_000,
+                        paragraphs: vec![picture_para()],
+                        ..Default::default()
+                    });
+                }
+            }
+            let mut table = Table {
+                row_count: 4,
+                col_count: 2,
+                page_break: TablePageBreak::CellBreak,
+                hwpx_page_break: Some(hwpx_page_break),
+                repeat_header: true,
+                cells,
+                ..Default::default()
+            };
+            table.common.treat_as_char = false;
+            table.common.text_wrap = TextWrap::TopAndBottom;
+            table.common.height = 18_000;
+            table
+        }
+
+        let measurer = HeightMeasurer::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let declared = hwpunit_to_px(18_000, DEFAULT_DPI);
+        let cell_break = measurer.measure_table(&table(HwpxTablePageBreak::Cell), 0, 0, &styles);
+        let table_break = measurer.measure_table(&table(HwpxTablePageBreak::Table), 0, 0, &styles);
+
+        assert!(
+            (cell_break.total_height - declared).abs() < 0.1,
+            "ordinary HWPX CELL photo grids still shrink to declared height"
+        );
+        assert!(
+            table_break.total_height > declared * 1.5,
+            "HWPX TABLE-break photo grids must keep raw row height so they can paginate"
+        );
     }
 
     #[test]

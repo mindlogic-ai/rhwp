@@ -907,17 +907,39 @@ impl LayoutEngine {
         col_widths
     }
 
-    pub(crate) fn is_repeated_rowbreak_photo_table(table: &crate::model::table::Table) -> bool {
+    pub(crate) fn is_repeated_photo_grid_table(table: &crate::model::table::Table) -> bool {
+        let picture_grid_rows = (0..table.row_count as usize)
+            .filter(|&row| {
+                let row_cells: Vec<_> = table
+                    .cells
+                    .iter()
+                    .filter(|cell| cell.row as usize == row && cell.row_span == 1)
+                    .collect();
+                row_cells.len() >= 2
+                    && row_cells
+                        .iter()
+                        .all(|cell| Self::is_picture_only_cell(cell))
+            })
+            .count();
+
         !table.common.treat_as_char
-            && table.repeat_header
             && matches!(
                 table.page_break,
-                crate::model::table::TablePageBreak::RowBreak
+                crate::model::table::TablePageBreak::CellBreak
+                    | crate::model::table::TablePageBreak::RowBreak
             )
             && matches!(
                 table.common.text_wrap,
                 crate::model::shape::TextWrap::TopAndBottom
             )
+            && (table.repeat_header || picture_grid_rows >= 2)
+    }
+
+    pub(crate) fn is_repeated_rowbreak_photo_table(table: &crate::model::table::Table) -> bool {
+        matches!(
+            table.page_break,
+            crate::model::table::TablePageBreak::RowBreak
+        ) && Self::is_repeated_photo_grid_table(table)
     }
 
     pub(crate) fn is_picture_only_cell(cell: &crate::model::table::Cell) -> bool {
@@ -925,7 +947,7 @@ impl LayoutEngine {
         let only_picture_controls = cell.paragraphs.iter().all(|p| {
             p.text.trim().is_empty()
                 && p.controls.iter().all(|c| match c {
-                    Control::Picture(p) if !p.common.treat_as_char => {
+                    Control::Picture(_) => {
                         has_picture = true;
                         true
                     }
@@ -933,6 +955,143 @@ impl LayoutEngine {
                 })
         });
         has_picture && only_picture_controls
+    }
+
+    pub(crate) fn repeated_photo_picture_fill_area(
+        &self,
+        picture: &crate::model::image::Picture,
+        fit_area: LayoutRect,
+    ) -> LayoutRect {
+        let picture_h = hwpunit_to_px(picture.common.height as i32, self.dpi);
+        let excess = picture_h - fit_area.height;
+        const MIN_VISUAL_EXCESS_PX: f64 = 8.0;
+        const MAX_VISUAL_EXCESS_PX: f64 = 32.0;
+        if excess < MIN_VISUAL_EXCESS_PX || excess > MAX_VISUAL_EXCESS_PX {
+            return fit_area;
+        }
+
+        LayoutRect {
+            y: fit_area.y - (excess * 0.2).min(4.0),
+            height: picture_h,
+            ..fit_area
+        }
+    }
+
+    pub(crate) fn mixed_photo_grid_picture_y_offset(
+        &self,
+        table: &crate::model::table::Table,
+        cell: &crate::model::table::Cell,
+        picture: &crate::model::image::Picture,
+    ) -> f64 {
+        if !Self::is_repeated_photo_grid_table(table)
+            || !Self::is_picture_only_cell(cell)
+            || cell.row_span != 1
+            || picture.common.vertical_offset != 0
+            || picture.common.horizontal_offset != 0
+            || !picture.common.flow_with_text
+            || !matches!(
+                picture.common.text_wrap,
+                crate::model::shape::TextWrap::TopAndBottom
+            )
+            || !matches!(
+                picture.common.vert_rel_to,
+                crate::model::shape::VertRelTo::Para
+            )
+            || !matches!(
+                picture.common.horz_rel_to,
+                crate::model::shape::HorzRelTo::Column
+            )
+        {
+            return 0.0;
+        }
+
+        let mut row_has_tac_picture = false;
+        let mut row_has_non_tac_picture = false;
+        for sibling in table.cells.iter().filter(|sibling| {
+            sibling.row == cell.row && sibling.row_span == 1 && Self::is_picture_only_cell(sibling)
+        }) {
+            for para in &sibling.paragraphs {
+                for ctrl in &para.controls {
+                    if let Control::Picture(pic) = ctrl {
+                        if pic.common.treat_as_char {
+                            row_has_tac_picture = true;
+                        } else {
+                            row_has_non_tac_picture = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !row_has_tac_picture || !row_has_non_tac_picture || cell.height <= 0 {
+            return 0.0;
+        }
+
+        let picture_h = hwpunit_to_px(picture.common.height as i32, self.dpi);
+        let cell_h = hwpunit_to_px(cell.height as i32, self.dpi);
+        let excess = picture_h - cell_h;
+        const MIN_MIXED_ROW_EXCESS_PX: f64 = 32.0;
+        const MAX_MIXED_ROW_EXCESS_PX: f64 = 96.0;
+        if !(MIN_MIXED_ROW_EXCESS_PX..=MAX_MIXED_ROW_EXCESS_PX).contains(&excess) {
+            return 0.0;
+        }
+
+        (excess * 0.25).min(15.0)
+    }
+
+    fn fixed_tac_declared_row_heights(
+        table: &crate::model::table::Table,
+        row_count: usize,
+        dpi: f64,
+    ) -> Option<Vec<f64>> {
+        if !table.common.treat_as_char
+            || !matches!(
+                table.common.text_wrap,
+                crate::model::shape::TextWrap::TopAndBottom
+            )
+            || !matches!(
+                table.page_break,
+                crate::model::table::TablePageBreak::CellBreak
+                    | crate::model::table::TablePageBreak::RowBreak
+            )
+            || table.common.height == 0
+            || table.common.height >= 0x8000_0000
+        {
+            return None;
+        }
+
+        let mut declared = vec![0.0; row_count];
+        for cell in &table.cells {
+            if cell.row_span == 1 && (cell.row as usize) < row_count && cell.height < 0x8000_0000 {
+                let h = hwpunit_to_px(cell.height as i32, dpi);
+                if h > declared[cell.row as usize] {
+                    declared[cell.row as usize] = h;
+                }
+            }
+        }
+        if declared.iter().any(|h| *h <= 0.0) {
+            return None;
+        }
+
+        const EPS_PX: f64 = 1.25;
+        let declared_total: f64 = declared.iter().sum();
+        let table_h = hwpunit_to_px(table.common.height as i32, dpi);
+        if (declared_total - table_h).abs() > EPS_PX {
+            return None;
+        }
+
+        for cell in &table.cells {
+            let r = cell.row as usize;
+            let span = cell.row_span as usize;
+            if span > 1 && r + span <= row_count && cell.height < 0x8000_0000 {
+                let span_h = hwpunit_to_px(cell.height as i32, dpi);
+                let rows_h: f64 = declared[r..r + span].iter().sum();
+                if (span_h - rows_h).abs() > EPS_PX {
+                    return None;
+                }
+            }
+        }
+
+        Some(declared)
     }
 
     /// 행 높이 계산 (MeasuredTable 우선, 없으면 셀/병합/컨텐츠 기반)
@@ -944,6 +1103,10 @@ impl LayoutEngine {
         measured_table: Option<&MeasuredTable>,
         styles: &ResolvedStyleSet,
     ) -> Vec<f64> {
+        if let Some(declared) = Self::fixed_tac_declared_row_heights(table, row_count, self.dpi) {
+            return declared;
+        }
+
         if let Some(mt) = measured_table {
             let mut rh = mt.row_heights.clone();
             rh.resize(row_count, hwpunit_to_px(400, self.dpi));
@@ -2056,6 +2219,8 @@ impl LayoutEngine {
                     width: inner_width,
                     height: inner_height,
                 };
+                let is_repeated_photo_picture_cell =
+                    Self::is_repeated_photo_grid_table(table) && Self::is_picture_only_cell(cell);
 
                 // 셀 내 문단 + 컨트롤 통합 레이아웃
                 let mut para_y = text_y_start;
@@ -2173,7 +2338,12 @@ impl LayoutEngine {
                     let total_inline_width: f64 =
                         tac_line_widths.iter().cloned().fold(0.0f64, f64::max);
 
-                    if !has_block_table_ctrl {
+                    if is_repeated_photo_picture_cell {
+                        // Picture-only cells in repeated photo-grid tables are laid
+                        // out by the explicit picture path below. Letting the inline
+                        // TAC paragraph path emit them first gives TAC and non-TAC
+                        // neighbor cells different y origins and duplicate images.
+                    } else if !has_block_table_ctrl {
                         let is_last_para = cp_idx + 1 == composed_paras.len();
                         // 분할 중첩 표: 셀 하단을 초과하는 줄은 렌더링하지 않음
                         let end_line = if row_filter.is_some() {
@@ -2272,6 +2442,32 @@ impl LayoutEngine {
                         match ctrl {
                             Control::Picture(pic) => {
                                 if pic.common.treat_as_char {
+                                    if Self::is_repeated_photo_grid_table(table)
+                                        && Self::is_picture_only_cell(cell)
+                                    {
+                                        let fit_area = LayoutRect {
+                                            x: inner_x,
+                                            y: cell_y + pad_top,
+                                            width: inner_width,
+                                            height: inner_height,
+                                        };
+                                        let mut fit_area =
+                                            self.repeated_photo_picture_fill_area(pic, fit_area);
+                                        fit_area.y += self
+                                            .mixed_photo_grid_picture_y_offset(table, cell, pic);
+                                        self.layout_picture_fill_rect(
+                                            tree,
+                                            &mut cell_node,
+                                            pic,
+                                            &fit_area,
+                                            bin_data_content,
+                                            Some(section_index),
+                                            None,
+                                            None,
+                                        );
+                                        para_y += fit_area.height;
+                                        continue;
+                                    }
                                     let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
                                     // [Task #928] paragraph_layout 이 inline picture 를 emit 한
                                     // 경우 set_inline_shape_position 을 호출하므로 (paragraph_layout.rs
@@ -2391,7 +2587,7 @@ impl LayoutEngine {
                                 } else {
                                     // 비-인라인(자리차지/글뒤로/글앞으로) 이미지:
                                     // 본문배치 속성(가로/세로 기준, 정렬, 오프셋) 적용
-                                    if Self::is_repeated_rowbreak_photo_table(table)
+                                    if Self::is_repeated_photo_grid_table(table)
                                         && Self::is_picture_only_cell(cell)
                                     {
                                         let fit_area = LayoutRect {
@@ -2400,23 +2596,23 @@ impl LayoutEngine {
                                             width: inner_width,
                                             height: inner_height,
                                         };
-                                        self.layout_picture_full(
+                                        let mut fit_area =
+                                            self.repeated_photo_picture_fill_area(pic, fit_area);
+                                        fit_area.y += self
+                                            .mixed_photo_grid_picture_y_offset(table, cell, pic);
+                                        self.layout_picture_fill_rect(
                                             tree,
                                             &mut cell_node,
                                             pic,
                                             &fit_area,
                                             bin_data_content,
-                                            para_alignment,
                                             Some(section_index),
                                             None,
                                             None,
-                                            None,
-                                            true,
                                         );
                                         para_y += fit_area.height;
                                         continue;
                                     }
-                                    let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
                                     let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
                                     // [Task #577] TopAndBottom + vert_rel_to=Para 인 셀 내부 이미지는
                                     // anchor 라인이 이미지에 의해 displaced 되므로, layout_composed_paragraph
@@ -2430,43 +2626,57 @@ impl LayoutEngine {
                                         pic.common.vert_rel_to,
                                         crate::model::shape::VertRelTo::Para
                                     ) {
-                                        para_y_before_compose
+                                        if table.common.treat_as_char
+                                            && matches!(
+                                                table.page_break,
+                                                crate::model::table::TablePageBreak::RowBreak
+                                            )
+                                            && Self::is_picture_only_cell(cell)
+                                        {
+                                            let host_line_advance = para
+                                                .line_segs
+                                                .first()
+                                                .map(|seg| {
+                                                    hwpunit_to_px(
+                                                        seg.line_height + seg.line_spacing,
+                                                        self.dpi,
+                                                    )
+                                                })
+                                                .unwrap_or(0.0);
+                                            para_y_before_compose + host_line_advance
+                                        } else {
+                                            para_y_before_compose
+                                        }
                                     } else {
                                         para_y
                                     };
-                                    let cell_area = LayoutRect {
+                                    let preserve_cell_fill_height = table.common.treat_as_char
+                                        && matches!(
+                                            table.page_break,
+                                            crate::model::table::TablePageBreak::RowBreak
+                                        )
+                                        && Self::is_picture_only_cell(cell);
+                                    let pic_area = LayoutRect {
                                         y: anchor_y,
-                                        height: (inner_area.height - (anchor_y - inner_area.y))
-                                            .max(0.0),
+                                        height: if preserve_cell_fill_height {
+                                            inner_area.height
+                                        } else {
+                                            (inner_area.height - (anchor_y - inner_area.y)).max(0.0)
+                                        },
                                         ..inner_area
                                     };
-                                    let (pic_x, pic_y) = self.compute_object_position(
-                                        &pic.common,
-                                        pic_w,
-                                        pic_h,
-                                        &cell_area,
-                                        &inner_area,
-                                        &inner_area,
-                                        &inner_area,
-                                        anchor_y,
-                                        para_alignment,
-                                    );
-                                    let pic_area = LayoutRect {
-                                        x: pic_x,
-                                        y: pic_y,
-                                        width: pic_w,
-                                        height: pic_h,
-                                    };
-                                    self.layout_picture(
+                                    self.layout_picture_full(
                                         tree,
                                         &mut cell_node,
                                         pic,
                                         &pic_area,
                                         bin_data_content,
-                                        Alignment::Left,
+                                        para_alignment,
                                         Some(section_index),
                                         None,
                                         None,
+                                        None,
+                                        true,
                                     );
                                     para_y += pic_h;
                                 }
@@ -3908,24 +4118,51 @@ impl LayoutEngine {
 
         // [Task #1022] 비인라인 Picture/Shape(wrap=TopAndBottom) — LINE_SEG.lh 에
         // 미포함이므로 HeightMeasurer 와 동일하게 cell_units 끝에 별도 가산.
+        // Empty-host Square pictures in table cells are also height-bearing:
+        // they do not have surrounding text to flow beside, so Hancom reserves
+        // the picture extent when deciding row height and row breaks.
         // 분할 가능하도록 ~16px 단위로 쪼개되, 가시 줄은 없다(filler).
         {
             use crate::model::shape::TextWrap;
             let mut non_inline_h = 0.0f64;
             for para in &cell.paragraphs {
+                let is_empty_host = para
+                    .text
+                    .chars()
+                    .all(|c| c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace());
                 for ctrl in &para.controls {
                     match ctrl {
                         Control::Picture(pic)
                             if !pic.common.treat_as_char
-                                && matches!(pic.common.text_wrap, TextWrap::TopAndBottom) =>
+                                && matches!(
+                                    pic.common.text_wrap,
+                                    TextWrap::TopAndBottom | TextWrap::Square
+                                )
+                                && (matches!(pic.common.text_wrap, TextWrap::TopAndBottom)
+                                    || is_empty_host) =>
                         {
-                            non_inline_h += hwpunit_to_px(pic.common.height as i32, self.dpi);
+                            let v_off =
+                                hwpunit_to_px(pic.common.vertical_offset as i32, self.dpi).max(0.0);
+                            let mb =
+                                hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi).max(0.0);
+                            non_inline_h +=
+                                v_off + hwpunit_to_px(pic.common.height as i32, self.dpi) + mb;
                         }
                         crate::model::control::Control::Shape(shape)
                             if !shape.common().treat_as_char
-                                && matches!(shape.common().text_wrap, TextWrap::TopAndBottom) =>
+                                && matches!(
+                                    shape.common().text_wrap,
+                                    TextWrap::TopAndBottom | TextWrap::Square
+                                )
+                                && (matches!(shape.common().text_wrap, TextWrap::TopAndBottom)
+                                    || is_empty_host) =>
                         {
-                            non_inline_h += hwpunit_to_px(shape.common().height as i32, self.dpi);
+                            let common = shape.common();
+                            let v_off =
+                                hwpunit_to_px(common.vertical_offset as i32, self.dpi).max(0.0);
+                            let mb = hwpunit_to_px(common.margin.bottom as i32, self.dpi).max(0.0);
+                            non_inline_h +=
+                                v_off + hwpunit_to_px(common.height as i32, self.dpi) + mb;
                         }
                         _ => {}
                     }
@@ -4262,6 +4499,11 @@ impl LayoutEngine {
             .collect();
         row_cells.sort_by_key(|c| c.col);
         let is_whole_row = start_cut.is_empty() && end_cut.is_empty();
+        let is_repeated_photo_grid_row = Self::is_repeated_rowbreak_photo_table(table)
+            && row_cells.len() >= 2
+            && row_cells
+                .iter()
+                .all(|cell| Self::is_picture_only_cell(cell));
         let mut max_h = 0.0f64;
         for (i, cell) in row_cells.iter().enumerate() {
             let units = self.cell_units(cell, table, styles);
@@ -4305,6 +4547,7 @@ impl LayoutEngine {
             const CLAMP_MAX_RATIO: f64 = 2.0;
             let want = content + pad_cell;
             let clamp_picture = cell_has_picture
+                && !is_repeated_photo_grid_row
                 && cell_h_px > 0.0
                 && want > cell_h_px + CLAMP_MIN_EXCESS_PX
                 && want <= cell_h_px * CLAMP_MAX_RATIO;
@@ -4532,8 +4775,9 @@ mod row_cut_tests {
     use crate::model::control::Control;
     use crate::model::image::Picture;
     use crate::model::paragraph::{LineSeg, Paragraph};
-    use crate::model::shape::TextWrap;
+    use crate::model::shape::{HorzRelTo, TextWrap, VertRelTo};
     use crate::model::table::{Cell, Table, TablePageBreak};
+    use crate::renderer::page_layout::LayoutRect;
     use crate::renderer::style_resolver::ResolvedStyleSet;
 
     /// line_height=1200 HU (=16 px @96dpi), line_spacing=0 인 N줄 텍스트 문단.
@@ -4599,8 +4843,52 @@ mod row_cut_tests {
         assert!(LayoutEngine::is_repeated_rowbreak_photo_table(&t));
         assert!(LayoutEngine::is_picture_only_cell(&picture_cell));
 
+        let mut tac_pic = Picture::default();
+        tac_pic.common.treat_as_char = true;
+        let tac_picture_cell = Cell {
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(tac_pic))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(LayoutEngine::is_picture_only_cell(&tac_picture_cell));
+
         t.repeat_header = false;
         assert!(!LayoutEngine::is_repeated_rowbreak_photo_table(&t));
+
+        let mut grid = table(vec![
+            picture_cell.clone(),
+            Cell {
+                row: 0,
+                col: 1,
+                ..picture_cell.clone()
+            },
+            Cell {
+                row: 2,
+                col: 0,
+                ..picture_cell.clone()
+            },
+            Cell {
+                row: 2,
+                col: 1,
+                ..picture_cell.clone()
+            },
+        ]);
+        grid.common.treat_as_char = false;
+        grid.common.text_wrap = TextWrap::TopAndBottom;
+        grid.page_break = TablePageBreak::RowBreak;
+        grid.repeat_header = false;
+        assert!(LayoutEngine::is_repeated_photo_grid_table(&grid));
+        assert!(LayoutEngine::is_repeated_rowbreak_photo_table(&grid));
+
+        grid.page_break = TablePageBreak::CellBreak;
+        assert!(LayoutEngine::is_repeated_photo_grid_table(&grid));
+        assert!(!LayoutEngine::is_repeated_rowbreak_photo_table(&grid));
 
         let text_cell = Cell {
             paragraphs: vec![Paragraph {
@@ -4616,6 +4904,225 @@ mod row_cut_tests {
             ..Default::default()
         };
         assert!(!LayoutEngine::is_picture_only_cell(&empty_cell));
+    }
+
+    #[test]
+    fn repeated_photo_picture_fill_area_expands_moderate_visual_excess() {
+        let engine = LayoutEngine::with_default_dpi();
+        let mut pic = Picture::default();
+        pic.common.height = 17007;
+        let fit = LayoutRect {
+            x: 10.0,
+            y: 20.0,
+            width: 300.0,
+            height: 207.9,
+        };
+
+        let adjusted = engine.repeated_photo_picture_fill_area(&pic, fit);
+
+        assert!(adjusted.height > fit.height);
+        assert!(adjusted.y < fit.y);
+
+        let mut huge = pic.clone();
+        huge.common.height = 30000;
+        let unchanged = engine.repeated_photo_picture_fill_area(&huge, fit);
+        assert_eq!(unchanged.x, fit.x);
+        assert_eq!(unchanged.y, fit.y);
+        assert_eq!(unchanged.width, fit.width);
+        assert_eq!(unchanged.height, fit.height);
+    }
+
+    #[test]
+    fn mixed_photo_grid_offset_aligns_tac_and_non_tac_siblings() {
+        let engine = LayoutEngine::with_default_dpi();
+        let mut non_tac_pic = Picture::default();
+        non_tac_pic.common.treat_as_char = false;
+        non_tac_pic.common.flow_with_text = true;
+        non_tac_pic.common.text_wrap = TextWrap::TopAndBottom;
+        non_tac_pic.common.vert_rel_to = VertRelTo::Para;
+        non_tac_pic.common.horz_rel_to = HorzRelTo::Column;
+        non_tac_pic.common.height = 19_842;
+
+        let mut tac_pic = non_tac_pic.clone();
+        tac_pic.common.treat_as_char = true;
+
+        let picture_cell = |col, pic: Picture| Cell {
+            row: 2,
+            col,
+            row_span: 1,
+            col_span: 1,
+            height: 15_344,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(pic))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let left = picture_cell(0, non_tac_pic.clone());
+        let right_tac = picture_cell(1, tac_pic);
+        let mut grid = table(vec![left.clone(), right_tac]);
+        grid.common.treat_as_char = false;
+        grid.common.text_wrap = TextWrap::TopAndBottom;
+        grid.page_break = TablePageBreak::RowBreak;
+        grid.repeat_header = true;
+
+        let offset = engine.mixed_photo_grid_picture_y_offset(&grid, &left, &non_tac_pic);
+        assert!(
+            (14.0..=15.0).contains(&offset),
+            "mixed row non-TAC picture should receive a small derived offset, got {offset}"
+        );
+        let right = grid.cells[1].clone();
+        let Control::Picture(ref right_pic) = right.paragraphs[0].controls[0] else {
+            panic!("expected picture");
+        };
+        let tac_offset = engine.mixed_photo_grid_picture_y_offset(&grid, &right, right_pic);
+        assert!(
+            (offset - tac_offset).abs() < 0.001,
+            "mixed row TAC and non-TAC siblings should share the same y offset"
+        );
+
+        let right_non_tac = picture_cell(1, non_tac_pic.clone());
+        grid.cells = vec![left.clone(), right_non_tac];
+        assert_eq!(
+            engine.mixed_photo_grid_picture_y_offset(&grid, &left, &non_tac_pic),
+            0.0
+        );
+
+        let mut detached = non_tac_pic.clone();
+        detached.common.flow_with_text = false;
+        assert_eq!(
+            engine.mixed_photo_grid_picture_y_offset(&grid, &left, &detached),
+            0.0
+        );
+    }
+
+    #[test]
+    fn repeated_photo_grid_row_height_uses_picture_extent() {
+        let engine = LayoutEngine::with_default_dpi();
+        let picture_para = |treat_as_char, height| {
+            let mut pic = Picture::default();
+            pic.common.treat_as_char = treat_as_char;
+            pic.common.height = height;
+            Paragraph {
+                line_segs: vec![LineSeg {
+                    line_height: 900,
+                    line_spacing: 540,
+                    ..Default::default()
+                }],
+                controls: vec![Control::Picture(Box::new(pic))],
+                ..Default::default()
+            }
+        };
+        let picture_cell = |col, para: Paragraph| Cell {
+            row: 2,
+            col,
+            row_span: 1,
+            col_span: 1,
+            width: 23_812,
+            height: 15_344,
+            paragraphs: vec![para],
+            ..Default::default()
+        };
+        let mut grid = table(vec![
+            cell(0, 0, vec![text_para(1, 0)]),
+            cell(0, 1, vec![text_para(1, 0)]),
+            cell(1, 0, vec![text_para(1, 0)]),
+            cell(1, 1, vec![text_para(1, 0)]),
+            picture_cell(0, picture_para(false, 19_800)),
+            picture_cell(1, picture_para(true, 19_800)),
+        ]);
+        grid.common.treat_as_char = false;
+        grid.common.text_wrap = TextWrap::TopAndBottom;
+        grid.page_break = TablePageBreak::RowBreak;
+        grid.repeat_header = true;
+
+        let styles = ResolvedStyleSet::default();
+        let h = engine.row_cut_content_height(&grid, 2, &[], &[], &styles);
+        let declared = crate::renderer::hwpunit_to_px(15_344, crate::renderer::DEFAULT_DPI);
+        let natural =
+            crate::renderer::hwpunit_to_px(19_800 + 141 + 141, crate::renderer::DEFAULT_DPI);
+        assert!(
+            h > declared + 30.0,
+            "repeated photo-grid row should not clamp to stale cellSz: got {h:.1}, declared {declared:.1}"
+        );
+        assert!(
+            h >= natural,
+            "row should use at least picture extent plus cell vertical padding: got {h:.1}, expected >= {natural:.1}"
+        );
+    }
+
+    #[test]
+    fn fixed_tac_table_preserves_declared_row_grid() {
+        let engine = LayoutEngine::with_default_dpi();
+        let tall_cached_para = Paragraph {
+            line_segs: vec![
+                LineSeg {
+                    line_height: 1200,
+                    line_spacing: 1200,
+                    ..Default::default()
+                },
+                LineSeg {
+                    vertical_pos: 2400,
+                    line_height: 1200,
+                    line_spacing: 1200,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut t = table(vec![
+            Cell {
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 10_000,
+                height: 1_000,
+                paragraphs: vec![tall_cached_para.clone()],
+                ..Default::default()
+            },
+            Cell {
+                row: 1,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 10_000,
+                height: 1_000,
+                paragraphs: vec![tall_cached_para.clone()],
+                ..Default::default()
+            },
+            Cell {
+                row: 0,
+                col: 1,
+                row_span: 2,
+                col_span: 1,
+                width: 10_000,
+                height: 2_000,
+                paragraphs: vec![tall_cached_para],
+                ..Default::default()
+            },
+        ]);
+        t.common.treat_as_char = true;
+        t.common.text_wrap = TextWrap::TopAndBottom;
+        t.common.height = 2_000;
+        t.page_break = TablePageBreak::RowBreak;
+
+        let styles = ResolvedStyleSet::default();
+        let fixed = engine.resolve_row_heights(&t, 2, 2, None, &styles);
+        let declared = crate::renderer::hwpunit_to_px(1_000, crate::renderer::DEFAULT_DPI);
+        assert_eq!(fixed.len(), 2);
+        assert!(
+            (fixed[0] - declared).abs() < 0.001 && (fixed[1] - declared).abs() < 0.001,
+            "fixed TAC table should preserve declared row grid, got {fixed:?}"
+        );
+
+        t.common.treat_as_char = false;
+        let expanded = engine.resolve_row_heights(&t, 2, 2, None, &styles);
+        assert!(
+            expanded[0] > declared + 10.0,
+            "non-TAC table should still expand from measured content, got {expanded:?}"
+        );
     }
 
     #[test]

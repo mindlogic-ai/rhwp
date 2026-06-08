@@ -269,8 +269,7 @@ impl SvgRenderer {
                     let font_family = if run.style.font_family.is_empty() {
                         "sans-serif".to_string()
                     } else {
-                        let fb = super::generic_fallback(&run.style.font_family);
-                        format!("{},{}", run.style.font_family, fb)
+                        svg_paint_font_family(&run.style.font_family)
                     };
                     let mut attrs = format!("font-family=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\" dominant-baseline=\"central\"",
                         escape_xml(&font_family), font_size, color);
@@ -1351,13 +1350,17 @@ impl SvgRenderer {
                             || (src_w - img_w).abs() > 1.0
                             || (src_h - img_h).abs() > 1.0;
                         if is_cropped {
-                            // SVG: 중첩 svg + viewBox로 crop 영역만 표시
+                            let (image_x, image_y, image_w, image_h) = cropped_image_page_rect(
+                                bbox, src_x, src_y, src_w, src_h, img_w, img_h,
+                            );
+                            let clip_id = format!("crop-clip-{}", self.next_clip_id());
+                            self.defs.push(format!(
+                                "<clipPath id=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath>\n",
+                                clip_id, bbox.x, bbox.y, bbox.width, bbox.height,
+                            ));
                             self.output.push_str(&format!(
-                                "<svg x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" viewBox=\"{} {} {} {}\" preserveAspectRatio=\"none\">\
-                                <image width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"{}\"/></svg>\n",
-                                bbox.x, bbox.y, bbox.width, bbox.height,
-                                src_x, src_y, src_w, src_h,
-                                img_w, img_h, data_uri,
+                                "<g clip-path=\"url(#{})\"><image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"{}\"/></g>\n",
+                                clip_id, image_x, image_y, image_w, image_h, data_uri,
                             ));
                         } else {
                             self.output.push_str(&format!(
@@ -1726,8 +1729,7 @@ impl SvgRenderer {
         let font_family_str = if style.font_family.is_empty() {
             "sans-serif".to_string()
         } else {
-            let fb = super::generic_fallback(&style.font_family);
-            format!("{},{}", style.font_family, fb)
+            svg_paint_font_family(&style.font_family)
         };
         let mut font_attrs = format!(
             "font-family=\"{}\" font-size=\"{:.2}\"",
@@ -1831,8 +1833,7 @@ impl SvgRenderer {
         let font_family_str = if style.font_family.is_empty() {
             "sans-serif".to_string()
         } else {
-            let fb = super::generic_fallback(&style.font_family);
-            format!("{},{}", style.font_family, fb)
+            svg_paint_font_family(&style.font_family)
         };
         let mut font_attrs = format!(
             "font-family=\"{}\" font-size=\"{:.2}\"",
@@ -2282,8 +2283,7 @@ impl Renderer for SvgRenderer {
         let font_family = if style.font_family.is_empty() {
             "sans-serif".to_string()
         } else {
-            let fb = super::generic_fallback(&style.font_family);
-            format!("{},{}", style.font_family, fb)
+            svg_paint_font_family(&style.font_family)
         };
 
         let ratio = if style.ratio > 0.0 { style.ratio } else { 1.0 };
@@ -2302,6 +2302,7 @@ impl Renderer for SvgRenderer {
         } else {
             (y, font_size)
         };
+        let font_size = style.visual_font_size(font_size);
 
         // 공통 스타일 속성 구성 (fill 제외 — 그림자/원본에서 각각 설정)
         let mut base_attrs = format!(
@@ -2714,6 +2715,7 @@ impl Renderer for SvgRenderer {
     fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, style: &LineStyle) {
         let color = color_to_svg(style.color);
         let width = if style.width > 0.0 { style.width } else { 1.0 };
+        let svg_width = svg_raster_stroke_width(&color, width);
 
         // 이중선/삼중선 처리: 여러 평행선으로 렌더링
         match style.line_type {
@@ -2721,7 +2723,7 @@ impl Renderer for SvgRenderer {
             | super::LineRenderType::ThinThickDouble
             | super::LineRenderType::ThickThinDouble
             | super::LineRenderType::ThinThickThinTriple => {
-                self.draw_multi_line(x1, y1, x2, y2, width, &color, &style.line_type);
+                self.draw_multi_line(x1, y1, x2, y2, svg_width, &color, &style.line_type);
                 return;
             }
             _ => {}
@@ -2745,10 +2747,11 @@ impl Renderer for SvgRenderer {
             let uy = dy / line_len;
 
             if style.start_arrow != super::ArrowStyle::None {
-                let (arrow_w, _) = Self::calc_arrow_dims(width, line_len, style.start_arrow_size);
+                let (arrow_w, _) =
+                    Self::calc_arrow_dims(svg_width, line_len, style.start_arrow_size);
                 let marker_id = self.ensure_arrow_marker(
                     &color,
-                    width,
+                    svg_width,
                     line_len,
                     &style.start_arrow,
                     style.start_arrow_size,
@@ -2760,10 +2763,10 @@ impl Renderer for SvgRenderer {
                 ly1 += uy * arrow_w;
             }
             if style.end_arrow != super::ArrowStyle::None {
-                let (arrow_w, _) = Self::calc_arrow_dims(width, line_len, style.end_arrow_size);
+                let (arrow_w, _) = Self::calc_arrow_dims(svg_width, line_len, style.end_arrow_size);
                 let marker_id = self.ensure_arrow_marker(
                     &color,
-                    width,
+                    svg_width,
                     line_len,
                     &style.end_arrow,
                     style.end_arrow_size,
@@ -2778,7 +2781,7 @@ impl Renderer for SvgRenderer {
 
         let mut attrs = format!(
             "x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{}\" stroke-width=\"{}\"",
-            lx1, ly1, lx2, ly2, color, width,
+            lx1, ly1, lx2, ly2, color, svg_width,
         );
         match style.dash {
             super::StrokeDash::Dash => attrs.push_str(" stroke-dasharray=\"6 3\""),
@@ -2833,7 +2836,30 @@ fn color_to_svg(color: u32) -> String {
     format!("#{:02x}{:02x}{:02x}", r, g, b)
 }
 
+fn svg_paint_font_family(font_family: &str) -> String {
+    let primary = crate::renderer::style_resolver::primary_font_name(font_family)
+        .trim_matches('\'')
+        .trim_matches('"');
+    if matches!(primary, "맑은 고딕" | "Malgun Gothic") {
+        "Noto Sans KR".to_string()
+    } else {
+        let fb = super::generic_fallback(font_family);
+        format!("{},{}", font_family, fb)
+    }
+}
+
+fn svg_raster_stroke_width(color: &str, width: f64) -> f64 {
+    if color.eq_ignore_ascii_case("#000000") && width <= 1.0 {
+        width * 0.175
+    } else {
+        width
+    }
+}
+
 fn svg_text_length_attrs(cluster_str: &str, cluster_advance: f64, scale_x: f64) -> String {
+    if cluster_str.chars().count() <= 1 {
+        return String::new();
+    }
     if !cluster_str.chars().any(|ch| ch.is_ascii_alphanumeric()) {
         return String::new();
     }
@@ -2909,6 +2935,32 @@ pub(crate) fn compute_image_crop_src(
     let src_w = (cr - cl) as f64 / scale_x;
     let src_h = (cb - ct) as f64 / scale_y;
     (src_x, src_y, src_w, src_h)
+}
+
+pub(crate) fn cropped_image_page_rect(
+    bbox: &crate::renderer::render_tree::BoundingBox,
+    src_x: f64,
+    src_y: f64,
+    src_w: f64,
+    src_h: f64,
+    img_w: f64,
+    img_h: f64,
+) -> (f64, f64, f64, f64) {
+    let scale_x = if src_w.abs() > f64::EPSILON {
+        bbox.width / src_w
+    } else {
+        1.0
+    };
+    let scale_y = if src_h.abs() > f64::EPSILON {
+        bbox.height / src_h
+    } else {
+        1.0
+    };
+    let image_x = bbox.x - src_x * scale_x;
+    let image_y = bbox.y - src_y * scale_y;
+    let image_w = img_w * scale_x;
+    let image_h = img_h * scale_y;
+    (image_x, image_y, image_w, image_h)
 }
 
 fn parse_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {

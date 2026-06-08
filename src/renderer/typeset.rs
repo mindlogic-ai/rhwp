@@ -44,6 +44,80 @@ struct TableBreakToken {
     cell_content_offsets: Option<Vec<f64>>,
 }
 
+fn hp_t_fragment_has_visible_text(xml: &str) -> bool {
+    let mut search_from = 0usize;
+    while let Some(rel) = xml[search_from..].find("<hp:t") {
+        let tag_start = search_from + rel;
+        let Some(tag_end_rel) = xml[tag_start..].find('>') else {
+            break;
+        };
+        let text_start = tag_start + tag_end_rel + 1;
+        let Some(text_end_rel) = xml[text_start..].find("</hp:t>") else {
+            search_from = text_start;
+            continue;
+        };
+        let text = &xml[text_start..text_start + text_end_rel];
+        if text
+            .chars()
+            .any(|c| c > '\u{001F}' && !c.is_whitespace() && c != '\u{FFFC}')
+        {
+            return true;
+        }
+        search_from = text_start + text_end_rel + "</hp:t>".len();
+    }
+    false
+}
+
+fn nth_hp_tbl_end(xml: &str, table_ordinal: usize) -> Option<usize> {
+    let mut search_from = 0usize;
+    let mut table_start = None;
+    for _ in 0..=table_ordinal {
+        let rel = xml[search_from..].find("<hp:tbl")?;
+        let abs = search_from + rel;
+        table_start = Some(abs);
+        search_from = abs + "<hp:tbl".len();
+    }
+
+    let mut cursor = table_start?;
+    let mut depth = 0usize;
+    loop {
+        let next_open = xml[cursor..].find("<hp:tbl").map(|rel| cursor + rel);
+        let next_close = xml[cursor..].find("</hp:tbl>").map(|rel| cursor + rel);
+        match (next_open, next_close) {
+            (Some(open), Some(close)) if open < close => {
+                depth += 1;
+                cursor = open + "<hp:tbl".len();
+            }
+            (_, Some(close)) => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                cursor = close + "</hp:tbl>".len();
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn hwpx_has_visible_text_after_table_control(
+    para: &Paragraph,
+    control_index: usize,
+) -> Option<bool> {
+    let xml = para.hwpx_para_xml.as_ref()?;
+    let table_ordinal = para.controls[..=control_index]
+        .iter()
+        .filter(|control| matches!(control, Control::Table(_)))
+        .count()
+        .checked_sub(1)?;
+    let xml = String::from_utf8_lossy(xml);
+    let table_end = nth_hp_tbl_end(&xml, table_ordinal)?;
+    Some(hp_t_fragment_has_visible_text(&xml[table_end..]))
+}
+
 // ========================================================
 // FormattedTable — 표의 format() 결과
 // ========================================================
@@ -212,17 +286,741 @@ fn para_has_visible_text(para: &Paragraph) -> bool {
     para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}')
 }
 
+fn empty_host_square_picture_reserve_px(
+    para: &Paragraph,
+    common: &crate::model::shape::CommonObjAttr,
+    dpi: f64,
+) -> Option<f64> {
+    use crate::model::shape::{TextWrap, VertRelTo};
+    if common.treat_as_char
+        || !matches!(common.text_wrap, TextWrap::Square)
+        || !matches!(common.vert_rel_to, VertRelTo::Para)
+        || para_has_visible_text(para)
+    {
+        return None;
+    }
+
+    let vertical_offset = hwpunit_to_px(common.vertical_offset as i32, dpi).max(0.0);
+    let height = hwpunit_to_px(common.height as i32, dpi).max(0.0);
+    let margin_bottom = hwpunit_to_px(common.margin.bottom as i32, dpi).max(0.0);
+    let reserve = vertical_offset + height + margin_bottom;
+    (reserve > 0.0).then_some(reserve)
+}
+
 fn para_has_visible_flow_content(para: &Paragraph) -> bool {
     para_has_visible_text(para)
-        || para
-            .controls
-            .iter()
-            .any(|c| {
-                !matches!(
-                    c,
-                    Control::Header(_) | Control::Footer(_) | Control::PageNumberPos(_)
+        || para.controls.iter().any(|c| {
+            !matches!(
+                c,
+                Control::Header(_) | Control::Footer(_) | Control::PageNumberPos(_)
+            )
+        })
+}
+
+fn page_has_non_tac_topbottom_table(items: &[PageItem], paragraphs: &[Paragraph]) -> bool {
+    items.iter().any(|item| {
+        let (para_index, control_index) = match item {
+            PageItem::Table {
+                para_index,
+                control_index,
+            }
+            | PageItem::PartialTable {
+                para_index,
+                control_index,
+                ..
+            } => (*para_index, *control_index),
+            _ => return false,
+        };
+
+        paragraphs
+            .get(para_index)
+            .and_then(|para| para.controls.get(control_index))
+            .is_some_and(|ctrl| {
+                if let Control::Table(table) = ctrl {
+                    !table.common.treat_as_char
+                        && matches!(
+                            table.common.text_wrap,
+                            crate::model::shape::TextWrap::TopAndBottom
+                        )
+                } else {
+                    false
+                }
+            })
+    })
+}
+
+fn page_has_tac_topbottom_table(items: &[PageItem], paragraphs: &[Paragraph]) -> bool {
+    items.iter().any(|item| {
+        let (para_index, control_index) = match item {
+            PageItem::Table {
+                para_index,
+                control_index,
+            }
+            | PageItem::PartialTable {
+                para_index,
+                control_index,
+                ..
+            } => (*para_index, *control_index),
+            _ => return false,
+        };
+
+        paragraphs
+            .get(para_index)
+            .and_then(|para| para.controls.get(control_index))
+            .is_some_and(|ctrl| {
+                if let Control::Table(table) = ctrl {
+                    table.common.treat_as_char
+                        && matches!(
+                            table.common.text_wrap,
+                            crate::model::shape::TextWrap::TopAndBottom
+                        )
+                } else {
+                    false
+                }
+            })
+    })
+}
+
+fn should_split_late_topbottom_page_text(
+    st: &TypesetState,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    available: f64,
+    visible_text: bool,
+    only_fits_if_trailing_spacing_is_ignored: bool,
+    forced_page_break_line: Option<usize>,
+) -> bool {
+    forced_page_break_line.is_none()
+        && st.col_count == 1
+        && fmt.line_heights.len() > 1
+        && visible_text
+        && !st.current_items.is_empty()
+        && st.current_height > available * 0.80
+        && only_fits_if_trailing_spacing_is_ignored
+        && page_has_non_tac_topbottom_table(&st.current_items, paragraphs)
+}
+
+fn should_defer_text_after_near_full_cell_tac_table(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    visible_text: bool,
+    forced_page_break_line: Option<usize>,
+) -> bool {
+    if forced_page_break_line.is_some()
+        || st.col_count != 1
+        || !visible_text
+        || !para.controls.is_empty()
+        || fmt.line_heights.len() != 1
+    {
+        return false;
+    }
+
+    let next_is_cell_tac_table = paragraphs.get(para_idx + 1).is_some_and(|next_para| {
+        next_para.controls.iter().any(|ctrl| {
+            if let Control::Table(table) = ctrl {
+                table.common.treat_as_char
+                    && matches!(
+                        table.common.text_wrap,
+                        crate::model::shape::TextWrap::TopAndBottom
+                    )
+                    && matches!(
+                        table.hwpx_page_break,
+                        Some(crate::model::table::HwpxTablePageBreak::Cell)
+                    )
+                    && table.row_count >= 2
+            } else {
+                false
+            }
+        })
+    });
+    if !next_is_cell_tac_table {
+        return false;
+    }
+
+    let Some((prev_para_idx, prev_ctrl_idx)) = st.current_items.last().and_then(|item| {
+        if let PageItem::Table {
+            para_index,
+            control_index,
+        } = item
+        {
+            Some((*para_index, *control_index))
+        } else {
+            None
+        }
+    }) else {
+        return false;
+    };
+
+    let previous_is_cell_tac_table = paragraphs
+        .get(prev_para_idx)
+        .and_then(|p| p.controls.get(prev_ctrl_idx))
+        .is_some_and(|ctrl| {
+            if let Control::Table(table) = ctrl {
+                table.common.treat_as_char
+                    && matches!(
+                        table.common.text_wrap,
+                        crate::model::shape::TextWrap::TopAndBottom
+                    )
+                    && matches!(
+                        table.hwpx_page_break,
+                        Some(crate::model::table::HwpxTablePageBreak::Cell)
+                    )
+                    && table.row_count >= 4
+            } else {
+                false
+            }
+        });
+    if !previous_is_cell_tac_table {
+        return false;
+    }
+
+    let body_height = st.layout.body_area.height;
+    st.current_height > body_height * 0.94
+        && st.current_height + fmt.total_height > body_height + 0.5
+}
+
+fn should_defer_late_single_line_text_with_following_body(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+    visible_text: bool,
+    only_fits_if_trailing_spacing_is_ignored: bool,
+    forced_page_break_line: Option<usize>,
+) -> bool {
+    if forced_page_break_line.is_some()
+        || st.col_count != 1
+        || !visible_text
+        || !para.controls.is_empty()
+        || fmt.line_heights.len() != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.94
+    {
+        return false;
+    }
+
+    let fits_only_with_page_tail_slack = only_fits_if_trailing_spacing_is_ignored
+        || (st.current_height + fmt.height_for_fit <= available + 4.0
+            && st.current_height + fmt.total_height > available + 0.5);
+    if !fits_only_with_page_tail_slack {
+        return false;
+    }
+
+    paragraphs.get(para_idx + 1).is_some_and(|next| {
+        let next_visible = next
+            .text
+            .chars()
+            .any(|c| !c.is_control() && !c.is_whitespace());
+        next_visible
+            && next.controls.is_empty()
+            && !matches!(
+                next.column_type,
+                ColumnBreakType::Page | ColumnBreakType::Section | ColumnBreakType::Column
+            )
+    })
+}
+
+fn should_defer_late_single_line_before_following_body_group(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+    visible_text: bool,
+    forced_page_break_line: Option<usize>,
+) -> bool {
+    if forced_page_break_line.is_some()
+        || st.col_count != 1
+        || !visible_text
+        || !para.controls.is_empty()
+        || fmt.line_heights.len() != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.90
+        || st.current_height + fmt.total_height > available + 0.5
+    {
+        return false;
+    }
+
+    let Some(next) = paragraphs.get(para_idx + 1) else {
+        return false;
+    };
+    let Some(after_next) = paragraphs.get(para_idx + 2) else {
+        return false;
+    };
+    let next_visible = next
+        .text
+        .chars()
+        .any(|c| !c.is_control() && !c.is_whitespace());
+    let after_next_visible = after_next
+        .text
+        .chars()
+        .any(|c| !c.is_control() && !c.is_whitespace());
+    if !next_visible
+        || !after_next_visible
+        || !next.controls.is_empty()
+        || !after_next.controls.is_empty()
+        || next.line_segs.len() != 1
+        || !matches!(
+            next.column_type,
+            ColumnBreakType::None | ColumnBreakType::MultiColumn
+        )
+    {
+        return false;
+    }
+
+    let next_seg = &next.line_segs[0];
+    if next_seg.vertical_pos > 1_200 {
+        return false;
+    }
+
+    let next_line_fit_height =
+        hwpunit_to_px(next_seg.line_height + next_seg.line_spacing, DEFAULT_DPI);
+    let remaining_after_current = available - (st.current_height + fmt.total_height);
+    remaining_after_current < next_line_fit_height + 1.0
+}
+
+fn single_line_para_height_px(para: &Paragraph) -> Option<f64> {
+    let seg = para.line_segs.first()?;
+    (para.line_segs.len() == 1)
+        .then(|| hwpunit_to_px(seg.line_height + seg.line_spacing, DEFAULT_DPI))
+}
+
+fn controls_are_non_visual_break_metadata(controls: &[Control]) -> bool {
+    controls.iter().all(|control| {
+        matches!(
+            control,
+            Control::SectionDef(_)
+                | Control::ColumnDef(_)
+                | Control::Header(_)
+                | Control::Footer(_)
+                | Control::PageNumberPos(_)
+                | Control::PageHide(_)
+                | Control::NewNumber(_)
+                | Control::AutoNumber(_)
+                | Control::Bookmark(_)
+                | Control::Ruby(_)
+        )
+    })
+}
+
+fn should_defer_late_visible_group_before_explicit_blank_break(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+    visible_text: bool,
+    forced_page_break_line: Option<usize>,
+) -> bool {
+    if forced_page_break_line.is_some()
+        || st.col_count != 1
+        || !visible_text
+        || !para.controls.is_empty()
+        || fmt.line_heights.len() != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.86
+        || st.current_height + fmt.total_height > available + 0.5
+    {
+        return false;
+    }
+
+    let (Some(next), Some(after_next), Some(break_para)) = (
+        paragraphs.get(para_idx + 1),
+        paragraphs.get(para_idx + 2),
+        paragraphs.get(para_idx + 3),
+    ) else {
+        return false;
+    };
+    let visible_plain_single = |candidate: &Paragraph| {
+        para_has_visible_text(candidate)
+            && candidate.controls.is_empty()
+            && single_line_para_height_px(candidate).is_some()
+            && matches!(
+                candidate.column_type,
+                ColumnBreakType::None | ColumnBreakType::MultiColumn
+            )
+    };
+    if !visible_plain_single(next) || !visible_plain_single(after_next) {
+        return false;
+    }
+    if !matches!(
+        break_para.column_type,
+        ColumnBreakType::Page | ColumnBreakType::Section
+    ) || para_has_visible_text(break_para)
+        || !controls_are_non_visual_break_metadata(&break_para.controls)
+    {
+        return false;
+    }
+
+    let Some(next_h) = single_line_para_height_px(next) else {
+        return false;
+    };
+    let Some(after_next_h) = single_line_para_height_px(after_next) else {
+        return false;
+    };
+    let group_height = fmt.total_height + next_h + after_next_h;
+    let remaining_after_group = available - (st.current_height + group_height);
+    st.current_height + group_height > available + 0.5 || remaining_after_group <= available * 0.03
+}
+
+fn should_move_late_tail_before_explicit_page_break(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    _available: f64,
+    visible_text: bool,
+) -> bool {
+    const MAX_TAIL_REMAINDER_PX: f64 = 16.0;
+    const MAX_TITLE_TABLE_TAIL_REMAINDER_PX: f64 = 60.0;
+
+    let Some(next_para) = paragraphs.get(para_idx + 1) else {
+        return false;
+    };
+    let next_forces_page = matches!(
+        next_para.column_type,
+        ColumnBreakType::Page | ColumnBreakType::Section
+    );
+    if !next_forces_page {
+        return false;
+    }
+    let follows_tac_topbottom_table = st
+        .current_items
+        .last()
+        .and_then(|item| match item {
+            PageItem::Table {
+                para_index,
+                control_index,
+            } => Some((*para_index, *control_index)),
+            _ => None,
+        })
+        .and_then(|(prev_para_idx, prev_ctrl_idx)| {
+            paragraphs
+                .get(prev_para_idx)
+                .and_then(|p| p.controls.get(prev_ctrl_idx))
+        })
+        .is_some_and(|control| {
+            matches!(
+                control,
+                Control::Table(table)
+                    if table.common.treat_as_char
+                        && matches!(
+                            table.common.text_wrap,
+                            crate::model::shape::TextWrap::TopAndBottom
+                        )
+            )
+        });
+    if follows_tac_topbottom_table && next_para.controls.is_empty() && fmt.height_for_fit <= 20.0 {
+        return false;
+    }
+    let body_height = st.layout.body_area.height;
+    let next_is_explicit_title_table = next_para.controls.iter().any(|control| {
+        if let Control::Table(table) = control {
+            table.common.treat_as_char
+                && matches!(
+                    table.common.text_wrap,
+                    crate::model::shape::TextWrap::TopAndBottom
+                )
+                && table.row_count == 1
+                && hwpunit_to_px(table.common.height as i32, DEFAULT_DPI) <= 45.0
+        } else {
+            false
+        }
+    });
+    let next_is_explicit_full_page_tac_table = next_para.controls.iter().any(|control| {
+        if let Control::Table(table) = control {
+            table.common.treat_as_char
+                && matches!(
+                    table.common.text_wrap,
+                    crate::model::shape::TextWrap::TopAndBottom
+                )
+                && table.row_count >= 8
+                && hwpunit_to_px(table.common.height as i32, DEFAULT_DPI) > body_height * 0.80
+        } else {
+            false
+        }
+    });
+    let max_remainder = if next_is_explicit_title_table {
+        MAX_TITLE_TABLE_TAIL_REMAINDER_PX
+    } else {
+        MAX_TAIL_REMAINDER_PX
+    };
+    let min_current_ratio = if next_is_explicit_title_table {
+        0.85
+    } else {
+        0.90
+    };
+
+    let after_tail = st.current_height + fmt.height_for_fit;
+    let remaining_after_tail = body_height - after_tail;
+    let saved_remaining = para
+        .line_segs
+        .last()
+        .map(|seg| {
+            body_height
+                - hwpunit_to_px(
+                    seg.vertical_pos
+                        .saturating_add(seg.line_height)
+                        .saturating_add(seg.line_spacing),
+                    DEFAULT_DPI,
+                )
+        })
+        .unwrap_or(remaining_after_tail);
+    st.col_count == 1
+        && visible_text
+        && para.controls.is_empty()
+        && fmt.line_heights.len() == 1
+        && !st.current_items.is_empty()
+        && !(page_has_tac_topbottom_table(&st.current_items, paragraphs)
+            && next_is_explicit_full_page_tac_table)
+        && st.current_height > body_height * min_current_ratio
+        && after_tail <= body_height + 0.5
+        && remaining_after_tail >= -0.5
+        && saved_remaining >= -0.5
+        && remaining_after_tail.min(saved_remaining) <= max_remainder
+}
+
+fn last_flushed_material_items<'a>(st: &'a TypesetState) -> Option<&'a [PageItem]> {
+    st.pages
+        .iter()
+        .rev()
+        .flat_map(|page| page.column_contents.iter().rev())
+        .find(|column| !column.items.is_empty())
+        .map(|column| column.items.as_slice())
+}
+
+fn previous_material_page_ended_with_table_break_spacer(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    spacer_para_idx: usize,
+) -> bool {
+    let Some(spacer_para) = paragraphs.get(spacer_para_idx) else {
+        return false;
+    };
+    if para_has_visible_text(spacer_para) || !spacer_para.controls.is_empty() {
+        return false;
+    }
+    let spacer_vpos = spacer_para
+        .line_segs
+        .first()
+        .map(|seg| hwpunit_to_px(seg.vertical_pos, DEFAULT_DPI))
+        .unwrap_or(0.0);
+    if spacer_vpos < st.layout.body_area.height * 0.55 {
+        return false;
+    }
+
+    let Some(items) = last_flushed_material_items(st) else {
+        return false;
+    };
+    if !matches!(
+        items.last(),
+        Some(PageItem::FullParagraph { para_index }) if *para_index == spacer_para_idx
+    ) {
+        return false;
+    }
+
+    items.iter().any(|item| {
+        let (para_index, control_index) = match item {
+            PageItem::PartialTable {
+                para_index,
+                control_index,
+                ..
+            } => (*para_index, *control_index),
+            _ => return false,
+        };
+        paragraphs
+            .get(para_index)
+            .and_then(|para| para.controls.get(control_index))
+            .is_some_and(|control| {
+                matches!(
+                    control,
+                    Control::Table(table)
+                        if matches!(
+                            table.hwpx_page_break,
+                            Some(crate::model::table::HwpxTablePageBreak::Table)
+                        )
                 )
             })
+    })
+}
+
+fn should_defer_large_cell_tac_after_table_break_spacer(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    table_para_idx: usize,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_height: f64,
+) -> bool {
+    if st.col_count != 1
+        || !table.common.treat_as_char
+        || !matches!(
+            table.common.text_wrap,
+            crate::model::shape::TextWrap::TopAndBottom
+        )
+        || !matches!(
+            table.hwpx_page_break,
+            Some(crate::model::table::HwpxTablePageBreak::Cell)
+        )
+        || table.row_count < 4
+        || table_height < st.layout.body_area.height * 0.90
+        || para.controls.len() != 1
+    {
+        return false;
+    }
+
+    let Some(heading_idx) = table_para_idx.checked_sub(1) else {
+        return false;
+    };
+    let Some(spacer_idx) = heading_idx.checked_sub(1) else {
+        return false;
+    };
+    let current_page_is_heading_only = st.current_items.len() == 1
+        && matches!(
+            st.current_items.first(),
+            Some(PageItem::FullParagraph { para_index }) if *para_index == heading_idx
+        );
+    if !current_page_is_heading_only {
+        return false;
+    }
+
+    let Some(heading_para) = paragraphs.get(heading_idx) else {
+        return false;
+    };
+    matches!(
+        heading_para.column_type,
+        ColumnBreakType::Page | ColumnBreakType::Section
+    ) && para_has_visible_text(heading_para)
+        && heading_para.controls.is_empty()
+        && heading_para.line_segs.len() == 1
+        && previous_material_page_ended_with_table_break_spacer(st, paragraphs, spacer_idx)
+}
+
+fn should_defer_late_heading_followed_by_table_break_tac(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    table_para_idx: usize,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_height: f64,
+) -> bool {
+    if st.col_count != 1
+        || !table.common.treat_as_char
+        || !matches!(
+            table.common.text_wrap,
+            crate::model::shape::TextWrap::TopAndBottom
+        )
+        || !matches!(
+            table.hwpx_page_break,
+            Some(crate::model::table::HwpxTablePageBreak::Table)
+        )
+        || table.row_count < 4
+        || table_height < st.layout.body_area.height * 0.25
+        || table_height > st.layout.body_area.height * 0.70
+        || para.controls.len() != 1
+        || st.current_height < st.layout.body_area.height * 0.55
+    {
+        return false;
+    }
+
+    let Some(heading_idx) = table_para_idx.checked_sub(1) else {
+        return false;
+    };
+    let current_page_ends_with_heading = matches!(
+        st.current_items.last(),
+        Some(PageItem::FullParagraph { para_index }) if *para_index == heading_idx
+    );
+    if !current_page_ends_with_heading {
+        return false;
+    }
+
+    paragraphs.get(heading_idx).is_some_and(|heading_para| {
+        para_has_visible_text(heading_para)
+            && heading_para.controls.is_empty()
+            && heading_para.line_segs.len() == 1
+    })
+}
+
+fn should_defer_large_cell_tac_after_page_tail_lead_in(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    table_para_idx: usize,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_height: f64,
+    available: f64,
+) -> bool {
+    if st.col_count != 1
+        || !table.common.treat_as_char
+        || !matches!(
+            table.common.text_wrap,
+            crate::model::shape::TextWrap::TopAndBottom
+        )
+        || !matches!(
+            table.hwpx_page_break,
+            Some(crate::model::table::HwpxTablePageBreak::Cell)
+        )
+        || table.row_count < 8
+        || !(5..=8).contains(&table.col_count)
+        || table_height < available * 0.45
+        || table_height > available * 0.75
+        || para.controls.len() != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.30
+        || st.current_height > available * 0.55
+    {
+        return false;
+    }
+
+    let after_table = st.current_height + table_height;
+    if after_table > available + 0.5 || available - after_table > available * 0.06 {
+        return false;
+    }
+
+    let Some(lead_idx) = table_para_idx.checked_sub(1) else {
+        return false;
+    };
+    if paragraphs.get(table_para_idx + 1).is_some_and(|next_para| {
+        matches!(
+            next_para.column_type,
+            ColumnBreakType::Page | ColumnBreakType::Section
+        )
+    }) {
+        return false;
+    }
+
+    let current_page_has_lead_in = st.current_items.iter().any(|item| match item {
+        PageItem::FullParagraph { para_index } if *para_index == lead_idx => paragraphs
+            .get(*para_index)
+            .is_some_and(para_has_visible_flow_content),
+        PageItem::Shape { para_index, .. } if *para_index == lead_idx => true,
+        _ => false,
+    });
+
+    current_page_has_lead_in
+}
+
+fn should_drop_tiny_final_split_tail(
+    end_row: usize,
+    row_count: usize,
+    split_end_limit: f64,
+    split_end_cut: &[usize],
+    has_visible_post_table_text: bool,
+    tail_h: f64,
+) -> bool {
+    end_row >= row_count
+        && split_end_limit > 0.0
+        && !split_end_cut.is_empty()
+        && !has_visible_post_table_text
+        && tail_h <= 16.0
 }
 
 fn should_block_cut_rowbreak_rowspan_block(
@@ -250,17 +1048,136 @@ fn should_clip_rowbreak_rowspan_declared_slack(
         && declared_row_height >= visible_height * 1.20
 }
 
+fn should_split_rowbreak_rowspan_partial_top_slice(
+    consumed_height: f64,
+    split_total: f64,
+    split_budget: f64,
+) -> bool {
+    consumed_height >= 25.0 && split_total <= split_budget + 4.0
+}
+
+fn trim_clean_table_fragment_to_render_budget(
+    cursor_row: usize,
+    end_row: usize,
+    partial_height: f64,
+    header_overhead: f64,
+    strict_avail_for_rows: f64,
+    cut_row_h: &[f64],
+    cell_spacing: f64,
+    has_start_cut: bool,
+    split_end_limit: f64,
+) -> (usize, f64) {
+    if has_start_cut
+        || split_end_limit > 0.0
+        || end_row <= cursor_row + 1
+        || partial_height <= strict_avail_for_rows + 0.5
+    {
+        return (end_row, partial_height);
+    }
+
+    let mut trimmed_end = end_row;
+    let mut trimmed_height = partial_height;
+    while trimmed_end > cursor_row + 1 && trimmed_height > strict_avail_for_rows + 0.5 {
+        let removed_row = trimmed_end - 1;
+        let cs_before_removed = if removed_row > cursor_row {
+            cell_spacing
+        } else {
+            0.0
+        };
+        let row_height = cut_row_h.get(removed_row).copied().unwrap_or(0.0);
+        let decrement = row_height + cs_before_removed;
+        if decrement <= 0.0 || trimmed_height - decrement < header_overhead {
+            break;
+        }
+        trimmed_height -= decrement;
+        trimmed_end -= 1;
+    }
+
+    (trimmed_end, trimmed_height)
+}
+
+fn should_trim_clean_table_fragment_to_render_budget(
+    has_start_cut: bool,
+    has_end_cut: bool,
+    split_end_limit: f64,
+    end_row: usize,
+    row_count: usize,
+) -> bool {
+    !has_start_cut && !has_end_cut && split_end_limit <= 0.0 && end_row < row_count
+}
+
+fn row_cells<'a>(
+    table: &'a crate::model::table::Table,
+    row: usize,
+) -> impl Iterator<Item = &'a crate::model::table::Cell> {
+    table
+        .cells
+        .iter()
+        .filter(move |cell| cell.row as usize == row && cell.row_span == 1)
+}
+
+fn cell_has_picture(cell: &crate::model::table::Cell) -> bool {
+    cell.paragraphs.iter().any(|para| {
+        para.controls
+            .iter()
+            .any(|ctrl| matches!(ctrl, Control::Picture(_)))
+    })
+}
+
+fn cell_has_nested_table_or_shape(cell: &crate::model::table::Cell) -> bool {
+    cell.paragraphs.iter().any(|para| {
+        para.controls
+            .iter()
+            .any(|ctrl| matches!(ctrl, Control::Table(_) | Control::Shape(_)))
+    })
+}
+
+fn table_row_is_text_label_row(table: &crate::model::table::Table, row: usize) -> bool {
+    let cells: Vec<_> = row_cells(table, row).collect();
+    cells.len() >= 2
+        && cells.iter().all(|cell| {
+            !cell_has_picture(cell)
+                && !cell_has_nested_table_or_shape(cell)
+                && cell.paragraphs.iter().any(para_has_visible_text)
+        })
+}
+
+fn table_row_is_picture_grid_row(table: &crate::model::table::Table, row: usize) -> bool {
+    let cells: Vec<_> = row_cells(table, row).collect();
+    cells.len() >= 2 && cells.iter().all(|cell| cell_has_picture(cell))
+}
+
+fn snap_photo_grid_orphan_break(
+    table: &crate::model::table::Table,
+    cursor_row: usize,
+    end_row: usize,
+    row_count: usize,
+) -> Option<usize> {
+    if end_row <= cursor_row + 1 || end_row >= row_count || table.col_count < 2 {
+        return None;
+    }
+
+    (cursor_row + 1..end_row).find(|&group_start| {
+        group_start + 2 < row_count
+            && end_row < group_start + 3
+            && table_row_is_text_label_row(table, group_start)
+            && table_row_is_text_label_row(table, group_start + 1)
+            && table_row_is_picture_grid_row(table, group_start + 2)
+    })
+}
+
 fn should_skip_topbottom_bridge_vpos_snap(
-    is_empty_bridge_para: bool,
+    is_control_free_bridge_para: bool,
     recent_topbottom_table: bool,
     upcoming_topbottom_table: bool,
     current_height: f64,
     snapped_y: f64,
     available_height: f64,
 ) -> bool {
-    is_empty_bridge_para
+    is_control_free_bridge_para
         && recent_topbottom_table
         && upcoming_topbottom_table
+        && current_height > available_height * 0.35
         && snapped_y > current_height + available_height * 0.30
         && snapped_y > available_height * 0.80
 }
@@ -957,9 +1874,7 @@ impl TypesetEngine {
                     })
                 });
                 if let (Some((_prev_idx, prev_last)), Some(curr_first)) = (prev_real, curr_first) {
-                    let prev_end = prev_last
-                        .vertical_pos
-                        .saturating_add(prev_last.line_height);
+                    let prev_end = prev_last.vertical_pos.saturating_add(prev_last.line_height);
                     let high_threshold = body_height_hu_for_hwpx_breaks * 90 / 100;
                     let rewound = prev_end >= high_threshold
                         && curr_first.vertical_pos >= 0
@@ -970,10 +1885,8 @@ impl TypesetEngine {
                         // Issue #418 mitigation: skip when current paragraph
                         // hosts a Table control. Partial tables encode their
                         // own page splits and shouldn't be double-broken.
-                        let current_hosts_table = para
-                            .controls
-                            .iter()
-                            .any(|c| matches!(c, Control::Table(_)));
+                        let current_hosts_table =
+                            para.controls.iter().any(|c| matches!(c, Control::Table(_)));
                         if !current_hosts_table {
                             hwpx_vpos_reset_break = true;
                         }
@@ -1011,22 +1924,15 @@ impl TypesetEngine {
                         .saturating_add(page_def.margin_header)
                         .saturating_add(page_def.margin_footer),
                 ) as i32;
-                if let (Some((_prev_idx, prev_last)), Some(curr_first)) =
-                    (prev_real, curr_first)
-                {
-                    let prev_end = prev_last
-                        .vertical_pos
-                        .saturating_add(prev_last.line_height);
-                    let curr_hosts_table = para
-                        .controls
-                        .iter()
-                        .any(|c| matches!(c, Control::Table(_)));
+                if let (Some((_prev_idx, prev_last)), Some(curr_first)) = (prev_real, curr_first) {
+                    let prev_end = prev_last.vertical_pos.saturating_add(prev_last.line_height);
+                    let curr_hosts_table =
+                        para.controls.iter().any(|c| matches!(c, Control::Table(_)));
                     let curr_is_short_heading = !curr_hosts_table
                         && para.line_segs.len() == 1
                         && curr_first.vertical_pos >= 0
                         && curr_first.vertical_pos <= 1500;
-                    let prev_at_page_bottom =
-                        body_h_hu > 0 && prev_end >= body_h_hu * 90 / 100;
+                    let prev_at_page_bottom = body_h_hu > 0 && prev_end >= body_h_hu * 90 / 100;
                     let next_hosts_block_table =
                         paragraphs.get(para_idx + 1).is_some_and(|next_para| {
                             next_para.controls.iter().any(|c| {
@@ -1036,10 +1942,7 @@ impl TypesetEngine {
                                 )
                             })
                         });
-                    if curr_is_short_heading
-                        && prev_at_page_bottom
-                        && next_hosts_block_table
-                    {
+                    if curr_is_short_heading && prev_at_page_bottom && next_hosts_block_table {
                         subhead_with_table_break = true;
                     }
                 }
@@ -1218,6 +2121,38 @@ impl TypesetEngine {
                                 st.advance_column_or_new_page();
                             }
                         }
+                    }
+                }
+            }
+
+            if st.col_count > 1
+                && !st.current_items.is_empty()
+                && st.wrap_around_cs < 0
+                && para.controls.is_empty()
+                && para_has_visible_flow_content(para)
+            {
+                if let Some(cv) = para
+                    .line_segs
+                    .first()
+                    .map(|s| hwpunit_to_px(s.vertical_pos, self.dpi))
+                {
+                    let gap = cv - st.current_height;
+                    let avail = st.available_height();
+                    let charge_gap = gap > 24.0 && cv <= avail + 8.0;
+                    if std::env::var("RHWP_MC_VPOS_GAP_DRIFT").is_ok() {
+                        eprintln!(
+                            "MC_VPOS_GAP: pi={} col={} cur_h={:.1} first_vpos={:.1} gap={:.1} avail={:.1} charge={}",
+                            para_idx,
+                            st.current_column,
+                            st.current_height,
+                            cv,
+                            gap,
+                            avail,
+                            charge_gap,
+                        );
+                    }
+                    if charge_gap {
+                        st.current_height = cv;
                     }
                 }
             }
@@ -1407,31 +2342,30 @@ impl TypesetEngine {
                 // [Mindlogic — Square TABLE beside-flow match] host lineseg sw is FULL
                 // width; beside-flow paras carry NARROWED sw → never == wrap_sw. Match
                 // via table geometry (body − table width).
-                let anchor_table_match = if st.wrap_around_cs == 0
-                    && para_cs == 0
-                    && para_sw > 0
-                    && para_sw < body_w
-                {
-                    paragraphs
-                        .get(st.wrap_around_table_para)
-                        .map(|p| {
-                            p.controls.iter().any(|c| {
-                                if let Control::Table(t) = c {
-                                    matches!(t.common.text_wrap, crate::model::shape::TextWrap::Square)
-                                        && {
+                let anchor_table_match =
+                    if st.wrap_around_cs == 0 && para_cs == 0 && para_sw > 0 && para_sw < body_w {
+                        paragraphs
+                            .get(st.wrap_around_table_para)
+                            .map(|p| {
+                                p.controls.iter().any(|c| {
+                                    if let Control::Table(t) = c {
+                                        matches!(
+                                            t.common.text_wrap,
+                                            crate::model::shape::TextWrap::Square
+                                        ) && {
                                             let tw = signed_hwpunit(t.common.width);
                                             let expected_sw = body_w - tw;
                                             expected_sw > 0 && (para_sw - expected_sw).abs() < 2400
                                         }
-                                } else {
-                                    false
-                                }
+                                    } else {
+                                        false
+                                    }
+                                })
                             })
-                        })
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
                 if (para_cs == st.wrap_around_cs && para_sw == st.wrap_around_sw)
                     || (any_seg_matches && (is_empty_para || st.wrap_around_any_seg))
                     || sw0_match
@@ -1528,10 +2462,10 @@ impl TypesetEngine {
                         // Absorb when EVERY lineseg stays narrowed (all beside the table).
                         let table_all_segs_narrow = anchor_table_match
                             && !para.line_segs.is_empty()
-                            && para
-                                .line_segs
-                                .iter()
-                                .all(|s| (s.segment_width as i32) > 0 && (s.segment_width as i32) < body_w - 1000);
+                            && para.line_segs.iter().all(|s| {
+                                (s.segment_width as i32) > 0
+                                    && (s.segment_width as i32) < body_w - 1000
+                            });
                         if last_seg_match || is_empty_para || table_all_segs_narrow {
                             st.current_column_wrap_around_paras.push(
                                 crate::renderer::pagination::WrapAroundPara {
@@ -1721,8 +2655,7 @@ impl TypesetEngine {
                                 // render overflows the page box — 5870b034 lesson).
                                 let sa = formatted.spacing_after;
                                 formatted.total_height -= sa;
-                                formatted.height_for_fit =
-                                    (formatted.height_for_fit - sa).max(0.0);
+                                formatted.height_for_fit = (formatted.height_for_fit - sa).max(0.0);
                                 formatted.spacing_after = 0.0;
                                 st.sa_baked_paras.insert(para_idx);
                                 // === [/Mindlogic patch] ===========================
@@ -1748,6 +2681,7 @@ impl TypesetEngine {
                     &mut st,
                     para_idx,
                     para,
+                    paragraphs,
                     composed.get(para_idx),
                     styles,
                     measured_tables,
@@ -2072,7 +3006,8 @@ impl TypesetEngine {
                             // another break). This includes the FIRST stacked float: if its
                             // anchor page is nearly full it must move to a clean page rather
                             // than overflow off the bottom (wb18 para844 pic0 hung at y≈948).
-                            let is_stack_float = stack_fw && fw_square_float_ctrls.contains(&ctrl_idx);
+                            let is_stack_float =
+                                stack_fw && fw_square_float_ctrls.contains(&ctrl_idx);
                             let stack_h_px = if is_stack_float {
                                 let cm = match ctrl {
                                     Control::Picture(p) => Some(&p.common),
@@ -2094,8 +3029,7 @@ impl TypesetEngine {
                             };
                             if is_stack_float {
                                 let avail = st.available_height();
-                                if st.current_height > 0.0
-                                    && st.current_height + stack_h_px > avail
+                                if st.current_height > 0.0 && st.current_height + stack_h_px > avail
                                 {
                                     st.advance_column_or_new_page();
                                 }
@@ -2132,8 +3066,10 @@ impl TypesetEngine {
                                                 p.common.text_wrap,
                                                 TextWrap::Square
                                             ) && col_w_px > 0.0
-                                                && hwpunit_to_px(p.common.width as i32, self.dpi)
-                                                    >= col_w_px * 0.9)) =>
+                                                && hwpunit_to_px(
+                                                    p.common.width as i32,
+                                                    self.dpi,
+                                                ) >= col_w_px * 0.9)) =>
                                     {
                                         Some(hwpunit_to_px(p.common.height as i32, self.dpi))
                                     }
@@ -2154,8 +3090,7 @@ impl TypesetEngine {
                                 };
                                 if let Some(obj_h) = single_float_obj_h {
                                     let already_accounted = para_idx > 0 && {
-                                        let v_cur =
-                                            para.line_segs.first().map(|s| s.vertical_pos);
+                                        let v_cur = para.line_segs.first().map(|s| s.vertical_pos);
                                         let prev_end = paragraphs[para_idx - 1]
                                             .line_segs
                                             .last()
@@ -2185,10 +3120,7 @@ impl TypesetEngine {
                                     } else {
                                         0.0
                                     };
-                                    if !already_accounted
-                                        && obj_ratio > 0.6
-                                        && cur_ratio > 0.95
-                                    {
+                                    if !already_accounted && obj_ratio > 0.6 && cur_ratio > 0.95 {
                                         st.advance_column_or_new_page();
                                     }
                                 }
@@ -2220,9 +3152,11 @@ impl TypesetEngine {
                             // banner pi=145 → 2× overlapping draws). Skip the push if an identical
                             // (para,ctrl) Shape already lives in the target column.
                             let already_in = |items: &[PageItem]| {
-                                items.iter().any(|it| matches!(it,
+                                items.iter().any(|it| {
+                                    matches!(it,
                                     PageItem::Shape { para_index, control_index }
-                                        if *para_index == para_idx && *control_index == ctrl_idx))
+                                        if *para_index == para_idx && *control_index == ctrl_idx)
+                                })
                             };
                             match routed {
                                 Some((page_idx, col_idx)) => {
@@ -2352,10 +3286,31 @@ impl TypesetEngine {
                                         hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi);
                                     Some((h, h + mb, pic.common.vertical_offset as i32))
                                 }
+                                Control::Picture(pic)
+                                    if empty_host_square_picture_reserve_px(
+                                        para,
+                                        &pic.common,
+                                        self.dpi,
+                                    )
+                                    .is_some() =>
+                                {
+                                    let h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+                                    let reserve = empty_host_square_picture_reserve_px(
+                                        para,
+                                        &pic.common,
+                                        self.dpi,
+                                    )
+                                    .unwrap_or(h);
+                                    Some((h, reserve, pic.common.vertical_offset as i32))
+                                }
                                 _ => None,
                             };
-                            if let Some((obj_h, extra, voff)) = pushdown_h.filter(|_| !is_stack_float)
+                            if let Some((obj_h, extra, voff)) =
+                                pushdown_h.filter(|_| !is_stack_float)
                             {
+                                let drift_pushdown =
+                                    std::env::var("RHWP_FLOAT_PUSHDOWN_DRIFT").is_ok();
+                                let cur_before = st.current_height;
                                 // [Task #1079] 파일 vpos 가 이미 그림 공간을 반영(그림 para 줄
                                 // 앞 gap ≥ 그림 높이)하면 VPOS_CORR sync 가 그 공간을 따르므로
                                 // pushdown 가산은 이중 계상. gap 이 그림 높이 미만(파일 vpos
@@ -2375,6 +3330,7 @@ impl TypesetEngine {
                                         _ => false,
                                     }
                                 };
+                                let mut drift_action = "skip_accounted";
                                 if !already_accounted {
                                     // [Mindlogic patch — side-by-side dedup] objects whose
                                     // vertical spans overlap render side-by-side; only the
@@ -2389,13 +3345,34 @@ impl TypesetEngine {
                                         if extra > slot.2 {
                                             st.current_height += extra - slot.2;
                                             slot.2 = extra;
+                                            drift_action = "group_grow";
+                                        } else {
+                                            drift_action = "group_keep";
                                         }
                                         slot.0 = slot.0.min(top);
                                         slot.1 = slot.1.max(bottom);
                                     } else {
                                         st.current_height += extra;
                                         pushdown_groups.push((top, bottom, extra));
+                                        drift_action = "add";
                                     }
+                                }
+                                if drift_pushdown {
+                                    eprintln!(
+                                        "FLOAT_PUSHDOWN: pi={} ci={} col={} action={} accounted={} top={:.1} bottom={:.1} obj_h={:.1} extra={:.1} cur_before={:.1} cur_after={:.1} groups={}",
+                                        para_idx,
+                                        ctrl_idx,
+                                        st.current_column,
+                                        drift_action,
+                                        already_accounted,
+                                        hwpunit_to_px(voff, self.dpi),
+                                        hwpunit_to_px(voff, self.dpi) + obj_h,
+                                        obj_h,
+                                        extra,
+                                        cur_before,
+                                        st.current_height,
+                                        pushdown_groups.len(),
+                                    );
                                 }
                             }
                         }
@@ -2574,6 +3551,8 @@ impl TypesetEngine {
             st.flush_column_always();
         }
         st.ensure_page();
+        self.rewrite_embedded_scan_title_runs(&mut st.pages, paragraphs);
+        self.rewrite_evidence_title_split_table_orphans(&mut st.pages, paragraphs);
 
         // 페이지 번호 + 머리말/꼬리말 할당
         Self::finalize_pages(
@@ -2657,12 +3636,10 @@ impl TypesetEngine {
         let y = hc.vpos_adjust(st.current_height, para_idx, paragraphs, styles);
         // lazy_base 는 지연 산출 시 갱신될 수 있으므로 회수.
         st.vpos_lazy_base = hc.vpos_lazy_base;
-        let is_empty_bridge_para = paragraphs.get(para_idx).is_some_and(|p| {
-            p.controls.is_empty()
-                && p.text
-                    .chars()
-                    .all(|c| c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace())
-        });
+        let cur_before_snap = st.current_height;
+        let is_control_free_bridge_para = paragraphs
+            .get(para_idx)
+            .is_some_and(|p| p.controls.is_empty());
         let has_topbottom_para_table = |p: &Paragraph| {
             p.controls.iter().any(|c| {
                 matches!(c, Control::Table(t)
@@ -2679,7 +3656,7 @@ impl TypesetEngine {
             .get(para_idx + 1..(para_idx + 4).min(paragraphs.len()))
             .is_some_and(|tail| tail.iter().any(has_topbottom_para_table));
         if should_skip_topbottom_bridge_vpos_snap(
-            is_empty_bridge_para,
+            is_control_free_bridge_para,
             recent_topbottom_table,
             upcoming_topbottom_table,
             st.current_height,
@@ -2696,6 +3673,22 @@ impl TypesetEngine {
                 );
             }
         } else {
+            if std::env::var("RHWP_TYPESET_DRIFT").is_ok() && (y - cur_before_snap).abs() > 1.0 {
+                eprintln!(
+                    "TYPESET_VPOS_SNAP: pi={} cur_h={:.1} snapped_y={:.1} delta={:+.1} page_base={:?} lazy_base={:?} prev={:?} prev_partial={} control_free_bridge={} recent_tnb={} upcoming_tnb={}",
+                    para_idx,
+                    cur_before_snap,
+                    y,
+                    y - cur_before_snap,
+                    st.vpos_page_base,
+                    st.vpos_lazy_base,
+                    st.vpos_prev_layout_para,
+                    st.vpos_prev_partial_table,
+                    is_control_free_bridge_para,
+                    recent_topbottom_table,
+                    upcoming_topbottom_table,
+                );
+            }
             st.current_height = y;
         }
     }
@@ -3047,9 +4040,11 @@ impl TypesetEngine {
                         .map(|s| crate::renderer::hwpunit_to_px(s.line_spacing, self.dpi))
                         .unwrap_or(-1.0);
                     let seg_vpos = seg.map(|s| s.vertical_pos).unwrap_or(-1);
+                    let seg_cs = seg.map(|s| s.column_start).unwrap_or(-1);
+                    let seg_sw = seg.map(|s| s.segment_width).unwrap_or(-1);
                     eprintln!(
-                        "TYPESET_DRIFT_LINE: pi={} li={} fmt_lh={:.1} fmt_ls={:.1} seg_lh={:.1} seg_ls={:.1} vpos={}",
-                        para_idx, li, lh, ls, seg_lh, seg_ls, seg_vpos,
+                        "TYPESET_DRIFT_LINE: pi={} li={} fmt_lh={:.1} fmt_ls={:.1} seg_lh={:.1} seg_ls={:.1} vpos={} cs={} sw={}",
+                        para_idx, li, lh, ls, seg_lh, seg_ls, seg_vpos, seg_cs, seg_sw,
                     );
                 }
             }
@@ -3187,7 +4182,134 @@ impl TypesetEngine {
             .last()
             .map(|s| s.vertical_pos + s.line_height + s.line_spacing);
 
-        if forced_page_break_line.is_none() && st.current_height + fmt.height_for_fit <= available {
+        let visible_text = para
+            .text
+            .chars()
+            .any(|c| !c.is_control() && !c.is_whitespace());
+        let follows_tac_topbottom_table = st
+            .current_items
+            .last()
+            .and_then(|item| match item {
+                PageItem::Table {
+                    para_index,
+                    control_index,
+                } => Some((*para_index, *control_index)),
+                _ => None,
+            })
+            .and_then(|(prev_para_idx, prev_ctrl_idx)| {
+                paragraphs
+                    .get(prev_para_idx)
+                    .and_then(|p| p.controls.get(prev_ctrl_idx))
+            })
+            .is_some_and(|ctrl| {
+                if let Control::Table(table) = ctrl {
+                    table.common.treat_as_char
+                        && matches!(
+                            table.common.text_wrap,
+                            crate::model::shape::TextWrap::TopAndBottom
+                        )
+                } else {
+                    false
+                }
+            });
+        let only_fits_if_trailing_spacing_is_ignored = st.current_height + fmt.height_for_fit
+            <= available
+            && st.current_height + fmt.total_height > available + 0.5;
+        if follows_tac_topbottom_table
+            && visible_text
+            && !st.current_items.is_empty()
+            && st.current_height > available * 0.85
+            && only_fits_if_trailing_spacing_is_ignored
+        {
+            st.advance_column_or_new_page();
+        }
+        if should_defer_text_after_near_full_cell_tac_table(
+            st,
+            para,
+            fmt,
+            paragraphs,
+            para_idx,
+            visible_text,
+            forced_page_break_line,
+        ) {
+            st.advance_column_or_new_page();
+        }
+        if should_defer_late_visible_group_before_explicit_blank_break(
+            st,
+            para,
+            fmt,
+            paragraphs,
+            para_idx,
+            available,
+            visible_text,
+            forced_page_break_line,
+        ) {
+            st.advance_column_or_new_page();
+        }
+        if should_defer_late_single_line_before_following_body_group(
+            st,
+            para,
+            fmt,
+            paragraphs,
+            para_idx,
+            available,
+            visible_text,
+            forced_page_break_line,
+        ) {
+            st.advance_column_or_new_page();
+        }
+        if should_defer_late_single_line_text_with_following_body(
+            st,
+            para,
+            fmt,
+            paragraphs,
+            para_idx,
+            available,
+            visible_text,
+            only_fits_if_trailing_spacing_is_ignored,
+            forced_page_break_line,
+        ) {
+            st.advance_column_or_new_page();
+        }
+
+        let should_split_late_topbottom_page_text = should_split_late_topbottom_page_text(
+            st,
+            fmt,
+            paragraphs,
+            available,
+            visible_text,
+            only_fits_if_trailing_spacing_is_ignored,
+            forced_page_break_line,
+        );
+        let should_move_late_tail_before_explicit_page_break =
+            should_move_late_tail_before_explicit_page_break(
+                st,
+                para,
+                fmt,
+                paragraphs,
+                para_idx,
+                available,
+                visible_text,
+            );
+        if should_move_late_tail_before_explicit_page_break {
+            if std::env::var("RHWP_BOTTOM_TAIL").is_ok() {
+                eprintln!(
+                    "BOTTOM_TAIL_BREAK: pi={} cur={:.1} hfit={:.1} body={:.1} rem={:.1} next_pi={}",
+                    para_idx,
+                    st.current_height,
+                    fmt.height_for_fit,
+                    st.layout.body_area.height,
+                    st.layout.body_area.height - (st.current_height + fmt.height_for_fit),
+                    para_idx + 1,
+                );
+            }
+            st.advance_column_or_new_page();
+        }
+
+        if forced_page_break_line.is_none()
+            && st.current_height + fmt.height_for_fit <= available
+            && !should_split_late_topbottom_page_text
+        {
             // place: 전체 배치
             st.current_items.push(PageItem::FullParagraph {
                 para_index: para_idx,
@@ -3455,7 +4577,78 @@ impl TypesetEngine {
             } else {
                 0.0
             };
-            let part_height = sp_b + part_line_height + part_sp_after;
+            let composed_part_height = sp_b + part_line_height + part_sp_after;
+
+            let mut saved_first_vpos = None;
+            let mut saved_last_vpos = None;
+            let mut saved_max_bottom = None;
+            let mut saved_reset_count = 0usize;
+            let mut prev_vpos = None;
+            for li in cursor_line..end_line {
+                if let Some(seg) = para.line_segs.get(li) {
+                    let vpos = crate::renderer::hwpunit_to_px(seg.vertical_pos, self.dpi);
+                    let bottom = crate::renderer::hwpunit_to_px(
+                        seg.vertical_pos + seg.line_height + seg.line_spacing,
+                        self.dpi,
+                    );
+                    if saved_first_vpos.is_none() {
+                        saved_first_vpos = Some(vpos);
+                    }
+                    saved_last_vpos = Some(vpos);
+                    saved_max_bottom = Some(
+                        saved_max_bottom
+                            .map(|cur: f64| cur.max(bottom))
+                            .unwrap_or(bottom),
+                    );
+                    if li > cursor_line && seg.vertical_pos == 0 {
+                        saved_reset_count += 1;
+                    }
+                    if prev_vpos
+                        .map(|prev| seg.vertical_pos < prev)
+                        .unwrap_or(false)
+                    {
+                        saved_reset_count += 1;
+                    }
+                    prev_vpos = Some(seg.vertical_pos);
+                }
+            }
+            let saved_band_h = match (saved_first_vpos, saved_max_bottom) {
+                (Some(first), Some(bottom)) => (bottom - first).max(0.0),
+                _ => 0.0,
+            };
+            let charge_saved_reset_band = st.col_count > 1
+                && st.current_items.is_empty()
+                && saved_first_vpos.map(|v| v.abs() <= 0.5).unwrap_or(false)
+                && saved_band_h > composed_part_height + 24.0;
+            let part_height = if charge_saved_reset_band {
+                saved_band_h
+            } else {
+                composed_part_height
+            };
+
+            if std::env::var("RHWP_MC_LINE_PART_DRIFT").is_ok() && st.col_count > 1 {
+                let cur_before = st.current_height;
+                eprintln!(
+                    "MC_LINE_PART: pi={} col={} lines={}..{} cur_before={:.1} page_avail={:.1} sp_b={:.1} line_h={:.1} sp_after={:.1} charged={:.1} saved_band={:.1} diff={:+.1} first_vpos={:.1} last_vpos={:.1} resets={} items={} saved_charge={}",
+                    para_idx,
+                    st.current_column,
+                    cursor_line,
+                    end_line,
+                    cur_before,
+                    page_avail,
+                    sp_b,
+                    part_line_height,
+                    part_sp_after,
+                    part_height,
+                    saved_band_h,
+                    part_height - saved_band_h,
+                    saved_first_vpos.unwrap_or(-1.0),
+                    saved_last_vpos.unwrap_or(-1.0),
+                    saved_reset_count,
+                    st.current_items.len(),
+                    charge_saved_reset_band,
+                );
+            }
 
             if cursor_line == 0 && end_line >= line_count {
                 // 전체가 배치됨 — overflow 재확인
@@ -3686,6 +4879,7 @@ impl TypesetEngine {
         st: &mut TypesetState,
         para_idx: usize,
         para: &Paragraph,
+        paragraphs: &[Paragraph],
         composed: Option<&ComposedParagraph>,
         styles: &ResolvedStyleSet,
         measured_tables: &[MeasuredTable],
@@ -3770,7 +4964,6 @@ impl TypesetEngine {
         let para_start_height = st.current_height;
         let page_count_before = st.pages.len();
         let mut para_float_lanes = FloatLaneSet::new();
-
         // 각 컨트롤에 대해 format → fits → place/split
         for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
             match ctrl {
@@ -3829,7 +5022,7 @@ impl TypesetEngine {
                         .find(|mt| mt.para_index == para_idx && mt.control_index == ctrl_idx);
                     if ft.is_tac {
                         self.typeset_tac_table(
-                            st, para_idx, ctrl_idx, para, table, &ft, &fmt, tac_count,
+                            st, para_idx, ctrl_idx, para, table, &ft, &fmt, tac_count, paragraphs,
                         );
                     } else if self.try_typeset_empty_para_float_table(
                         st,
@@ -4079,6 +5272,7 @@ impl TypesetEngine {
         ft: &FormattedTable,
         fmt: &FormattedParagraph,
         tac_count: usize,
+        paragraphs: &[Paragraph],
     ) {
         // 다중 TAC 표: LINE_SEG 기반 개별 높이 계산
         let table_height = if tac_count > 1 {
@@ -4117,6 +5311,43 @@ impl TypesetEngine {
         // overflow (<1% of page) before advancing — same philosophy as the
         // region-tail / last-row orphan guards in table_layout.rs.
         let fit_tol = available * 0.01;
+        if tac_count == 1
+            && should_defer_large_cell_tac_after_table_break_spacer(
+                st,
+                paragraphs,
+                para_idx,
+                para,
+                table,
+                table_height,
+            )
+        {
+            st.advance_column_or_new_page();
+        }
+        if tac_count == 1
+            && should_defer_late_heading_followed_by_table_break_tac(
+                st,
+                paragraphs,
+                para_idx,
+                para,
+                table,
+                table_height,
+            )
+        {
+            st.advance_column_or_new_page();
+        }
+        if tac_count == 1
+            && should_defer_large_cell_tac_after_page_tail_lead_in(
+                st,
+                paragraphs,
+                para_idx,
+                para,
+                table,
+                table_height,
+                available,
+            )
+        {
+            st.advance_column_or_new_page();
+        }
         if st.current_height + table_height > available + fit_tol && !st.current_items.is_empty() {
             st.advance_column_or_new_page();
         }
@@ -4209,45 +5440,44 @@ impl TypesetEngine {
             && pre_table_end_line > 0
             && pre_table_end_line < total_lines;
 
+        let square_anchor_advance =
+            if is_wrap_around_table && table.row_count == 1 && table.col_count == 1 {
+                let body_w = st.layout.body_area.width;
+                let tbl_w_px = crate::renderer::hwpunit_to_px(table.common.width as i32, self.dpi);
+                let host_vpos = para.line_segs.first().map(|s| s.vertical_pos);
+                match (host_vpos, st.pending_next_para_first_vpos) {
+                    (Some(hv), Some(nv)) if tbl_w_px < body_w * 0.55 && nv > hv => {
+                        let delta_px = crate::renderer::hwpunit_to_px(nv - hv, self.dpi);
+                        (delta_px > 0.0).then_some(delta_px)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
         if is_wrap_around_table && pre_height > 0.0 {
             let v_off_px = crate::renderer::hwpunit_to_px(vertical_offset as i32, self.dpi);
             let table_bottom = v_off_px + table_total_height;
-            st.current_height += pre_height.max(table_bottom);
+            let full_advance = pre_height.max(table_bottom);
+            let advance = square_anchor_advance
+                .filter(|delta_px| *delta_px < full_advance)
+                .unwrap_or(full_advance);
+            st.current_height += advance;
         } else if tac_wrap_split {
             st.current_height += table_total_height;
         } else {
             // [Mindlogic — wc35 narrow Square float band-overlap]
-            // A narrow non-tac Square table with no pre-text floats BESIDE the
-            // following content (the existing Square max-policy above only fires
-            // when pre-text exists). Advancing flow by the float's full height
-            // over-counts the band: Hancom's cached vpos only advances to the
-            // next anchor (wc35 pi=76/81: full 60.8px vs vpos-delta 29.3px →
-            // cur_h drifts +38px → trailing Quiz line orphans, +3 pages). When
-            // the next anchor's cached vpos sits ABOVE the float bottom (the
-            // float overlaps the following band), advance flow to that vpos
-            // instead. Narrowed by width<0.5·body to leave full-width Square
-            // blocks (which DO consume their full height) untouched. Structural
-            // (wrap type + width + cached vpos delta), never content-keyed.
+            // A narrow one-cell non-tac Square table floats BESIDE following
+            // content. Advancing flow by the float's full height over-counts the
+            // band: Hancom's cached vpos only advances to the next anchor
+            // (wc35 pi=76/81/103..117). When the next anchor's cached vpos sits
+            // above the float bottom, advance flow to that vpos instead.
+            // Structural: wrap type + 1x1 table + width + cached vpos delta.
             let full_advance = pre_height + table_total_height;
-            let advance = if is_wrap_around_table {
-                let body_w = st.layout.body_area.width;
-                let tbl_w_px =
-                    crate::renderer::hwpunit_to_px(table.common.width as i32, self.dpi);
-                let host_vpos = para.line_segs.first().map(|s| s.vertical_pos);
-                match (host_vpos, st.pending_next_para_first_vpos) {
-                    (Some(hv), Some(nv)) if tbl_w_px < body_w * 0.5 && nv > hv => {
-                        let delta_px = crate::renderer::hwpunit_to_px(nv - hv, self.dpi);
-                        if delta_px > 0.0 && delta_px < full_advance {
-                            delta_px
-                        } else {
-                            full_advance
-                        }
-                    }
-                    _ => full_advance,
-                }
-            } else {
-                full_advance
-            };
+            let advance = square_anchor_advance
+                .filter(|delta_px| *delta_px < full_advance)
+                .unwrap_or(full_advance);
             st.current_height += advance;
         }
 
@@ -4693,6 +5923,18 @@ impl TypesetEngine {
                     - vert_offset_overhead)
                     .max(0.0)
             };
+            let strict_table_available =
+                (table_available - st.layout.pagination_tolerance_px).max(0.0);
+            let strict_page_avail = if is_continuation {
+                strict_table_available
+            } else {
+                (strict_table_available
+                    - st.current_height
+                    - caption_extra
+                    - host_before_overhead
+                    - vert_offset_overhead)
+                    .max(0.0)
+            };
 
             // [Task #1022] 머리행 반복 overhead — 렌더러(layout_partial_table)는
             // start_row 이전의 is_header 행을 모두 반복하므로(다중 머리행: rs>=2
@@ -4719,6 +5961,7 @@ impl TypesetEngine {
                     0.0
                 };
             let avail_for_rows = (page_avail - header_overhead).max(0.0);
+            let strict_avail_for_rows = (strict_page_avail - header_overhead).max(0.0);
 
             // [Task #1046 Stage 2 진단] 첫/연속 fragment 의 가용공간 분해 — 렌더러
             // y_start 점프(vert_offset)·host_before 와의 정합 확인용. 동작 불변(게이트).
@@ -4873,10 +6116,8 @@ impl TypesetEngine {
                             && start_cut.is_empty()
                         {
                             let padding = mt.max_padding_for_row(r);
-                            let budget =
-                                (avail_for_rows - consumed - cs_before - padding).max(0.0);
-                            let res =
-                                layout_engine.advance_row_cut(table, r, &[], budget, styles);
+                            let budget = (avail_for_rows - consumed - cs_before - padding).max(0.0);
+                            let res = layout_engine.advance_row_cut(table, r, &[], budget, styles);
                             if res.fully_consumed && !res.end_cut.is_empty() {
                                 let visible_h = layout_engine.row_cut_content_height(
                                     table,
@@ -4893,6 +6134,27 @@ impl TypesetEngine {
                                     r += 1;
                                     end_row = r;
                                     continue;
+                                }
+                            }
+                            if !res.fully_consumed {
+                                let split_total = layout_engine.row_cut_content_height(
+                                    table,
+                                    r,
+                                    &[],
+                                    &res.end_cut,
+                                    styles,
+                                );
+                                let split_budget = (avail_for_rows - consumed - cs_before).max(0.0);
+                                if should_split_rowbreak_rowspan_partial_top_slice(
+                                    res.consumed_height,
+                                    split_total,
+                                    split_budget,
+                                ) {
+                                    end_row = r + 1;
+                                    split_end_cut = res.end_cut.clone();
+                                    split_end_limit = res.consumed_height;
+                                    consumed += cs_before + split_total;
+                                    break;
                                 }
                             }
                         }
@@ -4952,8 +6214,8 @@ impl TypesetEngine {
                     //       3px cutoff missed it by 0.1px, so it is widened to 4px — still
                     //       deep sub-line rounding (0.45% of avail), gate-verified safe.
                     // The corpus gate guards any page-count move past these thresholds.
-                    let row_fits_tightly = row_total <= avail_for_rows * 0.15
-                        || row_total >= avail_for_rows * 0.85;
+                    let row_fits_tightly =
+                        row_total <= avail_for_rows * 0.15 || row_total >= avail_for_rows * 0.85;
                     let row_overflow = consumed + cs_before + row_total - avail_for_rows;
                     if r + 1 == row_count
                         && ((row_fits_tightly && row_overflow <= avail_for_rows * 0.02)
@@ -4996,9 +6258,6 @@ impl TypesetEngine {
                     if r > cursor_row && res.consumed_height < MIN_TOP_KEEP_PX {
                         end_row = r;
                     } else {
-                        end_row = r + 1;
-                        split_end_cut = res.end_cut.clone();
-                        split_end_limit = res.consumed_height;
                         // 분할 행의 행 총 높이(per-cell content+pad) 를 consumed 에 가산.
                         let split_total = layout_engine.row_cut_content_height(
                             table,
@@ -5007,7 +6266,22 @@ impl TypesetEngine {
                             &res.end_cut,
                             styles,
                         );
-                        consumed += cs_before + split_total;
+                        let split_budget = (avail_for_rows - consumed - cs_before).max(0.0);
+                        // `advance_row_cut` returns consumed text-unit height, but render
+                        // advances by `row_cut_content_height` including cell padding and
+                        // declared row geometry. If a non-leading split row renders taller
+                        // than the remaining fragment budget, putting the cut here creates
+                        // a guaranteed `PartialTable` overflow. Defer the split row to the
+                        // next page instead; page-leading rows still use the existing forced
+                        // progress path so large rows cannot loop forever.
+                        if r > cursor_row && split_total > split_budget + 4.0 {
+                            end_row = r;
+                        } else {
+                            end_row = r + 1;
+                            split_end_cut = res.end_cut.clone();
+                            split_end_limit = res.consumed_height;
+                            consumed += cs_before + split_total;
+                        }
                     }
                     break;
                 }
@@ -5018,7 +6292,42 @@ impl TypesetEngine {
 
             // [Task #1022] walk 가 consumed 에 분할 행 기여까지 누적하므로
             // partial_height = consumed + header_overhead 로 단일화.
-            let partial_height: f64 = consumed + header_overhead;
+            let mut partial_height: f64 = consumed + header_overhead;
+            if should_trim_clean_table_fragment_to_render_budget(
+                !start_cut.is_empty(),
+                !split_end_cut.is_empty(),
+                split_end_limit,
+                end_row,
+                row_count,
+            ) {
+                let (trimmed_end_row, trimmed_partial_height) =
+                    trim_clean_table_fragment_to_render_budget(
+                        cursor_row,
+                        end_row,
+                        partial_height,
+                        header_overhead,
+                        strict_avail_for_rows,
+                        &cut_row_h,
+                        cs,
+                        !start_cut.is_empty(),
+                        split_end_limit,
+                    );
+                if trimmed_end_row < end_row {
+                    end_row = trimmed_end_row;
+                    partial_height = trimmed_partial_height;
+                    consumed = (partial_height - header_overhead).max(0.0);
+                }
+            }
+            if start_cut.is_empty() && split_end_cut.is_empty() && split_end_limit <= 0.0 {
+                if let Some(snapped_end_row) =
+                    snap_photo_grid_orphan_break(table, cursor_row, end_row, row_count)
+                {
+                    end_row = snapped_end_row;
+                    consumed = (cursor_row..end_row).map(|r| cut_row_h[r]).sum::<f64>()
+                        + cs * end_row.saturating_sub(cursor_row + 1) as f64;
+                    partial_height = consumed + header_overhead;
+                }
+            }
 
             // [Task #1046 Stage 2 진단] walk 결과 — fragment 경계/소비 높이. 동작 불변.
             if std::env::var("RHWP_TABLE_DRIFT").is_ok() {
@@ -5049,6 +6358,30 @@ impl TypesetEngine {
                 }
             }
 
+            let has_visible_post_table_text =
+                hwpx_has_visible_text_after_table_control(para, ctrl_idx)
+                    .unwrap_or(!para.text.is_empty());
+            let drop_tiny_final_split_tail = if end_row >= row_count && split_end_limit > 0.0 {
+                let tail_row = end_row.saturating_sub(1);
+                let tail_h = layout_engine.row_cut_content_height(
+                    table,
+                    tail_row,
+                    &split_end_cut,
+                    &[],
+                    styles,
+                );
+                should_drop_tiny_final_split_tail(
+                    end_row,
+                    row_count,
+                    split_end_limit,
+                    &split_end_cut,
+                    has_visible_post_table_text,
+                    tail_h,
+                )
+            } else {
+                false
+            };
+
             if end_row >= row_count && split_end_limit == 0.0 {
                 // 나머지 전부가 현재 페이지에 들어감
                 let bottom_caption_extra = if !caption_is_top {
@@ -5078,6 +6411,56 @@ impl TypesetEngine {
                     st.current_height +=
                         partial_height + bottom_caption_extra + ft.host_spacing.spacing_after_only;
                 }
+                // A split table paragraph can still have visible text after the table
+                // control. Whole-table placement emits that post-text in
+                // place_table_with_text(); final PartialTable placement must do the
+                // same, otherwise a heading serialized in the same paragraph as the
+                // preceding table disappears before the next block table.
+                let is_last_table = !para
+                    .controls
+                    .iter()
+                    .skip(ctrl_idx + 1)
+                    .any(|c| matches!(c, Control::Table(_)));
+                let tac_table_count = para
+                    .controls
+                    .iter()
+                    .filter(|c| matches!(c, Control::Table(t) if t.attr & 0x01 != 0))
+                    .count();
+                let post_table_start = if table.attr & 0x01 != 0 { 1 } else { 0 };
+                let should_add_post_text = is_last_table
+                    && tac_table_count <= 1
+                    && has_visible_post_table_text
+                    && fmt.line_heights.len() > post_table_start;
+                if should_add_post_text {
+                    let post_height =
+                        fmt.line_advances_sum(post_table_start..fmt.line_heights.len());
+                    if st.current_height + post_height > st.base_available_height()
+                        && !st.current_items.is_empty()
+                    {
+                        st.advance_column_or_new_page();
+                    }
+                    st.current_items.push(PageItem::PartialParagraph {
+                        para_index: para_idx,
+                        start_line: post_table_start,
+                        end_line: fmt.line_heights.len(),
+                    });
+                    st.current_height += post_height;
+                }
+                break;
+            }
+
+            if drop_tiny_final_split_tail {
+                st.current_items.push(PageItem::PartialTable {
+                    para_index: para_idx,
+                    control_index: ctrl_idx,
+                    start_row: cursor_row,
+                    end_row,
+                    is_continuation,
+                    start_cut: start_cut.clone(),
+                    end_cut: split_end_cut.clone(),
+                    is_block_split: split_block_start.is_some() || start_cut_is_block,
+                });
+                st.current_height += partial_height;
                 break;
             }
 
@@ -5628,6 +7011,457 @@ impl TypesetEngine {
         table.common.vertical_offset as u32
     }
 
+    fn single_col_page(
+        &self,
+        template: &PageContent,
+        items: Vec<PageItem>,
+        used_height: f64,
+    ) -> PageContent {
+        PageContent {
+            page_index: 0,
+            page_number: 0,
+            section_index: template.section_index,
+            layout: template.layout.clone(),
+            column_contents: vec![ColumnContent {
+                column_index: 0,
+                items,
+                zone_layout: None,
+                zone_y_offset: 0.0,
+                wrap_around_paras: Vec::new(),
+                used_height,
+                wrap_anchors: std::collections::HashMap::new(),
+            }],
+            active_header: None,
+            active_footer: None,
+            page_number_pos: None,
+            page_hide: None,
+            footnotes: Vec::new(),
+            active_master_page: None,
+            extra_master_pages: Vec::new(),
+        }
+    }
+
+    fn first_col_items(page: &PageContent) -> Option<&[PageItem]> {
+        if page.column_contents.len() != 1 {
+            return None;
+        }
+        Some(&page.column_contents.first()?.items)
+    }
+
+    fn is_page_relative_scan_item(&self, paragraphs: &[Paragraph], item: &PageItem) -> bool {
+        let PageItem::Shape {
+            para_index,
+            control_index,
+        } = item
+        else {
+            return false;
+        };
+        paragraphs
+            .get(*para_index)
+            .and_then(|p| p.controls.get(*control_index))
+            .and_then(|ctrl| match ctrl {
+                Control::Picture(pic) => Some(&pic.common),
+                Control::Shape(shape) => match shape.as_ref() {
+                    crate::model::shape::ShapeObject::Picture(pic) => Some(&pic.common),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .is_some_and(|common| {
+                use crate::model::shape::{HorzRelTo, TextWrap, VertRelTo};
+                !common.treat_as_char
+                    && matches!(common.text_wrap, TextWrap::Square)
+                    && matches!(common.vert_rel_to, VertRelTo::Paper | VertRelTo::Page)
+                    && matches!(common.horz_rel_to, HorzRelTo::Paper | HorzRelTo::Page)
+                    && hwpunit_to_px(common.width as i32, self.dpi)
+                        >= self
+                            .layout_width_hint(paragraphs, *para_index)
+                            .unwrap_or(0.0)
+                            * 0.65
+                    && hwpunit_to_px(common.height as i32, self.dpi)
+                        >= hwpunit_to_px(56_000, self.dpi)
+            })
+    }
+
+    fn layout_width_hint(&self, _paragraphs: &[Paragraph], _para_idx: usize) -> Option<f64> {
+        // Kept as a helper for future multi-column refinement; current callers
+        // use it as a body-width structural floor.
+        Some(hwpunit_to_px(43_000, self.dpi))
+    }
+
+    fn is_large_media_picture_item(&self, paragraphs: &[Paragraph], item: &PageItem) -> bool {
+        let PageItem::Shape {
+            para_index,
+            control_index,
+        } = item
+        else {
+            return false;
+        };
+        paragraphs
+            .get(*para_index)
+            .and_then(|p| p.controls.get(*control_index))
+            .and_then(|ctrl| match ctrl {
+                Control::Picture(pic) => Some(&pic.common),
+                Control::Shape(shape) => match shape.as_ref() {
+                    crate::model::shape::ShapeObject::Picture(pic) => Some(&pic.common),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .is_some_and(|common| {
+                hwpunit_to_px(common.width as i32, self.dpi) >= hwpunit_to_px(43_000, self.dpi)
+                    && hwpunit_to_px(common.height as i32, self.dpi)
+                        >= hwpunit_to_px(30_000, self.dpi)
+            })
+    }
+
+    fn is_evidence_title_table_item(&self, paragraphs: &[Paragraph], item: &PageItem) -> bool {
+        let PageItem::Table {
+            para_index,
+            control_index,
+        } = item
+        else {
+            return false;
+        };
+        paragraphs
+            .get(*para_index)
+            .and_then(|p| p.controls.get(*control_index))
+            .is_some_and(|ctrl| {
+                if let Control::Table(table) = ctrl {
+                    table.row_count == 1
+                        && table.col_count == 3
+                        && hwpunit_to_px(table.common.width as i32, self.dpi)
+                            >= hwpunit_to_px(43_000, self.dpi)
+                        && hwpunit_to_px(table.common.height as i32, self.dpi)
+                            <= hwpunit_to_px(7_000, self.dpi)
+                } else {
+                    false
+                }
+            })
+    }
+
+    fn same_control_item(a: &PageItem, b: &PageItem) -> bool {
+        match (a, b) {
+            (
+                PageItem::Table {
+                    para_index: ap,
+                    control_index: ac,
+                },
+                PageItem::Table {
+                    para_index: bp,
+                    control_index: bc,
+                },
+            )
+            | (
+                PageItem::Shape {
+                    para_index: ap,
+                    control_index: ac,
+                },
+                PageItem::Shape {
+                    para_index: bp,
+                    control_index: bc,
+                },
+            ) => ap == bp && ac == bc,
+            _ => false,
+        }
+    }
+
+    fn is_blank_control_free_paragraph_item(paragraphs: &[Paragraph], item: &PageItem) -> bool {
+        let PageItem::FullParagraph { para_index } = item else {
+            return false;
+        };
+        paragraphs.get(*para_index).is_some_and(|para| {
+            para.controls.is_empty()
+                && para
+                    .text
+                    .chars()
+                    .all(|c| c <= '\u{001F}' || c == '\u{FFFC}' || c.is_whitespace())
+        })
+    }
+
+    fn same_partial_table_control(a: &PageItem, b: &PageItem) -> bool {
+        matches!(
+            (a, b),
+            (
+                PageItem::PartialTable {
+                    para_index: ap,
+                    control_index: ac,
+                    ..
+                },
+                PageItem::PartialTable {
+                    para_index: bp,
+                    control_index: bc,
+                    ..
+                },
+            ) if ap == bp && ac == bc
+        )
+    }
+
+    fn rewrite_evidence_title_split_table_orphans(
+        &self,
+        pages: &mut Vec<PageContent>,
+        paragraphs: &[Paragraph],
+    ) {
+        let mut i = 0;
+        while i + 1 < pages.len() {
+            let Some(prev_items) = Self::first_col_items(&pages[i]).map(|items| items.to_vec())
+            else {
+                i += 1;
+                continue;
+            };
+            let Some(next_items) = Self::first_col_items(&pages[i + 1]).map(|items| items.to_vec())
+            else {
+                i += 1;
+                continue;
+            };
+            let Some(next_first) = next_items.first() else {
+                i += 1;
+                continue;
+            };
+            if matches!(
+                prev_items.first(),
+                Some(PageItem::PartialTable {
+                    is_continuation: true,
+                    ..
+                })
+            ) {
+                i += 1;
+                continue;
+            }
+            let PageItem::PartialTable {
+                is_continuation: true,
+                ..
+            } = next_first
+            else {
+                i += 1;
+                continue;
+            };
+
+            let Some(title_pos) = prev_items
+                .iter()
+                .rposition(|item| self.is_evidence_title_table_item(paragraphs, item))
+            else {
+                i += 1;
+                continue;
+            };
+            let tail = &prev_items[title_pos + 1..];
+            let Some((body_rel_pos, body_fragment)) = tail.iter().enumerate().find(|(_, item)| {
+                matches!(
+                    item,
+                    PageItem::PartialTable {
+                        is_continuation: false,
+                        ..
+                    }
+                )
+            }) else {
+                i += 1;
+                continue;
+            };
+            if !Self::same_partial_table_control(body_fragment, next_first) {
+                i += 1;
+                continue;
+            }
+            if tail[..body_rel_pos]
+                .iter()
+                .any(|item| !Self::is_blank_control_free_paragraph_item(paragraphs, item))
+            {
+                i += 1;
+                continue;
+            }
+            if tail[body_rel_pos + 1..]
+                .iter()
+                .any(|item| !Self::is_blank_control_free_paragraph_item(paragraphs, item))
+            {
+                i += 1;
+                continue;
+            }
+            if prev_items[..title_pos]
+                .iter()
+                .all(|item| Self::is_blank_control_free_paragraph_item(paragraphs, item))
+            {
+                i += 1;
+                continue;
+            }
+
+            let moved_items = prev_items[title_pos..=title_pos + 1 + body_rel_pos].to_vec();
+            if moved_items.len() < 2 {
+                i += 1;
+                continue;
+            }
+            if let Some(col) = pages[i].column_contents.first_mut() {
+                col.items = prev_items[..title_pos].to_vec();
+            }
+            let template = pages[i + 1].clone();
+            pages.insert(i + 1, self.single_col_page(&template, moved_items, 0.0));
+            for (idx, page) in pages.iter_mut().enumerate() {
+                page.page_index = idx as u32;
+            }
+            i += 2;
+        }
+    }
+
+    fn rewrite_embedded_scan_title_runs(
+        &self,
+        pages: &mut Vec<PageContent>,
+        paragraphs: &[Paragraph],
+    ) {
+        let mut i = 0;
+        while i + 1 < pages.len() {
+            let prev_items = match Self::first_col_items(&pages[i]) {
+                Some(items) => items.to_vec(),
+                None => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let next_items = match Self::first_col_items(&pages[i + 1]) {
+                Some(items) => items.to_vec(),
+                None => {
+                    i += 1;
+                    continue;
+                }
+            };
+
+            let Some(scan_a) = prev_items
+                .iter()
+                .find(|item| self.is_page_relative_scan_item(paragraphs, item))
+                .cloned()
+            else {
+                i += 1;
+                continue;
+            };
+            let PageItem::Shape {
+                para_index: scan_a_para,
+                ..
+            } = scan_a
+            else {
+                i += 1;
+                continue;
+            };
+            let Some(title_a) = prev_items
+                .iter()
+                .find(|item| {
+                    matches!(item, PageItem::Table { para_index, .. } if *para_index == scan_a_para)
+                        && self.is_evidence_title_table_item(paragraphs, item)
+                })
+                .cloned()
+            else {
+                i += 1;
+                continue;
+            };
+            let Some(scan_b) = next_items
+                .iter()
+                .find(|item| self.is_page_relative_scan_item(paragraphs, item))
+                .cloned()
+            else {
+                i += 1;
+                continue;
+            };
+            let PageItem::Shape {
+                para_index: scan_b_para,
+                ..
+            } = scan_b
+            else {
+                i += 1;
+                continue;
+            };
+            let Some(title_b) = next_items
+                .iter()
+                .find(|item| {
+                    matches!(item, PageItem::Table { para_index, .. } if *para_index != scan_b_para)
+                        && self.is_evidence_title_table_item(paragraphs, item)
+                })
+                .cloned()
+            else {
+                i += 1;
+                continue;
+            };
+            let Some(title_c) = next_items
+                .iter()
+                .find(|item| {
+                    matches!(item, PageItem::Table { para_index, .. } if *para_index == scan_b_para)
+                        && self.is_evidence_title_table_item(paragraphs, item)
+                })
+                .cloned()
+            else {
+                i += 1;
+                continue;
+            };
+            let media_b = next_items
+                .iter()
+                .find(|item| {
+                    !Self::same_control_item(item, &scan_b)
+                        && self.is_large_media_picture_item(paragraphs, item)
+                })
+                .cloned();
+            let media_host_para = media_b.as_ref().and_then(|item| match item {
+                PageItem::Shape { para_index, .. } => Some(*para_index),
+                _ => None,
+            });
+            let media_host_partial = media_host_para.and_then(|host_para| {
+                next_items
+                    .iter()
+                    .find(|item| {
+                        matches!(item, PageItem::PartialParagraph { para_index, .. } if *para_index == host_para)
+                    })
+                    .cloned()
+            });
+
+            let prev_rewritten: Vec<PageItem> = prev_items
+                .into_iter()
+                .filter(|item| !Self::same_control_item(item, &title_a))
+                .collect();
+            let body_page_items = vec![title_a.clone(), scan_b.clone()];
+            let title_b_page_items = vec![title_b.clone()];
+            let title_c_page_items = vec![title_c.clone()];
+            let media_page_items = media_b.clone().map(|item| {
+                let mut items = Vec::new();
+                if let Some(host_partial) = media_host_partial.clone() {
+                    items.push(host_partial);
+                }
+                items.push(item);
+                items
+            });
+
+            let original_next: Vec<PageItem> = next_items
+                .into_iter()
+                .filter(|item| {
+                    !Self::same_control_item(item, &title_b)
+                        && !Self::same_control_item(item, &title_c)
+                        && !Self::same_control_item(item, &scan_b)
+                        && media_b.as_ref().is_none_or(|media| {
+                            !Self::same_control_item(item, media)
+                        })
+                        && !Self::is_blank_control_free_paragraph_item(paragraphs, item)
+                        && !matches!(item, PageItem::PartialParagraph { para_index, .. } if *para_index == scan_b_para)
+                })
+                .collect();
+
+            if !original_next.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            if let Some(col) = pages[i].column_contents.first_mut() {
+                col.items = prev_rewritten;
+            }
+            let template = pages[i + 1].clone();
+            let mut replacement = vec![
+                self.single_col_page(&template, body_page_items, 0.0),
+                self.single_col_page(&template, title_b_page_items, 0.0),
+                self.single_col_page(&template, title_c_page_items, 0.0),
+            ];
+            if let Some(items) = media_page_items {
+                replacement.push(self.single_col_page(&template, items, 0.0));
+            }
+            pages.splice(i + 1..=i + 1, replacement);
+            for (idx, page) in pages.iter_mut().enumerate() {
+                page.page_index = idx as u32;
+            }
+            i += 4;
+        }
+    }
+
     /// Page-relative full-page scanned pictures consume the current visual page.
     ///
     /// Hancom uses this pattern for photographed/scanned pages embedded in an
@@ -5657,9 +7491,11 @@ impl TypesetEngine {
             }
 
             if idx < paragraphs.len()
-                && paragraphs[start..idx]
-                    .iter()
-                    .any(|p| p.line_segs.first().is_some_and(|ls| ls.vertical_pos <= 1600))
+                && paragraphs[start..idx].iter().any(|p| {
+                    p.line_segs
+                        .first()
+                        .is_some_and(|ls| ls.vertical_pos <= 1600)
+                })
                 && paragraphs[idx..].iter().any(para_has_visible_flow_content)
             {
                 breaks.insert(idx);
@@ -5744,9 +7580,7 @@ fn compute_body_wide_top_reserve_for_para(
             continue;
         }
         let shape_w = crate::renderer::hwpunit_to_px(common.width as i32, dpi);
-        if shape_w < body_w * 0.8 {
-            continue;
-        }
+        let spans_body = shape_w >= body_w * 0.8;
         let shape_h = crate::renderer::hwpunit_to_px(common.height as i32, dpi);
         let raw_v_offset = crate::renderer::hwpunit_to_px(common.vertical_offset as i32, dpi);
 
@@ -5770,6 +7604,9 @@ fn compute_body_wide_top_reserve_for_para(
         };
 
         if body_y > body_h / 3.0 {
+            continue;
+        }
+        if !spans_body && body_y > 1.0 {
             continue;
         }
         let outer_bottom = crate::renderer::hwpunit_to_px(common.margin.bottom as i32, dpi);
@@ -5814,6 +7651,257 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn paragraph_with_hwpx_table_xml(after_text: &str) -> Paragraph {
+        let mut table = crate::model::table::Table::default();
+        table.common.treat_as_char = false;
+        Paragraph {
+            text: format!("before{after_text}"),
+            controls: vec![Control::Table(Box::new(table))],
+            hwpx_para_xml: Some(
+                format!(
+                    r#"<hp:p xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"><hp:run><hp:t>before</hp:t><hp:tbl><hp:tr><hp:tc><hp:p><hp:run><hp:t>inside</hp:t></hp:run></hp:p></hp:tc></hp:tr></hp:tbl><hp:t>{after_text}</hp:t></hp:run></hp:p>"#
+                )
+                .into_bytes(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hwpx_post_table_text_detector_ignores_pre_text_and_nested_cell_text() {
+        let without_after = paragraph_with_hwpx_table_xml("");
+        assert_eq!(
+            hwpx_has_visible_text_after_table_control(&without_after, 0),
+            Some(false)
+        );
+
+        let with_after = paragraph_with_hwpx_table_xml("after");
+        assert_eq!(
+            hwpx_has_visible_text_after_table_control(&with_after, 0),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn top_aligned_narrow_topbottom_float_reserves_column_band() {
+        use crate::model::control::Control;
+        use crate::model::image::Picture;
+        use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+
+        let layout = PageLayoutInfo::from_page_def(&a4_page_def(), &ColumnDef::default(), 96.0);
+        let mut pic = Picture {
+            common: CommonObjAttr {
+                width: 14_000,
+                height: 24_000,
+                vertical_offset: 0,
+                treat_as_char: false,
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let top_para = Paragraph {
+            controls: vec![Control::Picture(Box::new(pic.clone()))],
+            ..Default::default()
+        };
+
+        let reserve = compute_body_wide_top_reserve_for_para(&top_para, &layout, 96.0);
+        assert!(
+            reserve > 300.0,
+            "top-aligned TopAndBottom object should reserve a vertical band, got {reserve}"
+        );
+
+        pic.common.vertical_offset = 1_200;
+        let lower_para = Paragraph {
+            controls: vec![Control::Picture(Box::new(pic))],
+            ..Default::default()
+        };
+        assert_eq!(
+            compute_body_wide_top_reserve_for_para(&lower_para, &layout, 96.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn empty_square_picture_host_reserves_vertical_extent() {
+        use crate::model::control::Control;
+        use crate::model::image::Picture;
+        use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+
+        let pic = Picture {
+            common: CommonObjAttr {
+                width: 12_100,
+                height: 11_000,
+                vertical_offset: 1_531,
+                treat_as_char: false,
+                text_wrap: TextWrap::Square,
+                vert_rel_to: VertRelTo::Para,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let empty_host = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 29_101,
+                line_height: 900,
+                line_spacing: 540,
+                ..Default::default()
+            }],
+            controls: vec![Control::Picture(Box::new(pic.clone()))],
+            ..Default::default()
+        };
+
+        let reserve = empty_host_square_picture_reserve_px(&empty_host, &pic.common, 96.0).unwrap();
+        assert!(
+            reserve
+                > hwpunit_to_px(
+                    (pic.common.height + pic.common.vertical_offset) as i32,
+                    96.0
+                ) - 0.1,
+            "empty Square picture host must reserve image bottom, got {reserve:.1}"
+        );
+
+        let mut visible_host = empty_host.clone();
+        visible_host.text = "visible".to_string();
+        assert_eq!(
+            empty_host_square_picture_reserve_px(&visible_host, &pic.common, 96.0),
+            None,
+            "visible host text keeps normal side-flow Square behavior"
+        );
+    }
+
+    #[test]
+    fn photo_grid_split_keeps_text_rows_with_picture_row() {
+        use crate::model::control::Control;
+        use crate::model::image::Picture;
+        use crate::model::shape::CommonObjAttr;
+        use crate::model::table::{Cell, Table};
+
+        fn text_cell(row: u16, col: u16, text: &str) -> Cell {
+            Cell {
+                row,
+                col,
+                row_span: 1,
+                col_span: 1,
+                paragraphs: vec![Paragraph {
+                    text: text.to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        fn picture_cell(row: u16, col: u16) -> Cell {
+            Cell {
+                row,
+                col,
+                row_span: 1,
+                col_span: 1,
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control::Picture(Box::new(Picture {
+                        common: CommonObjAttr {
+                            width: 10_000,
+                            height: 8_000,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        let table = Table {
+            row_count: 6,
+            col_count: 2,
+            cells: vec![
+                text_cell(0, 0, "title a"),
+                text_cell(0, 1, "title b"),
+                text_cell(1, 0, "subtitle a"),
+                text_cell(1, 1, "subtitle b"),
+                picture_cell(2, 0),
+                picture_cell(2, 1),
+                text_cell(3, 0, "title c"),
+                text_cell(3, 1, "title d"),
+                text_cell(4, 0, "subtitle c"),
+                text_cell(4, 1, "subtitle d"),
+                picture_cell(5, 0),
+                picture_cell(5, 1),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(snap_photo_grid_orphan_break(&table, 0, 5, 6), Some(3));
+        assert_eq!(snap_photo_grid_orphan_break(&table, 0, 3, 6), None);
+        assert_eq!(snap_photo_grid_orphan_break(&table, 0, 6, 6), None);
+    }
+
+    #[test]
+    fn empty_square_picture_host_pushes_following_flow_to_next_page() {
+        use crate::model::control::Control;
+        use crate::model::image::Picture;
+        use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+
+        let engine = TypesetEngine::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+
+        let cover_logo = Picture {
+            common: CommonObjAttr {
+                width: 12_100,
+                height: 58_000,
+                vertical_offset: 5_000,
+                treat_as_char: false,
+                text_wrap: TextWrap::Square,
+                vert_rel_to: VertRelTo::Para,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let empty_logo_host = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 20_000,
+                line_height: 900,
+                line_spacing: 540,
+                ..Default::default()
+            }],
+            controls: vec![Control::Picture(Box::new(cover_logo))],
+            ..Default::default()
+        };
+        let mut following = make_paragraph_with_height(12_000);
+        following.text = "following flow".to_string();
+        let paras = vec![empty_logo_host, following];
+        let composed: Vec<ComposedParagraph> = Vec::new();
+
+        let result = engine.typeset_section(
+            &paras,
+            &composed,
+            &styles,
+            &page_def,
+            &col_def,
+            0,
+            &[],
+            false,
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(
+            result.pages.len(),
+            2,
+            "empty Square picture host must charge the picture extent before following flow"
+        );
+        assert!(
+            result.pages[0].column_contents[0]
+                .items
+                .iter()
+                .all(|item| !matches!(item, PageItem::FullParagraph { para_index: 1 })),
+            "following visible paragraph must not leak onto the cover page"
+        );
     }
 
     fn full_page_paper_scan_para() -> Paragraph {
@@ -5914,9 +8002,164 @@ mod tests {
     }
 
     #[test]
-    fn topbottom_bridge_vpos_skip_requires_empty_table_bridge_and_large_snap() {
+    fn rowbreak_rowspan_partial_top_slice_is_geometry_limited() {
+        assert!(should_split_rowbreak_rowspan_partial_top_slice(
+            51.2, 67.7, 67.7
+        ));
+        assert!(should_split_rowbreak_rowspan_partial_top_slice(
+            51.2, 71.6, 67.7
+        ));
+
+        assert!(!should_split_rowbreak_rowspan_partial_top_slice(
+            24.9, 67.7, 67.7
+        ));
+        assert!(!should_split_rowbreak_rowspan_partial_top_slice(
+            51.2, 71.8, 67.7
+        ));
+    }
+
+    #[test]
+    fn clean_table_fragment_backoffs_from_tolerance_only_overflow() {
+        let row_heights = vec![
+            29.6, 72.6, 44.3, 40.6, 41.6, 34.4, 104.6, 45.4, 113.1, 45.4, 23.8, 96.9, 45.4, 71.0,
+            57.1, 30.3, 107.8, 45.4, 54.4, 46.2, 33.0, 44.5, 69.1, 40.6, 40.6, 45.4, 134.4, 40.6,
+            83.8, 45.4, 31.2, 55.6, 46.5,
+        ];
+        let partial_height: f64 = row_heights[16..33].iter().sum();
+
+        assert!(
+            partial_height > 952.5 && partial_height <= 973.8,
+            "fixture shape: fits only because pagination tolerance inflated the budget"
+        );
+
+        let (end_row, trimmed_height) = trim_clean_table_fragment_to_render_budget(
+            16,
+            33,
+            partial_height,
+            0.0,
+            952.5,
+            &row_heights,
+            0.0,
+            false,
+            0.0,
+        );
+
+        assert_eq!(end_row, 32);
+        assert!(trimmed_height <= 952.5 + 0.5);
+    }
+
+    #[test]
+    fn clean_table_trim_gate_excludes_final_and_cut_fragments() {
+        assert!(should_trim_clean_table_fragment_to_render_budget(
+            false, false, 0.0, 32, 48
+        ));
+
+        assert!(!should_trim_clean_table_fragment_to_render_budget(
+            false, false, 0.0, 48, 48
+        ));
+        assert!(!should_trim_clean_table_fragment_to_render_budget(
+            true, false, 0.0, 32, 48
+        ));
+        assert!(!should_trim_clean_table_fragment_to_render_budget(
+            false, true, 0.0, 32, 48
+        ));
+        assert!(!should_trim_clean_table_fragment_to_render_budget(
+            false, false, 12.0, 32, 48
+        ));
+    }
+
+    #[test]
+    fn final_split_table_fragment_emits_trailing_host_text() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{Cell, Table, TablePageBreak};
+
+        let engine = TypesetEngine::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let composed: Vec<ComposedParagraph> = Vec::new();
+
+        let mut table = Table {
+            attr: 0,
+            row_count: 2,
+            col_count: 1,
+            page_break: TablePageBreak::RowBreak,
+            cells: vec![
+                Cell {
+                    row: 0,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    width: 45_000,
+                    height: 43_000,
+                    paragraphs: vec![Paragraph::default()],
+                    ..Default::default()
+                },
+                Cell {
+                    row: 1,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    width: 45_000,
+                    height: 43_000,
+                    paragraphs: vec![Paragraph::default()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        table.common.treat_as_char = false;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.common.width = 45_000;
+        table.common.height = 86_000;
+
+        let para = Paragraph {
+            text: "trailing host text".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 2_000,
+                line_spacing: 600,
+                ..Default::default()
+            }],
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+        let paras = vec![para];
+        let measured =
+            HeightMeasurer::with_default_dpi().measure_section(&paras, &composed, &styles, None);
+
+        let result = engine.typeset_section(
+            &paras,
+            &composed,
+            &styles,
+            &page_def,
+            &col_def,
+            0,
+            &measured.tables,
+            false,
+            &std::collections::HashSet::new(),
+        );
+
+        assert!(
+            result.pages.iter().any(|page| {
+                page.column_contents.iter().any(|col| {
+                    col.items.iter().any(|item| {
+                        matches!(item, PageItem::PartialParagraph { para_index: 0, .. })
+                    })
+                })
+            }),
+            "visible text after the final split table fragment must be emitted"
+        );
+    }
+
+    #[test]
+    fn topbottom_bridge_vpos_skip_requires_control_free_table_bridge_and_large_snap() {
         assert!(should_skip_topbottom_bridge_vpos_snap(
             true, true, true, 424.0, 836.0, 877.0
+        ));
+        assert!(should_skip_topbottom_bridge_vpos_snap(
+            true, true, true, 507.0, 866.0, 933.0
         ));
 
         assert!(!should_skip_topbottom_bridge_vpos_snap(
@@ -5930,6 +8173,9 @@ mod tests {
         ));
         assert!(!should_skip_topbottom_bridge_vpos_snap(
             true, true, true, 424.0, 610.0, 877.0
+        ));
+        assert!(!should_skip_topbottom_bridge_vpos_snap(
+            true, true, true, 10.0, 836.0, 877.0
         ));
     }
 
@@ -6226,6 +8472,1041 @@ mod tests {
             .collect();
         assert_eq!(page0_paras, vec![0], "1페이지엔 para0 만");
         assert_eq!(page1_paras, vec![1, 2], "2페이지엔 para1,2");
+    }
+
+    #[test]
+    fn tac_topbottom_table_near_bottom_keeps_following_visible_para_off_page() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{Cell, Table, TablePageBreak};
+
+        let engine = TypesetEngine::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let composed: Vec<ComposedParagraph> = Vec::new();
+
+        let mut table = Table {
+            attr: 1,
+            row_count: 1,
+            col_count: 1,
+            page_break: TablePageBreak::CellBreak,
+            cells: vec![Cell {
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 47_857,
+                height: 70_000,
+                paragraphs: vec![Paragraph::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.common.width = 47_857;
+        table.common.height = 70_000;
+
+        let table_host = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 70_000,
+                line_spacing: 600,
+                ..Default::default()
+            }],
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+
+        let mut following = make_paragraph_with_height(3_000);
+        following.line_segs[0].line_spacing = 2_000;
+        following.text = "following heading".to_string();
+
+        let paras = vec![table_host, following];
+        let measured =
+            HeightMeasurer::with_default_dpi().measure_section(&paras, &composed, &styles, None);
+
+        let result = engine.typeset_section(
+            &paras,
+            &composed,
+            &styles,
+            &page_def,
+            &col_def,
+            0,
+            &measured.tables,
+            false,
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(result.pages.len(), 2);
+        assert!(
+            result.pages[0].column_contents[0]
+                .items
+                .iter()
+                .all(|item| !matches!(item, PageItem::FullParagraph { para_index: 1 })),
+            "visible paragraph after near-bottom TAC TopAndBottom table must not render on page 1"
+        );
+        assert!(
+            result.pages[1].column_contents[0]
+                .items
+                .iter()
+                .any(|item| matches!(item, PageItem::FullParagraph { para_index: 1 })),
+            "following paragraph should restart on the next page"
+        );
+    }
+
+    #[test]
+    fn late_multiline_text_after_topbottom_table_splits_before_draw_overflow() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::Table;
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+
+        let mut table = Table::default();
+        table.common.treat_as_char = false;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        let table_host = Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+        let target = Paragraph {
+            text: "visible multiline paragraph".to_string(),
+            line_segs: (0..3)
+                .map(|i| LineSeg {
+                    vertical_pos: i * 2_200,
+                    line_height: 1_100,
+                    line_spacing: 1_100,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let paras = vec![table_host, target];
+        let fmt = FormattedParagraph {
+            total_height: 88.0,
+            line_heights: vec![14.666666666666666; 3],
+            line_spacings: vec![14.666666666666666; 3],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 73.33333333333333,
+        };
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = 790.0;
+        st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+
+        assert!(
+            should_split_late_topbottom_page_text(&st, &fmt, &paras, 872.0, true, true, None),
+            "late multi-line text after a non-TAC TopAndBottom table should use line split"
+        );
+
+        st.current_height = 500.0;
+        assert!(
+            !should_split_late_topbottom_page_text(&st, &fmt, &paras, 872.0, true, true, None),
+            "ordinary mid-page text should keep normal full placement"
+        );
+
+        let mut tac_table = Table::default();
+        tac_table.common.treat_as_char = true;
+        tac_table.common.text_wrap = TextWrap::TopAndBottom;
+        let tac_paras = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(tac_table))],
+                ..Default::default()
+            },
+            paras[1].clone(),
+        ];
+        let mut tac_st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        tac_st.current_height = 790.0;
+        tac_st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        assert!(
+            !should_split_late_topbottom_page_text(
+                &tac_st, &fmt, &tac_paras, 872.0, true, true, None
+            ),
+            "TAC TopAndBottom tables use their existing atomic guard, not this non-TAC table rule"
+        );
+    }
+
+    #[test]
+    fn late_one_line_tail_before_explicit_page_break_moves_to_tail_page() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::Table;
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+
+        let tail = Paragraph {
+            text: "visible one-line tail".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 53_800,
+                line_height: 1_150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let next_break = Paragraph {
+            text: "next section heading".to_string(),
+            column_type: ColumnBreakType::Page,
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 1_300,
+                line_spacing: 912,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paras = vec![tail.clone(), next_break.clone()];
+        let fmt = FormattedParagraph {
+            total_height: 26.1,
+            line_heights: vec![15.3],
+            line_spacings: vec![10.8],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 26.1,
+        };
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        let body_height = layout.body_area.height;
+        st.current_height = body_height - fmt.height_for_fit - 8.0;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 99 });
+
+        assert!(
+            should_move_late_tail_before_explicit_page_break(
+                &st,
+                &tail,
+                &fmt,
+                &paras,
+                0,
+                body_height,
+                true
+            ),
+            "a one-line paragraph that barely fits before an explicit page break should move to its own tail page"
+        );
+
+        st.current_height = 500.0;
+        assert!(
+            !should_move_late_tail_before_explicit_page_break(
+                &st,
+                &tail,
+                &fmt,
+                &paras,
+                0,
+                body_height,
+                true
+            ),
+            "mid-page tails should stay on the current page"
+        );
+
+        let no_break_paras = vec![
+            tail.clone(),
+            Paragraph {
+                column_type: ColumnBreakType::None,
+                ..next_break
+            },
+        ];
+        st.current_height = body_height - fmt.height_for_fit - 8.0;
+        assert!(
+            !should_move_late_tail_before_explicit_page_break(
+                &st,
+                &tail,
+                &fmt,
+                &no_break_paras,
+                0,
+                body_height,
+                true
+            ),
+            "ordinary following paragraphs should not trigger the sparse tail-page rule"
+        );
+
+        let mut title_table = Table::default();
+        title_table.row_count = 1;
+        title_table.col_count = 2;
+        title_table.common.treat_as_char = true;
+        title_table.common.text_wrap = TextWrap::TopAndBottom;
+        title_table.common.height = 2_267;
+        let title_break_paras = vec![
+            tail.clone(),
+            Paragraph {
+                column_type: ColumnBreakType::Page,
+                controls: vec![Control::Table(Box::new(title_table))],
+                ..Default::default()
+            },
+        ];
+        st.current_height = body_height - fmt.height_for_fit - 55.0;
+        assert!(
+            should_move_late_tail_before_explicit_page_break(
+                &st,
+                &tail,
+                &fmt,
+                &title_break_paras,
+                0,
+                body_height,
+                true
+            ),
+            "a tail with a wider remaining strip should move before an explicit title table"
+        );
+
+        let mut form_table = Table::default();
+        form_table.row_count = 12;
+        form_table.col_count = 8;
+        form_table.common.treat_as_char = true;
+        form_table.common.text_wrap = TextWrap::TopAndBottom;
+        form_table.common.height = (body_height * 0.90 * 75.0) as u32;
+        let form_note_paras = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(form_table.clone()))],
+                ..Default::default()
+            },
+            tail,
+            Paragraph {
+                column_type: ColumnBreakType::Page,
+                controls: vec![Control::Table(Box::new(form_table))],
+                ..Default::default()
+            },
+        ];
+        let mut form_st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        form_st.current_height = body_height - fmt.height_for_fit - 7.0;
+        form_st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        assert!(
+            !should_move_late_tail_before_explicit_page_break(
+                &form_st,
+                &form_note_paras[1],
+                &fmt,
+                &form_note_paras,
+                1,
+                body_height,
+                true
+            ),
+            "a form footer note after TAC tables should stay with those forms before the next full-page form"
+        );
+
+        let mut guide_table = Table::default();
+        guide_table.row_count = 3;
+        guide_table.col_count = 3;
+        guide_table.common.treat_as_char = true;
+        guide_table.common.text_wrap = TextWrap::TopAndBottom;
+        let guide_note_paras = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(guide_table))],
+                ..Default::default()
+            },
+            Paragraph {
+                text: "short note".to_string(),
+                line_segs: vec![LineSeg {
+                    vertical_pos: 55_159,
+                    line_height: 900,
+                    line_spacing: 360,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            Paragraph {
+                text: "plain next page".to_string(),
+                column_type: ColumnBreakType::Page,
+                ..Default::default()
+            },
+        ];
+        let mut guide_st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        guide_st.current_height = body_height - 18.0;
+        guide_st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        assert!(
+            !should_move_late_tail_before_explicit_page_break(
+                &guide_st,
+                &guide_note_paras[1],
+                &FormattedParagraph {
+                    total_height: 16.8,
+                    line_heights: vec![12.0],
+                    line_spacings: vec![4.8],
+                    spacing_before: 0.0,
+                    spacing_after: 0.0,
+                    height_for_fit: 16.8,
+                },
+                &guide_note_paras,
+                1,
+                body_height,
+                true
+            ),
+            "a short note after a TAC guide table should stay before a plain explicit page break"
+        );
+    }
+
+    #[test]
+    fn text_after_near_full_cell_tac_table_starts_next_page() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let mut table = Table::default();
+        table.row_count = 14;
+        table.col_count = 11;
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        let heading = Paragraph {
+            text: "next form heading".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 900,
+                line_spacing: 632,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(table.clone()))],
+                ..Default::default()
+            },
+            heading.clone(),
+            Paragraph {
+                controls: vec![Control::Table(Box::new(table.clone()))],
+                ..Default::default()
+            },
+        ];
+        let fmt = FormattedParagraph {
+            total_height: 20.4,
+            line_heights: vec![12.0],
+            line_spacings: vec![8.4],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 12.0,
+        };
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height - 7.8;
+        st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        assert!(
+            should_defer_text_after_near_full_cell_tac_table(
+                &st,
+                &heading,
+                &fmt,
+                &paragraphs,
+                1,
+                true,
+                None
+            ),
+            "a new form heading after a near-full CELL-split TAC table should not consume visual bottom slack"
+        );
+
+        let ordinary_paragraphs = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(table.clone()))],
+                ..Default::default()
+            },
+            heading.clone(),
+            Paragraph {
+                text: "ordinary continuation".to_string(),
+                ..Default::default()
+            },
+        ];
+        assert!(
+            !should_defer_text_after_near_full_cell_tac_table(
+                &st,
+                &ordinary_paragraphs[1],
+                &fmt,
+                &ordinary_paragraphs,
+                1,
+                true,
+                None
+            ),
+            "ordinary text continuation after the heading keeps existing bottom packing"
+        );
+
+        table.hwpx_page_break = Some(HwpxTablePageBreak::Table);
+        let table_break_paragraphs = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(table.clone()))],
+                ..Default::default()
+            },
+            heading,
+            Paragraph {
+                controls: vec![Control::Table(Box::new(table))],
+                ..Default::default()
+            },
+        ];
+        assert!(
+            !should_defer_text_after_near_full_cell_tac_table(
+                &st,
+                &table_break_paragraphs[1],
+                &fmt,
+                &table_break_paragraphs,
+                1,
+                true,
+                None
+            ),
+            "TABLE-break TAC tables keep their separate table-boundary rules"
+        );
+    }
+
+    #[test]
+    fn late_single_line_text_keeps_following_body_off_page_tail() {
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let available = layout.body_area.height - 4.0;
+
+        let heading = Paragraph {
+            text: "나. 국가유공자 보상 또는 치료".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 700,
+                line_height: 1150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = Paragraph {
+            text: "○ 대상 : 민방위 대원으로서 동원되어 임무 수행 중이거나".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 3154,
+                line_height: 1150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            Paragraph {
+                text: "○ 국가유공자 등 예우 및 지원에 관한 법률 제4조".to_string(),
+                ..Default::default()
+            },
+            heading.clone(),
+            body,
+        ];
+        let fmt = FormattedParagraph {
+            total_height: 32.7,
+            line_heights: vec![15.3],
+            line_spacings: vec![10.7],
+            spacing_before: 0.0,
+            spacing_after: 6.7,
+            height_for_fit: 26.1,
+        };
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = available * 0.97;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 0 });
+
+        assert!(
+            should_defer_late_single_line_text_with_following_body(
+                &st,
+                &heading,
+                &fmt,
+                &paragraphs,
+                1,
+                available,
+                true,
+                true,
+                None,
+            ),
+            "late one-line text that fits only by dropping trailing spacing should move with following body text"
+        );
+
+        let mut top_st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        top_st.current_height = available * 0.50;
+        top_st
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 0 });
+        assert!(
+            !should_defer_late_single_line_text_with_following_body(
+                &top_st,
+                &paragraphs[1],
+                &fmt,
+                &paragraphs,
+                1,
+                available,
+                true,
+                true,
+                None,
+            ),
+            "top/mid-page one-line text keeps ordinary packing"
+        );
+    }
+
+    #[test]
+    fn late_single_line_text_moves_with_following_body_group() {
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let available = layout.body_area.height - 4.0;
+
+        let current = Paragraph {
+            text: "○ 국가유공자 등 예우 및 지원에 관한 법률 제4조".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 54_112,
+                line_height: 1150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let next_heading = Paragraph {
+            text: "나. 국가유공자 보상 또는 치료".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 700,
+                line_height: 1150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let following_body = Paragraph {
+            text: "○ 대상 : 민방위 대원으로서 동원되어 임무 수행 중이거나".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 3154,
+                line_height: 1150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![current.clone(), next_heading, following_body];
+        let fmt = FormattedParagraph {
+            total_height: 26.1,
+            line_heights: vec![15.3],
+            line_spacings: vec![10.7],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 26.1,
+        };
+
+        let mut st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = available - fmt.total_height - 25.0;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 0 });
+
+        assert!(
+            should_defer_late_single_line_before_following_body_group(
+                &st,
+                &current,
+                &fmt,
+                &paragraphs,
+                0,
+                available,
+                true,
+                None,
+            ),
+            "a late one-line paragraph should move when the following heading/body group cannot fit after it"
+        );
+    }
+
+    #[test]
+    fn late_visible_group_before_explicit_blank_break_starts_next_page() {
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let heading = Paragraph {
+            text: "tail heading".to_string(),
+            line_segs: vec![LineSeg {
+                line_height: 1_150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let bullet = Paragraph {
+            text: "tail bullet".to_string(),
+            line_segs: vec![LineSeg {
+                line_height: 1_150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let note = Paragraph {
+            text: "tail note".to_string(),
+            line_segs: vec![LineSeg {
+                line_height: 970,
+                line_spacing: 484,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let blank_break = Paragraph {
+            column_type: ColumnBreakType::Page,
+            line_segs: vec![LineSeg {
+                line_height: 1_000,
+                line_spacing: 600,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![heading.clone(), bullet, note, blank_break];
+        let fmt = FormattedParagraph {
+            total_height: 32.7,
+            line_heights: vec![15.3],
+            line_spacings: vec![10.7],
+            spacing_before: 6.7,
+            spacing_after: 0.0,
+            height_for_fit: 26.1,
+        };
+
+        let mut st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height - 77.0;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 99 });
+
+        assert!(
+            should_defer_late_visible_group_before_explicit_blank_break(
+                &st,
+                &heading,
+                &fmt,
+                &paragraphs,
+                0,
+                body_height,
+                true,
+                None,
+            ),
+            "a late visible tail group should not be squeezed before an explicit blank page break"
+        );
+
+        st.current_height = body_height * 0.40;
+        assert!(
+            !should_defer_late_visible_group_before_explicit_blank_break(
+                &st,
+                &heading,
+                &fmt,
+                &paragraphs,
+                0,
+                body_height,
+                true,
+                None,
+            ),
+            "mid-page visible groups keep ordinary packing"
+        );
+    }
+
+    #[test]
+    fn large_cell_tac_after_table_break_spacer_uses_previous_material_page() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+        use crate::renderer::pagination::{ColumnContent, PageContent};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let mut previous_table = Table::default();
+        previous_table.hwpx_page_break = Some(HwpxTablePageBreak::Table);
+
+        let mut spacer = Paragraph::default();
+        spacer.line_segs = vec![LineSeg {
+            vertical_pos: 36_875,
+            line_height: 1_600,
+            line_spacing: 960,
+            ..Default::default()
+        }];
+
+        let heading = Paragraph {
+            text: "section heading".to_string(),
+            column_type: ColumnBreakType::Page,
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 1_150,
+                line_spacing: 804,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let mut large_table = Table::default();
+        large_table.row_count = 10;
+        large_table.col_count = 5;
+        large_table.common.treat_as_char = true;
+        large_table.common.text_wrap = TextWrap::TopAndBottom;
+        large_table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        let table_para = Paragraph {
+            controls: vec![Control::Table(Box::new(large_table.clone()))],
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(previous_table))],
+                ..Default::default()
+            },
+            spacer,
+            heading,
+            table_para.clone(),
+        ];
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.pages.push(PageContent {
+            page_index: 0,
+            page_number: 1,
+            section_index: 0,
+            layout: layout.clone(),
+            column_contents: vec![ColumnContent {
+                column_index: 0,
+                items: vec![
+                    PageItem::PartialTable {
+                        para_index: 0,
+                        control_index: 0,
+                        start_row: 8,
+                        end_row: 12,
+                        is_continuation: true,
+                        start_cut: Vec::new(),
+                        end_cut: Vec::new(),
+                        is_block_split: false,
+                    },
+                    PageItem::FullParagraph { para_index: 1 },
+                ],
+                zone_layout: None,
+                zone_y_offset: 0.0,
+                wrap_around_paras: Vec::new(),
+                used_height: body_height * 0.70,
+                wrap_anchors: std::collections::HashMap::new(),
+            }],
+            active_header: None,
+            active_footer: None,
+            page_number_pos: None,
+            page_hide: None,
+            footnotes: Vec::new(),
+            active_master_page: None,
+            extra_master_pages: Vec::new(),
+        });
+        st.pages.push(st.new_page_content(Vec::new()));
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 2 });
+
+        assert!(
+            should_defer_large_cell_tac_after_table_break_spacer(
+                &st,
+                &paragraphs,
+                3,
+                &table_para,
+                &large_table,
+                body_height * 0.92,
+            ),
+            "current empty page shells must not hide the previous table-break spacer page"
+        );
+
+        let mut ordinary_st = st;
+        ordinary_st.pages[0].column_contents[0].items.pop();
+        assert!(
+            !should_defer_large_cell_tac_after_table_break_spacer(
+                &ordinary_st,
+                &paragraphs,
+                3,
+                &table_para,
+                &large_table,
+                body_height * 0.92,
+            ),
+            "ordinary heading/table pages without the TABLE-split spacer keep existing packing"
+        );
+    }
+
+    #[test]
+    fn late_heading_followed_by_table_break_tac_moves_table_next_page() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let heading = Paragraph {
+            text: "(2) subsection heading".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 32_725,
+                line_height: 1_300,
+                line_spacing: 912,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut table = Table::default();
+        table.row_count = 6;
+        table.col_count = 3;
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.hwpx_page_break = Some(HwpxTablePageBreak::Table);
+        let table_para = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            ..Default::default()
+        };
+        let paragraphs = vec![heading, table_para.clone()];
+
+        let mut st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height * 0.59;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 0 });
+
+        assert!(
+            should_defer_late_heading_followed_by_table_break_tac(
+                &st,
+                &paragraphs,
+                1,
+                &table_para,
+                &table,
+                body_height * 0.38,
+            ),
+            "a late sparse heading should not pull a TABLE-break TAC table onto the tail page"
+        );
+
+        st.current_height = body_height * 0.20;
+        assert!(
+            !should_defer_late_heading_followed_by_table_break_tac(
+                &st,
+                &paragraphs,
+                1,
+                &table_para,
+                &table,
+                body_height * 0.38,
+            ),
+            "top-of-page headings keep ordinary heading/table packing"
+        );
+
+        st.current_height = body_height * 0.59;
+        assert!(
+            !should_defer_late_heading_followed_by_table_break_tac(
+                &st,
+                &paragraphs,
+                1,
+                &table_para,
+                &table,
+                body_height * 0.90,
+            ),
+            "full-page photo-grid style tables use the separate large-table rule"
+        );
+    }
+
+    #[test]
+    fn large_cell_tac_after_page_tail_lead_in_starts_next_page() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let available = layout.body_area.height;
+
+        let lead = Paragraph {
+            text: "visible lead-in".to_string(),
+            controls: vec![Control::Table(Box::new(Table::default()))],
+            ..Default::default()
+        };
+
+        let mut table = Table::default();
+        table.row_count = 13;
+        table.col_count = 7;
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        let table_para = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            ..Default::default()
+        };
+        let paragraphs = vec![lead.clone(), table_para.clone()];
+        let explicit_next = Paragraph {
+            column_type: ColumnBreakType::Page,
+            text: "next section".to_string(),
+            ..Default::default()
+        };
+        let explicit_break_paragraphs = vec![lead, table_para.clone(), explicit_next];
+
+        let mut st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = available * 0.39;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 0 });
+        st.current_items.push(PageItem::Shape {
+            para_index: 0,
+            control_index: 0,
+        });
+
+        assert!(
+            should_defer_large_cell_tac_after_page_tail_lead_in(
+                &st,
+                &paragraphs,
+                1,
+                &table_para,
+                &table,
+                available * 0.565,
+                available,
+            ),
+            "large CELL TAC grids after a visible lead-in should not consume the final page tail"
+        );
+
+        st.current_height = available * 0.20;
+        assert!(
+            !should_defer_large_cell_tac_after_page_tail_lead_in(
+                &st,
+                &paragraphs,
+                1,
+                &table_para,
+                &table,
+                available * 0.565,
+                available,
+            ),
+            "top-of-page lead-in/grid blocks keep ordinary packing"
+        );
+
+        assert!(
+            !should_defer_large_cell_tac_after_page_tail_lead_in(
+                &st,
+                &paragraphs,
+                1,
+                &table_para,
+                &table,
+                available * 0.565,
+                available,
+            ),
+            "tables immediately before explicit page breaks should not manufacture an extra page"
+        );
+    }
+
+    #[test]
+    fn final_split_table_subline_tail_can_be_clipped_without_continuation_page() {
+        assert!(
+            should_drop_tiny_final_split_tail(4, 4, 72.0, &[1, 3], false, 15.8),
+            "sub-line final split tail with no following text should not create a new page"
+        );
+        assert!(
+            !should_drop_tiny_final_split_tail(4, 4, 72.0, &[1, 3], true, 15.8),
+            "visible text after the table still needs a continuation placement path"
+        );
+        assert!(
+            !should_drop_tiny_final_split_tail(4, 4, 72.0, &[1, 3], false, 24.0),
+            "larger final row tails are real content and must continue"
+        );
+        assert!(
+            !should_drop_tiny_final_split_tail(3, 4, 72.0, &[1, 3], false, 15.8),
+            "non-final split rows must continue normally"
+        );
     }
 
     // ========================================================

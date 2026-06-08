@@ -76,6 +76,27 @@ fn block_cut_index(
         .position(|c| c.row == cell.row && c.col == cell.col)
 }
 
+fn should_use_cut_height_for_partial_rowspan_edge(
+    rowspan_touched: bool,
+    row: usize,
+    start_row: usize,
+    split_last_row: usize,
+    has_start_cut: bool,
+    has_end_cut: bool,
+) -> bool {
+    if !rowspan_touched {
+        return true;
+    }
+    (row == start_row && has_start_cut) || (row == split_last_row && has_end_cut)
+}
+
+fn should_clip_partial_table_cell(
+    table: &crate::model::table::Table,
+    cell: &crate::model::table::Cell,
+) -> bool {
+    !(LayoutEngine::is_repeated_photo_grid_table(table) && LayoutEngine::is_picture_only_cell(cell))
+}
+
 impl LayoutEngine {
     /// 표의 일부 행만 레이아웃한다 (페이지 분할).
     ///
@@ -229,7 +250,21 @@ impl LayoutEngine {
                     }
                 } else {
                     // 기존 per-row 경로: rowspan 행은 atomic(resolve_row_heights) 유지.
-                    if rowspan_touched {
+                    //
+                    // Exception: a split-edge row can be touched by a carried
+                    // rowspan label while its own row_span==1 cells are still
+                    // partially consumed by start_cut/end_cut. Keeping the full
+                    // resolved height there makes a continuation row render as
+                    // a whole row. Use the same cut-height authority for that
+                    // edge row; interior rowspan rows remain atomic.
+                    if !should_use_cut_height_for_partial_rowspan_edge(
+                        rowspan_touched,
+                        r,
+                        start_row,
+                        split_last_row,
+                        !start_cut.is_empty(),
+                        !end_cut.is_empty(),
+                    ) {
                         continue;
                     }
                     let su: &[usize] = if r == start_row { start_cut } else { &[] };
@@ -241,7 +276,6 @@ impl LayoutEngine {
                 }
             }
         }
-
         // ── 3. 누적 위치 계산 ──
         let mut col_x = vec![0.0f64; col_count + 1];
         for i in 0..col_count {
@@ -463,6 +497,8 @@ impl LayoutEngine {
             if cell_h <= 0.0 {
                 continue;
             }
+            let is_repeated_photo_picture_cell =
+                Self::is_repeated_photo_grid_table(table) && Self::is_picture_only_cell(cell);
 
             // 이 셀이 분할 행에 속하는지 판별 (clip 플래그에 사용)
             // [Task #1025] page-larger 블록 분할이면 컷이 블록-셀 인덱스 → 블록 범위
@@ -502,7 +538,7 @@ impl LayoutEngine {
                     // Continuation fragments still render real table cells.
                     // Clip every cell, not only intra-row split cells, so
                     // over-wide cached cell text cannot paint across borders.
-                    clip: true,
+                    clip: should_clip_partial_table_cell(table, cell),
                     model_cell_index: Some(cell_idx as u32),
                 }),
                 BoundingBox::new(cell_x, cell_y, cell_w, cell_h),
@@ -897,7 +933,12 @@ impl LayoutEngine {
 
                 // 표 컨트롤이 없는 문단: 텍스트 먼저, 컨트롤 나중 (기존 동작)
                 // 표 컨트롤이 있는 문단: 문단 앞 간격 적용 → 표 먼저 배치 → 텍스트(엔터 등) 나중
-                if !has_table_ctrl {
+                if is_repeated_photo_picture_cell {
+                    // Picture-only cells in repeated photo-grid partial tables
+                    // must be emitted by the explicit picture path below. The
+                    // inline TAC path uses a text baseline origin and drifts
+                    // relative to non-TAC neighboring image cells.
+                } else if !has_table_ctrl {
                     let is_last_para = cp_idx == last_rendered_para_idx;
                     para_y = self.layout_composed_paragraph(
                         tree,
@@ -956,6 +997,30 @@ impl LayoutEngine {
                         match ctrl {
                             Control::Picture(pic) => {
                                 if pic.common.treat_as_char {
+                                    if is_repeated_photo_picture_cell {
+                                        let fit_area = LayoutRect {
+                                            x: inner_x,
+                                            y: cell_y + pad_top,
+                                            width: inner_width,
+                                            height: inner_height,
+                                        };
+                                        let mut fit_area =
+                                            self.repeated_photo_picture_fill_area(pic, fit_area);
+                                        fit_area.y += self
+                                            .mixed_photo_grid_picture_y_offset(table, cell, pic);
+                                        self.layout_picture_fill_rect(
+                                            tree,
+                                            &mut cell_node,
+                                            pic,
+                                            &fit_area,
+                                            bin_data_content,
+                                            None,
+                                            None,
+                                            None,
+                                        );
+                                        para_y += fit_area.height;
+                                        continue;
+                                    }
                                     let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
                                     // layout_composed_paragraph에서 텍스트 흐름 안에 렌더링됐는지 확인:
                                     // 이미지 위치가 실제 run 범위에 포함될 때만 스킵
@@ -1006,7 +1071,7 @@ impl LayoutEngine {
                                     inline_x += pic_w;
                                 } else {
                                     // 비인라인 이미지: 기존 동작
-                                    if Self::is_repeated_rowbreak_photo_table(table)
+                                    if Self::is_repeated_photo_grid_table(table)
                                         && Self::is_picture_only_cell(cell)
                                     {
                                         let fit_area = LayoutRect {
@@ -1015,18 +1080,19 @@ impl LayoutEngine {
                                             width: inner_width,
                                             height: inner_height,
                                         };
-                                        self.layout_picture_full(
+                                        let mut fit_area =
+                                            self.repeated_photo_picture_fill_area(pic, fit_area);
+                                        fit_area.y += self
+                                            .mixed_photo_grid_picture_y_offset(table, cell, pic);
+                                        self.layout_picture_fill_rect(
                                             tree,
                                             &mut cell_node,
                                             pic,
                                             &fit_area,
                                             bin_data_content,
-                                            para_alignment,
                                             None,
                                             None,
                                             None,
-                                            None,
-                                            true,
                                         );
                                         para_y += fit_area.height;
                                         continue;
@@ -1489,5 +1555,79 @@ impl LayoutEngine {
             0.0
         };
         y_start + partial_table_height + caption_total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_clip_partial_table_cell, should_use_cut_height_for_partial_rowspan_edge};
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
+    use crate::model::paragraph::Paragraph;
+    use crate::model::shape::TextWrap;
+    use crate::model::table::{Cell, Table, TablePageBreak};
+
+    #[test]
+    fn cut_height_applies_to_split_edge_rows_touched_by_carried_rowspan() {
+        assert!(should_use_cut_height_for_partial_rowspan_edge(
+            true, 21, 21, 26, true, false
+        ));
+        assert!(should_use_cut_height_for_partial_rowspan_edge(
+            true, 26, 21, 26, false, true
+        ));
+
+        assert!(!should_use_cut_height_for_partial_rowspan_edge(
+            true, 22, 21, 26, true, false
+        ));
+        assert!(!should_use_cut_height_for_partial_rowspan_edge(
+            true, 21, 21, 26, false, false
+        ));
+        assert!(should_use_cut_height_for_partial_rowspan_edge(
+            false, 22, 21, 26, false, false
+        ));
+    }
+
+    #[test]
+    fn repeated_photo_grid_partial_picture_cells_are_unclipped() {
+        let mut picture = Picture::default();
+        picture.common.treat_as_char = false;
+        let picture_cell = Cell {
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(picture.clone()))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut second_picture_cell = picture_cell.clone();
+        second_picture_cell.col = 1;
+        let mut table = Table {
+            row_count: 1,
+            col_count: 2,
+            page_break: TablePageBreak::CellBreak,
+            repeat_header: true,
+            cells: vec![picture_cell.clone(), second_picture_cell],
+            ..Default::default()
+        };
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.common.treat_as_char = false;
+
+        assert!(!should_clip_partial_table_cell(&table, &picture_cell));
+
+        let text_cell = Cell {
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            paragraphs: vec![Paragraph {
+                text: "text".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(should_clip_partial_table_cell(&table, &text_cell));
     }
 }
