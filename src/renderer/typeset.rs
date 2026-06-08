@@ -1450,10 +1450,6 @@ fn should_defer_small_cell_tac_after_large_table_spacers_before_break(
             )
         })
         .count();
-    if trailing_blank_count < 4 {
-        return false;
-    }
-
     let last_blank_vpos = st.current_items.last().and_then(|item| match item {
         PageItem::FullParagraph { para_index } => paragraphs
             .get(*para_index)
@@ -1472,7 +1468,7 @@ fn should_defer_small_cell_tac_after_large_table_spacers_before_break(
         return false;
     }
 
-    st.current_items.iter().any(|item| {
+    let has_prior_large_cell_tac_table = st.current_items.iter().any(|item| {
         let (para_index, control_index) = match item {
             PageItem::Table {
                 para_index,
@@ -1502,7 +1498,30 @@ fn should_defer_small_cell_tac_after_large_table_spacers_before_break(
                                 >= available * 0.40
                 )
             })
-    })
+    });
+    if has_prior_large_cell_tac_table && trailing_blank_count >= 4 {
+        return true;
+    }
+
+    let has_visible_content_before_trailing_blanks = st
+        .current_items
+        .iter()
+        .rev()
+        .skip(trailing_blank_count)
+        .any(|item| {
+            matches!(
+                item,
+                PageItem::FullParagraph { para_index }
+                    if paragraphs.get(*para_index).is_some_and(para_has_visible_text)
+            )
+        });
+
+    trailing_blank_count == 2
+        && has_visible_content_before_trailing_blanks
+        && table.row_count == 2
+        && table.col_count == 3
+        && st.current_height >= available * 0.82
+        && st.current_height + table_height <= available + 0.5
 }
 
 fn should_drop_tiny_final_split_tail(
@@ -9891,6 +9910,159 @@ mod tests {
                 body_height,
             ),
             "ordinary small tables after a short spacer do not create a new page"
+        );
+    }
+
+    #[test]
+    fn small_cell_tac_after_bottom_spacers_moves_before_break_title() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let visible = |text: &str, vpos: i32| Paragraph {
+            text: text.to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: vpos,
+                line_height: 1_500,
+                line_spacing: 900,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let blank_at = |vpos: i32, line_height: i32, line_spacing: i32| Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: vpos,
+                line_height,
+                line_spacing,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut contact = Table::default();
+        contact.row_count = 2;
+        contact.col_count = 3;
+        contact.common.treat_as_char = true;
+        contact.common.text_wrap = TextWrap::TopAndBottom;
+        contact.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        contact.common.height = (body_height * 0.07 * 7200.0 / DEFAULT_DPI) as u32;
+        let contact_para = Paragraph {
+            controls: vec![Control::Table(Box::new(contact.clone()))],
+            ..Default::default()
+        };
+        let break_title = Paragraph {
+            column_type: ColumnBreakType::Page,
+            text: "next explicit section".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 1_600,
+                line_spacing: 960,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            visible("earlier body before contact table", 38_566),
+            visible("middle body before contact table", 43_526),
+            visible("late body before contact table", 51_086),
+            visible("final visible body before blank tail", 53_486),
+            blank_at(56_886, 2_100, 1_260),
+            blank_at(60_246, 1_500, 900),
+            contact_para.clone(),
+            break_title.clone(),
+        ];
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height * 0.90;
+        for para_index in 0..=5 {
+            st.current_items
+                .push(PageItem::FullParagraph { para_index });
+        }
+
+        assert!(
+            should_defer_small_cell_tac_after_large_table_spacers_before_break(
+                &st,
+                &paragraphs,
+                6,
+                &contact_para,
+                &contact,
+                body_height * 0.07,
+                body_height,
+            ),
+            "a small 2x3 CELL TAC contact table after bottom spacer paragraphs should move to its own page before an explicit section break"
+        );
+
+        let mut one_blank_st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        one_blank_st.current_height = body_height * 0.90;
+        one_blank_st
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 0 });
+        one_blank_st
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 1 });
+        one_blank_st
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 2 });
+        one_blank_st
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 3 });
+        one_blank_st
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 4 });
+        assert!(
+            !should_defer_small_cell_tac_after_large_table_spacers_before_break(
+                &one_blank_st,
+                &paragraphs,
+                6,
+                &contact_para,
+                &contact,
+                body_height * 0.07,
+                body_height,
+            ),
+            "a single bottom blank is not enough evidence to isolate a small contact table page"
+        );
+
+        let many_blank_paragraphs = vec![
+            visible("body before a long blank tail", 38_559),
+            visible("more body before a long blank tail", 43_319),
+            visible("final body before a long blank tail", 50_079),
+            blank_at(51_999, 1_200, 720),
+            blank_at(53_919, 1_200, 720),
+            blank_at(55_839, 1_900, 1_140),
+            blank_at(58_879, 1_200, 720),
+            blank_at(60_799, 1_200, 720),
+            contact_para.clone(),
+            break_title,
+        ];
+        let mut many_blank_st = TypesetState::new(
+            PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI),
+            1,
+            0,
+            0.0,
+            0.0,
+            ColumnType::Normal,
+        );
+        many_blank_st.current_height = body_height * 0.90;
+        for para_index in 0..=7 {
+            many_blank_st
+                .current_items
+                .push(PageItem::FullParagraph { para_index });
+        }
+        assert!(
+            !should_defer_small_cell_tac_after_large_table_spacers_before_break(
+                &many_blank_st,
+                &many_blank_paragraphs,
+                8,
+                &contact_para,
+                &contact,
+                body_height * 0.07,
+                body_height,
+            ),
+            "a long blank tail without prior large CELL TAC evidence should not use the two-spacer contact-table rule"
         );
     }
 

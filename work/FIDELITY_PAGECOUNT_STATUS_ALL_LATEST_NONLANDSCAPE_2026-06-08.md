@@ -1,6 +1,7 @@
-# RHWP Fidelity Category Status -- 2026-06-08 19:36:38
+# RHWP Fidelity Category Status -- 2026-06-08 post exact two-spacer contact table
 
-Visual drift threshold: mean pixel diff >= 15.0.
+Visual drift threshold: mean pixel diff >= 15.0. Page counts refreshed after
+`small_cell_tac_after_bottom_spacers_moves_before_break_title`.
 
 | doc | class | hancom | rhwp | worst visual page | mean diff | source | gallery | notes |
 |---|---:|---:|---:|---:|---:|---|---|---|
@@ -21,7 +22,7 @@ Visual drift threshold: mean pixel diff >= 15.0.
 | `multicultural_plan` | `page_count_clean` | 3 | 3 |  |  | `/tmp/diff/multicultural_plan/source.hwpx` |  |  |
 | `overseas_training` | `page_count_clean` | 4 | 4 |  |  | `/tmp/diff/overseas_training/source.hwpx` |  |  |
 | `photo_122p_civil_defense` | `page_count_clean` | 129 | 129 |  |  | `/tmp/diff/photo_122p_civil_defense/source.hwpx` |  |  |
-| `photo_form24` | `page_count_gap` | 89 | 87 |  |  | `/tmp/diff/photo_form24/source.hwpx` |  |  |
+| `photo_form24` | `page_count_gap` | 89 | 88 |  |  | `/tmp/diff/photo_form24/source.hwpx` | `/tmp/diff/_review_photo_form24_pages_38_43_exact_two_spacer_contact_candidate_2026-06-08/index.html` | aligned through page 43; next drift begins at AI center section |
 | `photo_w31` | `page_count_clean` | 30 | 30 |  |  | `/tmp/diff/photo_w31/source.hwpx` |  |  |
 | `report_form` | `page_count_clean` | 6 | 6 |  |  | `/tmp/diff/report_form/source.hwpx` |  |  |
 | `research_form` | `page_count_clean` | 2 | 2 |  |  | `/tmp/diff/research_form/source.hwpx` |  |  |
