@@ -1309,6 +1309,88 @@ fn should_defer_late_heading_spacer_cell_tac_before_break_title(
     remaining_after_table >= 0.0 && remaining_after_table < available * 0.08
 }
 
+fn has_following_medium_cell_tac_group(
+    para: &Paragraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+) -> bool {
+    if !para.controls.is_empty()
+        || !para_has_visible_text(para)
+        || para.line_segs.len() < 2
+        || para
+            .line_segs
+            .first()
+            .is_none_or(|seg| seg.vertical_pos != 0)
+    {
+        return false;
+    }
+
+    (para_idx + 1..=(para_idx + 12).min(paragraphs.len().saturating_sub(1))).any(|idx| {
+        paragraphs.get(idx).is_some_and(|candidate| {
+            candidate.controls.iter().any(|control| {
+                matches!(
+                    control,
+                    Control::Table(table)
+                        if table.common.treat_as_char
+                            && matches!(
+                                table.common.text_wrap,
+                                crate::model::shape::TextWrap::TopAndBottom
+                            )
+                            && matches!(
+                                table.hwpx_page_break,
+                                Some(crate::model::table::HwpxTablePageBreak::Cell)
+                            )
+                            && (4..=8).contains(&table.row_count)
+                            && (2..=4).contains(&table.col_count)
+                            && {
+                                let table_h = hwpunit_to_px(table.common.height as i32, DEFAULT_DPI);
+                                table_h >= available * 0.12 && table_h <= available * 0.35
+                            }
+                )
+            })
+        })
+    })
+}
+
+fn should_insert_blank_page_before_explicit_top_reset(
+    st: &TypesetState,
+    para: &Paragraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+    body_height_hu: i32,
+) -> bool {
+    if st.col_count != 1
+        || st.current_items.is_empty()
+        || body_height_hu <= 0
+        || !matches!(
+            para.column_type,
+            ColumnBreakType::Page | ColumnBreakType::Section
+        )
+        || !has_following_medium_cell_tac_group(para, paragraphs, para_idx, available)
+    {
+        return false;
+    }
+
+    let Some(prev_para_idx) = st.current_items.last().and_then(|item| match item {
+        PageItem::FullParagraph { para_index } => Some(*para_index),
+        _ => None,
+    }) else {
+        return false;
+    };
+    paragraphs.get(prev_para_idx).is_some_and(|prev| {
+        !para_has_visible_text(prev)
+            && prev.controls.is_empty()
+            && prev.line_segs.last().is_some_and(|seg| {
+                seg.vertical_pos
+                    .saturating_add(seg.line_height)
+                    .saturating_add(seg.line_spacing)
+                    >= body_height_hu * 98 / 100
+            })
+    })
+}
+
 fn should_drop_tiny_final_split_tail(
     end_row: usize,
     row_count: usize,
@@ -2250,6 +2332,22 @@ impl TypesetEngine {
             }
             // === [end Cluster EF patch] ===
 
+            let insert_blank_page_before_explicit_top_reset =
+                should_insert_blank_page_before_explicit_top_reset(
+                    &st,
+                    para,
+                    paragraphs,
+                    para_idx,
+                    st.layout.body_area.height,
+                    page_def.height.saturating_sub(
+                        page_def
+                            .margin_top
+                            .saturating_add(page_def.margin_bottom)
+                            .saturating_add(page_def.margin_header)
+                            .saturating_add(page_def.margin_footer),
+                    ) as i32,
+                );
+
             if (force_page_break
                 || para_style_break
                 || variant_vpos_reset_break
@@ -2258,6 +2356,9 @@ impl TypesetEngine {
                 && !st.current_items.is_empty()
             {
                 st.force_new_page();
+                if insert_blank_page_before_explicit_top_reset {
+                    st.force_new_page();
+                }
                 // [Task #702] 쪽나누기 + 새 ColumnDef = 새 페이지에서 col 정의 적용
                 if has_diff_col_def {
                     if let Some(cd) = &new_col_def_opt {
@@ -2372,6 +2473,24 @@ impl TypesetEngine {
                         && para.controls.is_empty()
                         && para_has_visible_text(para)
                         && next_heading_after_top_content_reset;
+                    let hwpx_near_top_heading_reset = !is_hwp3_variant
+                        && st.col_count == 1
+                        && cv > 0
+                        && cv <= 500
+                        && prev_vpos_end
+                            > page_def.height.saturating_sub(
+                                page_def
+                                    .margin_top
+                                    .saturating_add(page_def.margin_bottom)
+                                    .saturating_add(page_def.margin_header)
+                                    .saturating_add(page_def.margin_footer),
+                            ) as i32
+                                * 95
+                                / 100
+                        && para_sb_hu_for_reset >= 500
+                        && para.line_segs.len() == 1
+                        && para.controls.is_empty()
+                        && para_has_visible_text(para);
                     let trigger = if st.col_count > 1 {
                         if is_distribute {
                             cv < prev_vpos_end && prev_vpos_end > 0
@@ -2381,6 +2500,7 @@ impl TypesetEngine {
                     } else {
                         (cv == 0 && pv > 5000 && !hwp3_content_vpos_zero_reset)
                             || near_page_top_reset
+                            || hwpx_near_top_heading_reset
                     };
                     if trigger {
                         // [Task #724] wrap_around active 시 강제 종료 — anchor cs=0
@@ -9393,6 +9513,131 @@ mod tests {
                 body_height
             ),
             "a late heading/spacer followed by a medium CELL TAC table should defer before the next explicit title page"
+        );
+    }
+
+    #[test]
+    fn explicit_top_reset_after_bottom_blank_inserts_blank_before_cell_tac_group() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+        let body_height_hu = page_def.height.saturating_sub(
+            page_def
+                .margin_top
+                .saturating_add(page_def.margin_bottom)
+                .saturating_add(page_def.margin_header)
+                .saturating_add(page_def.margin_footer),
+        ) as i32;
+
+        let bottom_blank = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: body_height_hu * 99 / 100,
+                line_height: 400,
+                line_spacing: 200,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let intro = Paragraph {
+            column_type: ColumnBreakType::Page,
+            text: "explicit top reset intro".to_string(),
+            line_segs: vec![
+                LineSeg {
+                    vertical_pos: 0,
+                    line_height: 1_500,
+                    line_spacing: 900,
+                    ..Default::default()
+                },
+                LineSeg {
+                    vertical_pos: 2_400,
+                    line_height: 1_500,
+                    line_spacing: 900,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let heading = Paragraph {
+            text: "subsection heading".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 12_500,
+                line_height: 1_500,
+                line_spacing: 900,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = Paragraph {
+            text: "body before table".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 16_020,
+                line_height: 1_500,
+                line_spacing: 900,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut table = Table::default();
+        table.row_count = 6;
+        table.col_count = 2;
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        table.common.height = (body_height * 0.20 * 7200.0 / DEFAULT_DPI) as u32;
+        let table_para = Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+        let paragraphs = vec![bottom_blank, intro.clone(), heading, body, table_para];
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height * 0.98;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 0 });
+
+        assert!(
+            should_insert_blank_page_before_explicit_top_reset(
+                &st,
+                &intro,
+                &paragraphs,
+                1,
+                body_height,
+                body_height_hu,
+            ),
+            "a visible explicit page-break paragraph after a bottom blank should preserve the blank page before a following CELL TAC group"
+        );
+
+        let mut no_break = paragraphs.clone();
+        no_break[1].column_type = ColumnBreakType::None;
+        assert!(
+            !should_insert_blank_page_before_explicit_top_reset(
+                &st,
+                &no_break[1],
+                &no_break,
+                1,
+                body_height,
+                body_height_hu,
+            ),
+            "ordinary top-reset paragraphs do not insert blank pages"
+        );
+
+        let mut no_table = paragraphs.clone();
+        no_table[4].controls.clear();
+        assert!(
+            !should_insert_blank_page_before_explicit_top_reset(
+                &st,
+                &no_table[1],
+                &no_table,
+                1,
+                body_height,
+                body_height_hu,
+            ),
+            "the blank-page preservation requires a following medium CELL TAC table group"
         );
     }
 

@@ -19,13 +19,44 @@ pixel-perfect Hancom parity as the first production target.
 | Export roundtrip | exported HWPX reopens in Hancom/RHWP with stable pages and no structural loss | not started | build export-oracle lane after render gate stabilizes |
 | Regression safety | focused tests, overfit check, guard page counts, refreshed board | partial | run before any commit |
 
+## Latest Broad Review
+
+Generated from current local code:
+
+```bash
+docker compose --env-file .env.docker run --rm dev cargo build --release --bin rhwp -j 1
+python3 harness/review_gallery.py /tmp/diff/_review_all_latest_nonlandscape_2026-06-08 \
+  --all --skip-landscape --export-current
+python3 harness/audit_review_gallery.py /tmp/diff/_review_all_latest_nonlandscape_2026-06-08
+python3 harness/fidelity_category_status.py \
+  --out work/FIDELITY_PAGECOUNT_STATUS_ALL_LATEST_NONLANDSCAPE_2026-06-08.md \
+  03_3781727_staff_evaluation_table 04_3781571_car_2bu_je_notice \
+  05_3781559_medschool_car_2bu_je_plan \
+  09_3766093_natural_sci_planning_committee_260527 \
+  13_3763367_k_star_visa_track_plan \
+  15_3740450_research_admin_innovation_meeting_template \
+  18_3728528_research_fund_repayment_request 20_3727659_resume_2605_ai \
+  form_01_교수법_과제양식_코다이_49KB form_07_______________41KB \
+  form_11_응시원서_자기소개서_48KB form_17_융합전공신청서_운영계획서_81KB \
+  internship_plan meeting_summary multicultural_plan overseas_training \
+  photo_122p_civil_defense photo_form24 photo_w31 report_form research_form
+```
+
+- Broad review HTML: `/tmp/diff/_review_all_latest_nonlandscape_2026-06-08/index.html`.
+- Gallery audit: pass, no truncation/aspect issues across 22 docs.
+- Landscape/wide accountability variants were skipped by policy.
+- `meeting_summary_font_fallback` is an experiment symlink folder and is not
+  counted as a real corpus failure; the real `meeting_summary` row is 3/3.
+- Real portrait corpus page-count status: 20/21 clean. The only current
+  real page-count gap is `photo_form24`, Hancom `89` / RHWP `86`.
+
 ## Current Category Decisions
 
 | category | representative docs | status | before/after | remaining risk | ship/block | next command |
 |---|---|---|---|---|---|---|
 | Cover/body title-band semantic split | `05_3781559_medschool_car_2bu_je_plan` | accepted-semantic | RHWP `3 -> 4` pages vs Hancom `4`; page 1 no longer leaks body title band, page 2 starts with title band + `□ 추진 배경` | cover geometry/font/table-stroke drift remains; this is not a text/raster or cover-position fix | not a semantic blocker; keep as guard for cover/body page split | open `/tmp/diff/_review_fresh_comparable_post_cover_fix_2026-06-08/05_3781559_medschool_car_2bu_je_plan/index.html` |
 | Form tail before explicit form page | `form_11_응시원서_자기소개서_48KB` | accepted-semantic | RHWP `2 -> 3` pages vs Hancom `3`; final note moves to sparse page 2 and `자기소개서` starts page 3 | table/rule/font density still differs; this is not a raster appearance fix | not a semantic blocker; keep as guard for HWPX form tail/page-break split | open `/tmp/diff/_review_fresh_comparable_tail_overflow_debug_2026-06-08/form_11_응시원서_자기소개서_48KB/index.html` |
-| Photo/table page-count drift | `photo_form24` | accepted-local/probe-open | Latest focused candidate keeps the one-line tail before the explicit title-table page break and defers the following late heading/spacer/CELL TAC table. Heading map now matches Hancom through page 24, including `□ 중점 사항`, `□ 주요 편성·확대 과제`, `□ (범부처 협업 강화)`, `□ 구축 방안(안)`, `□ 추진 개요`, `□ 추진 절차(안)`, and `□ 추진 방안`. Total page count remains Hancom `89` / RHWP `85`, so this is not a full category promotion. Previous terminal-contact candidates reached `88/89` or `89/89` but inserted pages at the wrong visual location and remain rejected. | remaining issue starts around page 25: photo/table under-height or missing continuation pages near `󰊲 대학생 현장실습 안전관리 지원` / `󰊳 대학생 현장실습 성과관리`; page count alone is not a safe acceptance signal | open semantic blocker, but first drift window is locally improved and guarded | open `/tmp/diff/_review_photo_form24_tail_guard_combo_2026-06-08/index.html`; compare `python3 harness/heading_drift_scan.py photo_form24 --dump /tmp/diff/photo_form24/dump_pages_tail_guard_late_table_combo_2026-06-08.txt --page-min 1 --page-max 40` |
+| Photo/table page-count drift | `photo_form24` | accepted-local/probe-open | Tail-guard combo keeps the one-line tail before the explicit title-table page break and defers the following late heading/spacer/CELL TAC table. The latest local candidate also preserves the Hancom blank page before the `유학생 특화형` explicit top-reset paragraph and applies a narrow near-top heading reset for the following `성과관리` subsection. Focus window now visually matches the blank page and aligns `󰊲 대학생 현장실습 안전관리 지원` and `󰊳 대학생 현장실습 성과관리` to Hancom pages 26 and 27. Total page count improves to Hancom `89` / RHWP `86`, but `【 대학창업 활성화 】` is still one page early. Previous terminal-contact candidates reached `88/89` or `89/89` but inserted pages at the wrong visual location and remain rejected. | remaining issue starts after page 27: the performance/contact tail before `【 대학창업 활성화 】` is still under-height or incorrectly grouped; page count alone is not a safe acceptance signal | open semantic blocker, first two drift windows locally improved and guarded | open `/tmp/diff/_review_photo_form24_pages_24_30_blank_explicit_break_candidate_2026-06-08/index.html`; compare `python3 harness/page_heading_map.py photo_form24 --dump /tmp/diff/photo_form24/dump_pages_blank_explicit_break_candidate_2026-06-08.txt --needle '󰊲 대학생 현장실습 안전관리 지원' --needle '󰊳 대학생 현장실습 성과관리' --needle '【 대학창업 활성화 】'` |
 | Large planning table/text drift | `09_3766093_natural_sci_planning_committee_260527` | accepted-semantic/page-count, visual-probe | Cached cell-vpos reset policy collapses the repeated-header minutes table from many tiny fragments; RHWP `57 -> 51` vs Hancom `51`; full non-landscape board keeps key guard counts | page 1 still has title/agenda geometry drift and font/shape overlap; this is not a full visual-fidelity fix | semantic page-count blocker cleared; keep as guard for repeated-header CELL tables with stale vpos resets | open `/tmp/diff/_review_all_nonlandscape_candidate_09_vpos_2026-06-08/09_3766093_natural_sci_planning_committee_260527/index.html` and focused `/tmp/diff/_review_09_agenda_keep_candidate_2026-06-08/index.html` |
 | Page-count / semantic drift | `photo_122p_civil_defense`, `form_07`, `photo_w31`, `internship_plan` | accepted-semantic | civil-defense now 129/129 vs Hancom | visual drift remains on some pages | not a blocker if human review accepts semantic layout | `python3 harness/heading_drift_scan.py photo_122p_civil_defense --dump /tmp/diff/photo_122p_civil_defense/dump_pages_tail_group_candidate3.txt` |
 | Photo-grid / pre-grid | `photo_122p_civil_defense`, `photo_w31`, `15_3740450_research_admin_innovation_meeting_template` | accepted for semantic anchors, probe for visual | page anchors aligned on civil-defense | sizing, spacing, glyph/rule weight | guard, not active unless new semantic drift appears | open `/tmp/diff/_review_civil_defense_tail_group_candidate_2026-06-08/index.html` |
