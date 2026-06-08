@@ -912,6 +912,7 @@ fn should_move_late_tail_before_explicit_page_break(
         && para.controls.is_empty()
         && fmt.line_heights.len() == 1
         && !st.current_items.is_empty()
+        && !(page_has_tac_topbottom && next_is_explicit_title_table && !follows_tac_topbottom_table)
         && !(page_has_tac_topbottom_table(&st.current_items, paragraphs)
             && next_is_explicit_full_page_tac_table)
         && st.current_height > body_height * min_current_ratio
@@ -1223,6 +1224,89 @@ fn should_defer_large_cell_tac_after_page_tail_lead_in(
     });
 
     current_page_has_lead_in
+}
+
+fn should_defer_late_heading_spacer_cell_tac_before_break_title(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    table_para_idx: usize,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_height: f64,
+    available: f64,
+) -> bool {
+    if st.col_count != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.45
+        || st.current_height > available * 0.60
+        || !table.common.treat_as_char
+        || !matches!(
+            table.common.text_wrap,
+            crate::model::shape::TextWrap::TopAndBottom
+        )
+        || !matches!(
+            table.hwpx_page_break,
+            Some(crate::model::table::HwpxTablePageBreak::Cell)
+        )
+        || table.row_count < 3
+        || table.row_count > 5
+        || table.col_count < 2
+        || table.col_count > 4
+        || table_height < available * 0.35
+        || table_height > available * 0.55
+        || para.controls.len() != 1
+    {
+        return false;
+    }
+
+    let Some(spacer_idx) = table_para_idx.checked_sub(1) else {
+        return false;
+    };
+    let Some(heading_idx) = table_para_idx.checked_sub(2) else {
+        return false;
+    };
+    let Some(spacer) = paragraphs.get(spacer_idx) else {
+        return false;
+    };
+    let Some(heading) = paragraphs.get(heading_idx) else {
+        return false;
+    };
+    if para_has_visible_text(spacer)
+        || !spacer.controls.is_empty()
+        || !para_has_visible_text(heading)
+        || !heading.controls.is_empty()
+        || single_line_para_height_px(heading).is_none()
+    {
+        return false;
+    }
+
+    let Some(after_table) = paragraphs.get(table_para_idx + 1) else {
+        return false;
+    };
+    if !matches!(
+        after_table.column_type,
+        ColumnBreakType::Page | ColumnBreakType::Section
+    ) {
+        return false;
+    }
+    let next_is_title_table = after_table.controls.iter().any(|control| {
+        matches!(
+            control,
+            Control::Table(next_table)
+                if next_table.common.treat_as_char
+                    && matches!(
+                        next_table.common.text_wrap,
+                        crate::model::shape::TextWrap::TopAndBottom
+                    )
+                    && next_table.row_count == 1
+        )
+    });
+    if !next_is_title_table {
+        return false;
+    }
+
+    let remaining_after_table = available - (st.current_height + table_height);
+    remaining_after_table >= 0.0 && remaining_after_table < available * 0.08
 }
 
 fn should_drop_tiny_final_split_tail(
@@ -5579,6 +5663,19 @@ impl TypesetEngine {
         {
             st.advance_column_or_new_page();
         }
+        if tac_count == 1
+            && should_defer_late_heading_spacer_cell_tac_before_break_title(
+                st,
+                paragraphs,
+                para_idx,
+                para,
+                table,
+                table_height,
+                available,
+            )
+        {
+            st.advance_column_or_new_page();
+        }
         if st.current_height + table_height > available + fit_tol && !st.current_items.is_empty() {
             st.advance_column_or_new_page();
         }
@@ -9020,6 +9117,55 @@ mod tests {
             "a tail with a wider remaining strip should move before an explicit title table"
         );
 
+        let mut page_tac_table = Table::default();
+        page_tac_table.row_count = 1;
+        page_tac_table.col_count = 1;
+        page_tac_table.common.treat_as_char = true;
+        page_tac_table.common.text_wrap = TextWrap::TopAndBottom;
+        let page_tac_title_break_paras = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(page_tac_table))],
+                ..Default::default()
+            },
+            Paragraph {
+                text: "intervening body".to_string(),
+                line_segs: vec![LineSeg {
+                    vertical_pos: 50_000,
+                    line_height: 1_300,
+                    line_spacing: 600,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            tail.clone(),
+            Paragraph {
+                column_type: ColumnBreakType::Page,
+                controls: title_break_paras[1].controls.clone(),
+                ..Default::default()
+            },
+        ];
+        let mut page_tac_st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        page_tac_st.current_height = body_height - fmt.height_for_fit - 8.0;
+        page_tac_st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        page_tac_st
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 1 });
+        assert!(
+            !should_move_late_tail_before_explicit_page_break(
+                &page_tac_st,
+                &page_tac_title_break_paras[2],
+                &fmt,
+                &page_tac_title_break_paras,
+                2,
+                body_height,
+                true
+            ),
+            "a late tail after intervening body text should not move just because the page has an earlier TAC table"
+        );
+
         let mut form_table = Table::default();
         form_table.row_count = 12;
         form_table.col_count = 8;
@@ -9175,6 +9321,78 @@ mod tests {
                 true
             ),
             "a short note after a TAC guide table should stay before a plain explicit page break"
+        );
+    }
+
+    #[test]
+    fn late_heading_spacer_cell_tac_before_break_title_defers_table() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let heading = Paragraph {
+            text: "late heading".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 34_032,
+                line_height: 1_500,
+                line_spacing: 900,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let spacer = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 36_432,
+                line_height: 300,
+                line_spacing: 180,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut table = Table::default();
+        table.row_count = 4;
+        table.col_count = 3;
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        let table_para = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            ..Default::default()
+        };
+        let mut title_table = Table::default();
+        title_table.row_count = 1;
+        title_table.col_count = 3;
+        title_table.common.treat_as_char = true;
+        title_table.common.text_wrap = TextWrap::TopAndBottom;
+        let next_title = Paragraph {
+            column_type: ColumnBreakType::Page,
+            controls: vec![Control::Table(Box::new(title_table))],
+            ..Default::default()
+        };
+        let paragraphs = vec![heading, spacer, table_para, next_title];
+        let mut st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height * 0.525;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 0 });
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 1 });
+
+        assert!(
+            should_defer_late_heading_spacer_cell_tac_before_break_title(
+                &st,
+                &paragraphs,
+                2,
+                &paragraphs[2],
+                &table,
+                body_height * 0.42,
+                body_height
+            ),
+            "a late heading/spacer followed by a medium CELL TAC table should defer before the next explicit title page"
         );
     }
 
