@@ -1391,6 +1391,120 @@ fn should_insert_blank_page_before_explicit_top_reset(
     })
 }
 
+fn should_defer_small_cell_tac_after_large_table_spacers_before_break(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    table_para_idx: usize,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_height: f64,
+    available: f64,
+) -> bool {
+    if st.col_count != 1
+        || st.current_items.len() < 5
+        || !table.common.treat_as_char
+        || !matches!(
+            table.common.text_wrap,
+            crate::model::shape::TextWrap::TopAndBottom
+        )
+        || !matches!(
+            table.hwpx_page_break,
+            Some(crate::model::table::HwpxTablePageBreak::Cell)
+        )
+        || table.row_count > 3
+        || table.col_count < 2
+        || table.col_count > 4
+        || table_height > available * 0.12
+        || para.controls.len() != 1
+    {
+        return false;
+    }
+
+    let Some(next) = paragraphs.get(table_para_idx + 1) else {
+        return false;
+    };
+    if !matches!(
+        next.column_type,
+        ColumnBreakType::Page | ColumnBreakType::Section
+    ) || !para_has_visible_text(next)
+        || !next.controls.is_empty()
+        || next
+            .line_segs
+            .first()
+            .is_none_or(|seg| seg.vertical_pos != 0)
+    {
+        return false;
+    }
+
+    let trailing_blank_count = st
+        .current_items
+        .iter()
+        .rev()
+        .take_while(|item| {
+            matches!(
+                item,
+                PageItem::FullParagraph { para_index }
+                    if paragraphs.get(*para_index).is_some_and(|p| {
+                        !para_has_visible_text(p) && p.controls.is_empty()
+                    })
+            )
+        })
+        .count();
+    if trailing_blank_count < 4 {
+        return false;
+    }
+
+    let last_blank_vpos = st.current_items.last().and_then(|item| match item {
+        PageItem::FullParagraph { para_index } => paragraphs
+            .get(*para_index)
+            .and_then(|p| p.line_segs.last())
+            .map(|seg| {
+                hwpunit_to_px(
+                    seg.vertical_pos
+                        .saturating_add(seg.line_height)
+                        .saturating_add(seg.line_spacing),
+                    DEFAULT_DPI,
+                )
+            }),
+        _ => None,
+    });
+    if !last_blank_vpos.is_some_and(|bottom| bottom >= available * 0.82) {
+        return false;
+    }
+
+    st.current_items.iter().any(|item| {
+        let (para_index, control_index) = match item {
+            PageItem::Table {
+                para_index,
+                control_index,
+            } => (*para_index, *control_index),
+            _ => return false,
+        };
+        paragraphs
+            .get(para_index)
+            .and_then(|p| p.controls.get(control_index))
+            .is_some_and(|control| {
+                matches!(
+                    control,
+                    Control::Table(prev_table)
+                        if prev_table.common.treat_as_char
+                            && matches!(
+                                prev_table.common.text_wrap,
+                                crate::model::shape::TextWrap::TopAndBottom
+                            )
+                            && matches!(
+                                prev_table.hwpx_page_break,
+                                Some(crate::model::table::HwpxTablePageBreak::Cell)
+                            )
+                            && prev_table.row_count >= 6
+                            && prev_table.col_count >= 4
+                            && hwpunit_to_px(prev_table.common.height as i32, DEFAULT_DPI)
+                                >= available * 0.40
+                )
+            })
+    })
+}
+
 fn should_drop_tiny_final_split_tail(
     end_row: usize,
     row_count: usize,
@@ -5796,6 +5910,19 @@ impl TypesetEngine {
         {
             st.advance_column_or_new_page();
         }
+        if tac_count == 1
+            && should_defer_small_cell_tac_after_large_table_spacers_before_break(
+                st,
+                paragraphs,
+                para_idx,
+                para,
+                table,
+                table_height,
+                available,
+            )
+        {
+            st.advance_column_or_new_page();
+        }
         if st.current_height + table_height > available + fit_tol && !st.current_items.is_empty() {
             st.advance_column_or_new_page();
         }
@@ -9638,6 +9765,132 @@ mod tests {
                 body_height_hu,
             ),
             "the blank-page preservation requires a following medium CELL TAC table group"
+        );
+    }
+
+    #[test]
+    fn small_cell_tac_after_large_table_spacers_moves_before_break_title() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let mut large_table = Table::default();
+        large_table.row_count = 7;
+        large_table.col_count = 4;
+        large_table.common.treat_as_char = true;
+        large_table.common.text_wrap = TextWrap::TopAndBottom;
+        large_table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        large_table.common.height = (body_height * 0.48 * 7200.0 / DEFAULT_DPI) as u32;
+
+        let blank_at = |vpos: i32| Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: vpos,
+                line_height: 1_300,
+                line_spacing: 780,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut contact = Table::default();
+        contact.row_count = 2;
+        contact.col_count = 3;
+        contact.common.treat_as_char = true;
+        contact.common.text_wrap = TextWrap::TopAndBottom;
+        contact.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        contact.common.height = (body_height * 0.07 * 7200.0 / DEFAULT_DPI) as u32;
+        let contact_para = Paragraph {
+            controls: vec![Control::Table(Box::new(contact.clone()))],
+            ..Default::default()
+        };
+        let break_title = Paragraph {
+            column_type: ColumnBreakType::Page,
+            text: "next section title".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 1_600,
+                line_spacing: 960,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(large_table.clone()))],
+                ..Default::default()
+            },
+            blank_at(45_488),
+            blank_at(47_568),
+            blank_at(49_648),
+            blank_at(51_728),
+            blank_at(60_048),
+            contact_para.clone(),
+            break_title,
+        ];
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height * 0.88;
+        st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        for para_index in 1..=5 {
+            st.current_items
+                .push(PageItem::FullParagraph { para_index });
+        }
+
+        assert!(
+            should_defer_small_cell_tac_after_large_table_spacers_before_break(
+                &st,
+                &paragraphs,
+                6,
+                &contact_para,
+                &contact,
+                body_height * 0.07,
+                body_height,
+            ),
+            "a small contact/signoff CELL TAC table after a large table spacer tail should move before the next explicit section title"
+        );
+
+        let mut no_break = paragraphs.clone();
+        no_break[7].column_type = ColumnBreakType::None;
+        assert!(
+            !should_defer_small_cell_tac_after_large_table_spacers_before_break(
+                &st,
+                &no_break,
+                6,
+                &no_break[6],
+                &contact,
+                body_height * 0.07,
+                body_height,
+            ),
+            "the small table stays when the following paragraph is not an explicit title break"
+        );
+
+        let mut short_spacer_st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        short_spacer_st.current_height = body_height * 0.60;
+        short_spacer_st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        short_spacer_st
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 1 });
+        assert!(
+            !should_defer_small_cell_tac_after_large_table_spacers_before_break(
+                &short_spacer_st,
+                &paragraphs,
+                6,
+                &paragraphs[6],
+                &contact,
+                body_height * 0.07,
+                body_height,
+            ),
+            "ordinary small tables after a short spacer do not create a new page"
         );
     }
 
