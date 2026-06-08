@@ -4207,6 +4207,25 @@ impl LayoutEngine {
         avail_height: f64,
         styles: &ResolvedStyleSet,
     ) -> RowCutResult {
+        self.advance_row_cut_with_hard_break_policy(
+            table,
+            row,
+            start_cut,
+            avail_height,
+            styles,
+            true,
+        )
+    }
+
+    pub(crate) fn advance_row_cut_with_hard_break_policy(
+        &self,
+        table: &crate::model::table::Table,
+        row: usize,
+        start_cut: &[usize],
+        avail_height: f64,
+        styles: &ResolvedStyleSet,
+        stop_at_hard_break: bool,
+    ) -> RowCutResult {
         let mut row_cells: Vec<&crate::model::table::Cell> = table
             .cells
             .iter()
@@ -4226,7 +4245,7 @@ impl LayoutEngine {
             while j < units.len() {
                 let u = &units[j];
                 // 시작 유닛(j==start)은 항상 소비 — 진행 보장.
-                if j > start && u.hard_break_before {
+                if stop_at_hard_break && j > start && u.hard_break_before {
                     Self::rewind_rowbreak_orphan_before_hard_break(
                         table, &units, start, &mut j, &mut h,
                     );
@@ -5191,6 +5210,19 @@ mod row_cut_tests {
         let r2 = eng.advance_row_cut(&t, 0, &r.end_cut, 1000.0, &styles);
         assert_eq!(r2.end_cut, vec![5]);
         assert!(r2.fully_consumed);
+    }
+
+    #[test]
+    fn test_advance_row_cut_can_ignore_cached_vpos_reset() {
+        let eng = LayoutEngine::new(96.0);
+        let styles = ResolvedStyleSet::default();
+        let t = table(vec![cell(0, 0, vec![text_para(3, 0), text_para(2, 1000)])]);
+
+        let r = eng.advance_row_cut_with_hard_break_policy(&t, 0, &[], 1000.0, &styles, false);
+
+        assert_eq!(r.end_cut, vec![5]);
+        assert!(!r.hit_hard_break);
+        assert!(r.fully_consumed);
     }
 
     #[test]

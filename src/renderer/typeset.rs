@@ -118,6 +118,85 @@ fn hwpx_has_visible_text_after_table_control(
     Some(hp_t_fragment_has_visible_text(&xml[table_end..]))
 }
 
+fn should_ignore_cached_cell_vpos_breaks(
+    table: &crate::model::table::Table,
+    mt: &MeasuredTable,
+    row_count: usize,
+) -> bool {
+    use crate::model::shape::TextWrap;
+    use crate::model::table::HwpxTablePageBreak;
+
+    !table.common.treat_as_char
+        && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+        && matches!(table.hwpx_page_break, Some(HwpxTablePageBreak::Cell))
+        && table.repeat_header
+        && mt.repeat_header
+        && !mt.has_header_cells
+        && row_count >= 4
+        && table.col_count >= 2
+        && mt.row_heights.iter().copied().fold(0.0, f64::max) > 1000.0
+}
+
+fn should_defer_title_table_with_following_large_cell_table(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_height: f64,
+    available: f64,
+    dpi: f64,
+) -> bool {
+    use crate::model::shape::TextWrap;
+    use crate::model::table::HwpxTablePageBreak;
+
+    if st.col_count != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.25
+        || !table.common.treat_as_char
+        || !matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+        || table.row_count != 1
+        || table_height <= 0.0
+    {
+        return false;
+    }
+
+    let Some(next_para) = paragraphs.get(para_idx + 1) else {
+        return false;
+    };
+    if para_has_visible_text(next_para) {
+        return false;
+    }
+    let Some(Control::Table(next_table)) = next_para.controls.first() else {
+        return false;
+    };
+    let next_common_height = hwpunit_to_px(next_table.common.height as i32, dpi);
+    let next_cell_height_sum = (0..next_table.row_count)
+        .map(|row| {
+            next_table
+                .cells
+                .iter()
+                .filter(|cell| cell.row == row && cell.row_span == 1)
+                .map(|cell| {
+                    if cell.height < 0x8000_0000 {
+                        hwpunit_to_px(cell.height as i32, dpi)
+                    } else {
+                        0.0
+                    }
+                })
+                .fold(0.0, f64::max)
+        })
+        .sum::<f64>();
+    let next_declared_height = next_common_height.max(next_cell_height_sum);
+    !next_table.common.treat_as_char
+        && matches!(next_table.common.text_wrap, TextWrap::TopAndBottom)
+        && matches!(next_table.hwpx_page_break, Some(HwpxTablePageBreak::Cell))
+        && next_table.repeat_header
+        && next_table.row_count >= 4
+        && next_table.col_count >= 2
+        && next_declared_height > available * 0.70
+}
+
 // ========================================================
 // FormattedTable — 표의 format() 결과
 // ========================================================
@@ -5450,6 +5529,20 @@ impl TypesetEngine {
         // region-tail / last-row orphan guards in table_layout.rs.
         let fit_tol = available * 0.01;
         if tac_count == 1
+            && should_defer_title_table_with_following_large_cell_table(
+                st,
+                paragraphs,
+                para_idx,
+                para,
+                table,
+                table_height,
+                available,
+                self.dpi,
+            )
+        {
+            st.advance_column_or_new_page();
+        }
+        if tac_count == 1
             && should_defer_large_cell_tac_after_table_break_spacer(
                 st,
                 paragraphs,
@@ -5827,6 +5920,8 @@ impl TypesetEngine {
         let can_intra_split = !mt.cells.is_empty();
         let base_available = st.base_available_height();
         let table_available = available; // 각주/존 오프셋 차감된 가용 높이
+        let ignore_cached_cell_vpos_breaks =
+            should_ignore_cached_cell_vpos_breaks(table, mt, row_count);
 
         // [Task #993] advance_row_cut 호출용 LayoutEngine — 컷 측정은 dpi 와
         // 셀 패딩/중첩 표 높이 계산에만 의존하므로 ad hoc 인스턴스로 충분하다.
@@ -6024,7 +6119,14 @@ impl TypesetEngine {
                 && !start_cut.is_empty()
                 && can_intra_split
                 && layout_engine
-                    .advance_row_cut(table, cursor_row, &start_cut, f64::MAX, styles)
+                    .advance_row_cut_with_hard_break_policy(
+                        table,
+                        cursor_row,
+                        &start_cut,
+                        f64::MAX,
+                        styles,
+                        !ignore_cached_cell_vpos_breaks,
+                    )
                     .consumed_height
                     <= 0.0
             {
@@ -6393,8 +6495,14 @@ impl TypesetEngine {
                     }
                     let padding = mt.max_padding_for_row(r);
                     let budget = (avail_for_rows - consumed - cs_before - padding).max(0.0);
-                    let res =
-                        layout_engine.advance_row_cut(table, r, row_start_cut, budget, styles);
+                    let res = layout_engine.advance_row_cut_with_hard_break_policy(
+                        table,
+                        r,
+                        row_start_cut,
+                        budget,
+                        styles,
+                        !ignore_cached_cell_vpos_breaks,
+                    );
                     if res.fully_consumed {
                         // 단일 유닛 행 — 분할 불가, 페이지 시작이면 강제, 아니면 다음으로.
                         if r == cursor_row {
