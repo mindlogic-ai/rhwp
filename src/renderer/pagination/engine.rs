@@ -14,6 +14,86 @@ fn para_has_visible_text(para: &Paragraph) -> bool {
     para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}')
 }
 
+fn should_defer_late_cover_title_band_table(
+    st: &PaginationState,
+    paragraphs: &[Paragraph],
+    table_para_idx: usize,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_total_height: f64,
+    available: f64,
+    dpi: f64,
+) -> bool {
+    use crate::model::shape::TextWrap;
+    use crate::model::table::HwpxTablePageBreak;
+
+    if st.col_count != 1
+        || table.common.treat_as_char
+        || !matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+        || !matches!(table.hwpx_page_break, Some(HwpxTablePageBreak::Cell))
+        || table.row_count < 2
+        || table.row_count > 4
+        || table.col_count > 3
+        || para.controls.len() != 1
+        || st.current_items.len() < 4
+        || st.current_height < available * 0.45
+    {
+        return false;
+    }
+
+    let table_height = crate::renderer::hwpunit_to_px(table.common.height as i32, dpi);
+    if table_height > available * 0.14 {
+        return false;
+    }
+
+    let table_width = crate::renderer::hwpunit_to_px(table.common.width as i32, dpi);
+    if table_width < st.layout.body_area.width * 0.82 {
+        return false;
+    }
+
+    let page_has_cover_media = st
+        .current_items
+        .iter()
+        .any(|item| matches!(item, PageItem::Shape { .. }));
+    let page_has_multiple_visible_paras = st
+        .current_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                PageItem::FullParagraph { para_index }
+                    if paragraphs
+                        .get(*para_index)
+                        .is_some_and(|p| para_has_visible_text(p) && p.controls.is_empty())
+            )
+        })
+        .count()
+        >= 2;
+    if !page_has_cover_media || !page_has_multiple_visible_paras {
+        return false;
+    }
+
+    let mut cursor = table_para_idx + 1;
+    let mut blank_count = 0usize;
+    while let Some(next) = paragraphs.get(cursor) {
+        if para_has_visible_text(next) || !next.controls.is_empty() {
+            return blank_count >= 1 && para_has_visible_text(next) && next.controls.is_empty();
+        }
+        if !matches!(
+            next.column_type,
+            ColumnBreakType::None | ColumnBreakType::MultiColumn
+        ) {
+            return false;
+        }
+        blank_count += 1;
+        if blank_count > 4 {
+            return false;
+        }
+        cursor += 1;
+    }
+    false
+}
+
 fn is_sample16_integrated_db_cluster_tail_paragraph(para: &Paragraph) -> bool {
     para.text.starts_with('\u{F03C5}')
         && para
@@ -450,9 +530,7 @@ impl Paginator {
                     })
                 });
                 if let (Some((_prev_idx, prev_last)), Some(curr_first)) = (prev_real, curr_first) {
-                    let prev_end = prev_last
-                        .vertical_pos
-                        .saturating_add(prev_last.line_height);
+                    let prev_end = prev_last.vertical_pos.saturating_add(prev_last.line_height);
                     let high_threshold = body_height_hu_for_hwpx_breaks * 90 / 100;
                     // "Rewound" = curr_first.vertical_pos < prev_last.vertical_pos.
                     // Width of rewind ≥ 50% body height = an actual page reset
@@ -466,10 +544,8 @@ impl Paginator {
                         // Issue #418 mitigation: skip when current paragraph
                         // hosts a Table control. Partial tables encode their own
                         // page splits and shouldn't be double-broken.
-                        let current_hosts_table = para
-                            .controls
-                            .iter()
-                            .any(|c| matches!(c, Control::Table(_)));
+                        let current_hosts_table =
+                            para.controls.iter().any(|c| matches!(c, Control::Table(_)));
                         if !current_hosts_table {
                             hwpx_vpos_reset_break = true;
                         }
@@ -513,22 +589,15 @@ impl Paginator {
                         .saturating_add(page_def.margin_header)
                         .saturating_add(page_def.margin_footer),
                 ) as i32;
-                if let (Some((_prev_idx, prev_last)), Some(curr_first)) =
-                    (prev_real, curr_first)
-                {
-                    let prev_end = prev_last
-                        .vertical_pos
-                        .saturating_add(prev_last.line_height);
-                    let curr_hosts_table = para
-                        .controls
-                        .iter()
-                        .any(|c| matches!(c, Control::Table(_)));
+                if let (Some((_prev_idx, prev_last)), Some(curr_first)) = (prev_real, curr_first) {
+                    let prev_end = prev_last.vertical_pos.saturating_add(prev_last.line_height);
+                    let curr_hosts_table =
+                        para.controls.iter().any(|c| matches!(c, Control::Table(_)));
                     let curr_is_short_heading = !curr_hosts_table
                         && para.line_segs.len() == 1
                         && curr_first.vertical_pos >= 0
                         && curr_first.vertical_pos <= 1500;
-                    let prev_at_page_bottom =
-                        body_h_hu > 0 && prev_end >= body_h_hu * 90 / 100;
+                    let prev_at_page_bottom = body_h_hu > 0 && prev_end >= body_h_hu * 90 / 100;
                     // Next paragraph hosts a *block* table (non-treat_as_char
                     // table that owns the next page break). We DO NOT want this
                     // to fire when next-para is just text — that would cascade
@@ -543,10 +612,7 @@ impl Paginator {
                                 )
                             })
                         });
-                    if curr_is_short_heading
-                        && prev_at_page_bottom
-                        && next_hosts_block_table
-                    {
+                    if curr_is_short_heading && prev_at_page_bottom && next_hosts_block_table {
                         subhead_with_table_break = true;
                     }
                 }
@@ -857,6 +923,7 @@ impl Paginator {
                 &mut st,
                 para_idx,
                 para,
+                paragraphs,
                 measured,
                 &measurer,
                 para_height,
@@ -1681,6 +1748,7 @@ impl Paginator {
         st: &mut PaginationState,
         para_idx: usize,
         para: &Paragraph,
+        paragraphs: &[Paragraph],
         measured: &MeasuredSection,
         measurer: &HeightMeasurer,
         para_height: f64,
@@ -1745,6 +1813,7 @@ impl Paginator {
                         para_idx,
                         ctrl_idx,
                         para,
+                        paragraphs,
                         measured,
                         measurer,
                         para_height,
@@ -1868,6 +1937,7 @@ impl Paginator {
         para_idx: usize,
         ctrl_idx: usize,
         para: &Paragraph,
+        paragraphs: &[Paragraph],
         measured: &MeasuredSection,
         measurer: &HeightMeasurer,
         para_height: f64,
@@ -2112,6 +2182,20 @@ impl Paginator {
         } else {
             table_total_height
         };
+
+        if should_defer_late_cover_title_band_table(
+            st,
+            paragraphs,
+            para_idx,
+            para,
+            table,
+            table_total_height,
+            table_available_height,
+            self.dpi,
+        ) && !st.current_items.is_empty()
+        {
+            st.advance_column_or_new_page();
+        }
 
         // 페이지 하단/중앙 고정 표: 본문 높이에 영향 없음
         // 표가 현재 페이지에 전체 들어가는지 확인
@@ -2948,5 +3032,98 @@ impl Paginator {
     /// 표의 세로 오프셋 추출
     fn get_table_vertical_offset(table: &crate::model::table::Table) -> u32 {
         table.common.vertical_offset as u32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::page::{ColumnDef, PageDef};
+    use crate::model::shape::TextWrap;
+    use crate::model::table::{HwpxTablePageBreak, Table};
+
+    fn a4_page_def() -> PageDef {
+        PageDef {
+            width: 59528,
+            height: 84188,
+            margin_left: 8504,
+            margin_right: 8504,
+            margin_top: 5669,
+            margin_bottom: 4252,
+            margin_header: 4252,
+            margin_footer: 4252,
+            margin_gutter: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn late_cover_title_band_table_defers_in_legacy_paginator() {
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout =
+            PageLayoutInfo::from_page_def(&page_def, &col_def, crate::renderer::DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let mut table = Table::default();
+        table.row_count = 3;
+        table.col_count = 2;
+        table.common.treat_as_char = false;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.common.width = 48_000;
+        table.common.height = 5_000;
+        table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+
+        let title_host = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            Paragraph {
+                text: "cover title".to_string(),
+                ..Default::default()
+            },
+            Paragraph::default(),
+            Paragraph {
+                text: "2026. 4.".to_string(),
+                ..Default::default()
+            },
+            Paragraph {
+                text: "office".to_string(),
+                ..Default::default()
+            },
+            title_host.clone(),
+            Paragraph::default(),
+            Paragraph {
+                text: "body heading".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let mut st = PaginationState::new(layout, 1, 0, 0.0, 0.0);
+        st.current_height = body_height * 0.62;
+        st.current_items.extend([
+            PageItem::FullParagraph { para_index: 0 },
+            PageItem::Shape {
+                para_index: 1,
+                control_index: 0,
+            },
+            PageItem::FullParagraph { para_index: 2 },
+            PageItem::FullParagraph { para_index: 3 },
+        ]);
+
+        assert!(
+            should_defer_late_cover_title_band_table(
+                &st,
+                &paragraphs,
+                4,
+                &title_host,
+                &table,
+                body_height * 0.07,
+                body_height,
+                crate::renderer::DEFAULT_DPI,
+            ),
+            "legacy paginator should defer shallow full-width CELL title bands after cover media"
+        );
     }
 }

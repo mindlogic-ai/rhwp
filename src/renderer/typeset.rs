@@ -949,6 +949,90 @@ fn should_defer_late_heading_followed_by_table_break_tac(
     })
 }
 
+fn should_defer_late_cover_title_band_table(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    table_para_idx: usize,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_total_height: f64,
+    available: f64,
+) -> bool {
+    use crate::model::shape::TextWrap;
+    use crate::model::table::HwpxTablePageBreak;
+
+    if st.col_count != 1
+        || table.common.treat_as_char
+        || !matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+        || !matches!(table.hwpx_page_break, Some(HwpxTablePageBreak::Cell))
+        || table.row_count < 2
+        || table.row_count > 4
+        || table.col_count > 3
+        || para.controls.len() != 1
+        || st.current_items.len() < 4
+        || st.current_height < available * 0.45
+    {
+        return false;
+    }
+
+    let table_height = hwpunit_to_px(table.common.height as i32, DEFAULT_DPI);
+    if table_height > available * 0.14 {
+        return false;
+    }
+
+    let table_width = hwpunit_to_px(table.common.width as i32, DEFAULT_DPI);
+    if table_width < st.layout.body_area.width * 0.82 {
+        return false;
+    }
+
+    let page_has_cover_media = st.current_items.iter().any(|item| {
+        matches!(
+            item,
+            PageItem::Shape {
+                para_index: _,
+                control_index: _
+            }
+        )
+    });
+    let page_has_multiple_visible_paras = st
+        .current_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                PageItem::FullParagraph { para_index }
+                    if paragraphs
+                        .get(*para_index)
+                        .is_some_and(|p| para_has_visible_text(p) && p.controls.is_empty())
+            )
+        })
+        .count()
+        >= 2;
+    if !page_has_cover_media || !page_has_multiple_visible_paras {
+        return false;
+    }
+
+    let mut cursor = table_para_idx + 1;
+    let mut blank_count = 0usize;
+    while let Some(next) = paragraphs.get(cursor) {
+        if para_has_visible_text(next) || !next.controls.is_empty() {
+            return blank_count >= 1 && para_has_visible_text(next) && next.controls.is_empty();
+        }
+        if !matches!(
+            next.column_type,
+            ColumnBreakType::None | ColumnBreakType::MultiColumn
+        ) {
+            return false;
+        }
+        blank_count += 1;
+        if blank_count > 4 {
+            return false;
+        }
+        cursor += 1;
+    }
+    false
+}
+
 fn should_defer_large_cell_tac_after_page_tail_lead_in(
     st: &TypesetState,
     paragraphs: &[Paragraph],
@@ -5039,7 +5123,7 @@ impl TypesetEngine {
                         // Empty host para-float table placed by horizontal lane reservation.
                     } else {
                         self.typeset_block_table(
-                            st, para_idx, ctrl_idx, para, table, &ft, &fmt, mt, styles,
+                            st, para_idx, ctrl_idx, para, paragraphs, table, &ft, &fmt, mt, styles,
                         );
                     }
 
@@ -5547,6 +5631,7 @@ impl TypesetEngine {
         para_idx: usize,
         ctrl_idx: usize,
         para: &Paragraph,
+        paragraphs: &[Paragraph],
         table: &crate::model::table::Table,
         ft: &FormattedTable,
         fmt: &FormattedParagraph,
@@ -5604,6 +5689,19 @@ impl TypesetEngine {
             && fmt.total_height > table_total
         {
             table_total = fmt.total_height;
+        }
+
+        if should_defer_late_cover_title_band_table(
+            st,
+            paragraphs,
+            para_idx,
+            para,
+            table,
+            table_total,
+            available,
+        ) && !st.current_items.is_empty()
+        {
+            st.advance_column_or_new_page();
         }
 
         // Task #321 v5: Paper-anchored TopAndBottom block 표는 절대 좌표로 그려지므로
@@ -9401,6 +9499,104 @@ mod tests {
                 body_height * 0.90,
             ),
             "full-page photo-grid style tables use the separate large-table rule"
+        );
+    }
+
+    #[test]
+    fn late_cover_title_band_table_starts_body_page() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let cover_title = Paragraph {
+            text: "cover title".to_string(),
+            ..Default::default()
+        };
+        let cover_date = Paragraph {
+            text: "2026. 4.".to_string(),
+            ..Default::default()
+        };
+        let cover_office = Paragraph {
+            text: "office".to_string(),
+            ..Default::default()
+        };
+        let mut title_table = Table::default();
+        title_table.row_count = 3;
+        title_table.col_count = 2;
+        title_table.common.treat_as_char = false;
+        title_table.common.text_wrap = TextWrap::TopAndBottom;
+        title_table.common.width = 48_000;
+        title_table.common.height = 5_000;
+        title_table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        let title_host = Paragraph {
+            text: "body title band".to_string(),
+            controls: vec![Control::Table(Box::new(title_table.clone()))],
+            ..Default::default()
+        };
+        let blank = Paragraph::default();
+        let body_heading = Paragraph {
+            text: "body heading".to_string(),
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            cover_title,
+            Paragraph::default(),
+            cover_date,
+            cover_office,
+            title_host.clone(),
+            blank,
+            body_heading,
+        ];
+
+        let mut st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height * 0.90;
+        st.current_items.extend([
+            PageItem::FullParagraph { para_index: 0 },
+            PageItem::Shape {
+                para_index: 1,
+                control_index: 0,
+            },
+            PageItem::FullParagraph { para_index: 2 },
+            PageItem::FullParagraph { para_index: 3 },
+        ]);
+
+        assert!(
+            should_defer_late_cover_title_band_table(
+                &st,
+                &paragraphs,
+                4,
+                &title_host,
+                &title_table,
+                body_height * 0.07,
+                body_height,
+            ),
+            "a shallow full-width CELL-break title-band table after cover media should begin the body page"
+        );
+
+        let no_media_st = TypesetState::new(
+            PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI),
+            1,
+            0,
+            0.0,
+            0.0,
+            ColumnType::Normal,
+        );
+        assert!(
+            !should_defer_late_cover_title_band_table(
+                &no_media_st,
+                &paragraphs,
+                4,
+                &title_host,
+                &title_table,
+                body_height * 0.07,
+                body_height,
+            ),
+            "ordinary title-band tables without an established cover page keep normal placement"
         );
     }
 
