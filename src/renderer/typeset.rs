@@ -118,6 +118,17 @@ fn hwpx_has_visible_text_after_table_control(
     Some(hp_t_fragment_has_visible_text(&xml[table_end..]))
 }
 
+fn hwpx_table_cell_count_at_least(para: &Paragraph, min_cells: usize) -> bool {
+    let Some(xml) = para.hwpx_para_xml.as_ref() else {
+        return false;
+    };
+    let xml = String::from_utf8_lossy(xml);
+    xml.match_indices("<hp:tc")
+        .take(min_cells)
+        .count()
+        >= min_cells
+}
+
 fn should_ignore_cached_cell_vpos_breaks(
     table: &crate::model::table::Table,
     mt: &MeasuredTable,
@@ -662,6 +673,96 @@ fn should_defer_late_single_line_before_following_body_group(
         hwpunit_to_px(next_seg.line_height + next_seg.line_spacing, DEFAULT_DPI);
     let remaining_after_current = available - (st.current_height + fmt.total_height);
     remaining_after_current < next_line_fit_height + 1.0
+}
+
+fn should_defer_late_heading_before_list_and_wide_cell_tac(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+    visible_text: bool,
+    forced_page_break_line: Option<usize>,
+) -> bool {
+    if forced_page_break_line.is_some()
+        || st.col_count != 1
+        || !visible_text
+        || !para.controls.is_empty()
+        || fmt.line_heights.len() != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.92
+        || st.current_height + fmt.total_height > available + 0.5
+    {
+        return false;
+    }
+
+    let mut cursor = para_idx + 1;
+    let mut visible_following = 0usize;
+    while let Some(next) = paragraphs.get(cursor) {
+        if para_has_visible_text(next) {
+            if !next.controls.is_empty()
+                || (!next.line_segs.is_empty() && single_line_para_height_px(next).is_none())
+                || !matches!(
+                    next.column_type,
+                    ColumnBreakType::None | ColumnBreakType::MultiColumn
+                )
+            {
+                return false;
+            }
+            visible_following += 1;
+            if visible_following > 6 {
+                return false;
+            }
+            cursor += 1;
+            continue;
+        }
+
+        if !next.controls.is_empty() {
+            break;
+        }
+        if visible_following < 3 {
+            return false;
+        }
+        cursor += 1;
+        break;
+    }
+
+    if visible_following < 3 {
+        return false;
+    }
+
+    let Some(table_para) = paragraphs.get(cursor) else {
+        return false;
+    };
+    if table_para.controls.len() != 1 {
+        return false;
+    }
+
+    let matched = table_para.controls.iter().any(|control| {
+        matches!(
+            control,
+            Control::Table(table)
+                if table.common.treat_as_char
+                    && matches!(
+                        table.common.text_wrap,
+                        crate::model::shape::TextWrap::TopAndBottom
+                    )
+                    && matches!(
+                        table.hwpx_page_break,
+                        Some(crate::model::table::HwpxTablePageBreak::Cell)
+                    )
+                    && (2..=4).contains(&table.row_count)
+                    && (table.col_count >= 8 || hwpx_table_cell_count_at_least(table_para, 8))
+                    && hwpunit_to_px(table.common.width as i32, DEFAULT_DPI)
+                        >= st.layout.body_area.width * 0.90
+                    && {
+                        let table_h = hwpunit_to_px(table.common.height as i32, DEFAULT_DPI);
+                        table_h >= available * 0.20 && table_h <= available * 0.40
+                    }
+        )
+    });
+    matched
 }
 
 fn single_line_para_height_px(para: &Paragraph) -> Option<f64> {
@@ -4801,6 +4902,18 @@ impl TypesetEngine {
             st.advance_column_or_new_page();
         }
         if should_defer_late_single_line_before_following_body_group(
+            st,
+            para,
+            fmt,
+            paragraphs,
+            para_idx,
+            available,
+            visible_text,
+            forced_page_break_line,
+        ) {
+            st.advance_column_or_new_page();
+        }
+        if should_defer_late_heading_before_list_and_wide_cell_tac(
             st,
             para,
             fmt,
@@ -10331,6 +10444,125 @@ mod tests {
                 None,
             ),
             "a late one-line paragraph should move when the following heading/body group cannot fit after it"
+        );
+    }
+
+    #[test]
+    fn late_heading_before_list_and_wide_cell_tac_starts_next_page() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let available = layout.body_area.height - 4.0;
+
+        let one_line = |text: &str| Paragraph {
+            text: text.to_string(),
+            line_segs: vec![LineSeg {
+                line_height: 1_400,
+                line_spacing: 980,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let converted_plain = |text: &str| Paragraph {
+            text: text.to_string(),
+            ..Default::default()
+        };
+        let heading = one_line("2. section heading");
+        let mut flowchart = Table::default();
+        flowchart.row_count = 3;
+        flowchart.col_count = 13;
+        flowchart.common.treat_as_char = true;
+        flowchart.common.text_wrap = TextWrap::TopAndBottom;
+        flowchart.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        flowchart.common.width = (layout.body_area.width * 0.96 * 7200.0 / DEFAULT_DPI) as u32;
+        flowchart.common.height = (available * 0.28 * 7200.0 / DEFAULT_DPI) as u32;
+        let flowchart_para = Paragraph {
+            text: "table cell text may be aggregated here".to_string(),
+            controls: vec![Control::Table(Box::new(flowchart.clone()))],
+            hwpx_para_xml: Some(
+                "<hp:p><hp:tbl><hp:tc/><hp:tc/><hp:tc/><hp:tc/><hp:tc/><hp:tc/><hp:tc/><hp:tc/></hp:tbl></hp:p>"
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            heading.clone(),
+            converted_plain("1) first procedure item"),
+            converted_plain("2) second procedure item"),
+            converted_plain("3) third procedure item"),
+            converted_plain("4) fourth procedure item"),
+            Paragraph::default(),
+            flowchart_para.clone(),
+        ];
+        let fmt = FormattedParagraph {
+            total_height: 34.0,
+            line_heights: vec![20.0],
+            line_spacings: vec![14.0],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 34.0,
+        };
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = available - fmt.total_height - 5.0;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 99 });
+
+        assert!(
+            should_defer_late_heading_before_list_and_wide_cell_tac(
+                &st,
+                &heading,
+                &fmt,
+                &paragraphs,
+                0,
+                available,
+                true,
+                None,
+            ),
+            "a late section heading should move with its procedure list and wide CELL TAC flowchart"
+        );
+
+        st.current_height = available * 0.70;
+        assert!(
+            !should_defer_late_heading_before_list_and_wide_cell_tac(
+                &st,
+                &heading,
+                &fmt,
+                &paragraphs,
+                0,
+                available,
+                true,
+                None,
+            ),
+            "mid-page headings keep ordinary packing"
+        );
+
+        let mut narrow_table = flowchart;
+        narrow_table.common.width = (layout.body_area.width * 0.50 * 7200.0 / DEFAULT_DPI) as u32;
+        let mut narrow_paragraphs = paragraphs.clone();
+        narrow_paragraphs[6] = Paragraph {
+            controls: vec![Control::Table(Box::new(narrow_table))],
+            hwpx_para_xml: paragraphs[6].hwpx_para_xml.clone(),
+            ..Default::default()
+        };
+        st.current_height = available - fmt.total_height - 5.0;
+        assert!(
+            !should_defer_late_heading_before_list_and_wide_cell_tac(
+                &st,
+                &heading,
+                &fmt,
+                &narrow_paragraphs,
+                0,
+                available,
+                true,
+                None,
+            ),
+            "physically narrow following tables do not trigger the flowchart keep rule"
         );
     }
 
