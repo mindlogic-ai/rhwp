@@ -50,14 +50,40 @@ python3 harness/fidelity_category_status.py \
 - Real portrait corpus page-count status: 20/21 clean. The only current
   real page-count gap is `photo_form24`, Hancom `89` / RHWP `88`.
 
+Refresh after `b3986582` and `4c9f82d4`:
+
+```bash
+python3 harness/review_gallery.py /tmp/diff/_review_all_nonlandscape_latest_2026-06-08 \
+  --all --skip-landscape --export-current
+python3 harness/audit_review_gallery.py /tmp/diff/_review_all_nonlandscape_latest_2026-06-08
+```
+
+- Fresh review HTML: `/tmp/diff/_review_all_nonlandscape_latest_2026-06-08/index.html`.
+- Gallery audit: pass, no truncation/aspect issues across 22 docs.
+- Current non-landscape rendered set is page-count clean: 21/21 real docs match
+  Hancom page counts. `meeting_summary_font_fallback` remains a derived
+  experiment directory with `RHWP=0` and is excluded from real corpus status.
+- Remaining blockers are now visual/semantic-anchor drift rather than simple
+  total page-count drift.
+- Board-derived visual-drift ranking flags:
+  - `09_3766093_natural_sci_planning_committee_260527` pages 49-50: same
+    total page count but wrong internal page pairing around the NEXT Lab report.
+  - `photo_form24` pages 50-52 and 66-69: mostly same-page picture/table scale
+    and vertical geometry drift.
+  - `13_3763367_k_star_visa_track_plan` page 4: flowchart/table geometry and
+    overlapping text drift.
+  - `overseas_training` page 1: table/font/rule density drift with stable
+    semantics.
+
 ## Current Category Decisions
 
 | category | representative docs | status | before/after | remaining risk | ship/block | next command |
 |---|---|---|---|---|---|---|
 | Cover/body title-band semantic split | `05_3781559_medschool_car_2bu_je_plan` | accepted-semantic | RHWP `3 -> 4` pages vs Hancom `4`; page 1 no longer leaks body title band, page 2 starts with title band + `□ 추진 배경` | cover geometry/font/table-stroke drift remains; this is not a text/raster or cover-position fix | not a semantic blocker; keep as guard for cover/body page split | open `/tmp/diff/_review_fresh_comparable_post_cover_fix_2026-06-08/05_3781559_medschool_car_2bu_je_plan/index.html` |
 | Form tail before explicit form page | `form_11_응시원서_자기소개서_48KB` | accepted-semantic | RHWP `2 -> 3` pages vs Hancom `3`; final note moves to sparse page 2 and `자기소개서` starts page 3 | table/rule/font density still differs; this is not a raster appearance fix | not a semantic blocker; keep as guard for HWPX form tail/page-break split | open `/tmp/diff/_review_fresh_comparable_tail_overflow_debug_2026-06-08/form_11_응시원서_자기소개서_48KB/index.html` |
-| Photo/table page-count drift | `photo_form24` | accepted-local/probe-open | Tail-guard combo keeps the one-line tail before the explicit title-table page break and defers the following late heading/spacer/CELL TAC table. The next accepted local fix preserves the Hancom blank page before the `유학생 특화형` explicit top-reset paragraph and applies a narrow near-top heading reset for the following `성과관리` subsection. The later contact-table fix moves the small contact/signoff CELL TAC table after the large performance table spacer tail onto its own page before the next explicit section title. The latest accepted local fix handles the exact two-bottom-spacer variant of the same small 2x3 CELL TAC contact table before an explicit section title, while rejecting one-spacer and long-spacer-without-large-table forms. Focus windows now align `󰊲 대학생 현장실습 안전관리 지원`, `󰊳 대학생 현장실습 성과관리`, the contact pages, `【 대학창업 활성화 】`, and `【 기술이전·사업화 활성화 】` through page 43. Total page count improves to Hancom `89` / RHWP `88`. Previous broader terminal-contact candidates reached `88/89` or `89/89` but inserted pages at the wrong visual location and remain rejected. | remaining issue starts at the later `AI 교육지원센터` section; page count alone is not a safe acceptance signal. Contact-table page geometry/rule/font weight still drifts visually. | open semantic blocker, first four drift windows locally improved and guarded | open `/tmp/diff/_review_photo_form24_pages_38_43_exact_two_spacer_contact_candidate_2026-06-08/index.html`; compare `python3 harness/page_heading_map.py photo_form24 --dump /tmp/diff/photo_form24/dump_pages_exact_two_spacer_contact_candidate_2026-06-08.txt --needle '【 기술이전·사업화 활성화 】' --needle '대학 산학연협력단지 조성' --needle '대학 창의적 자산 실용화 지원(BRIDGE) 사업 성과 확대' --needle '󰊳 우수성과 발굴·확산'` |
-| Large planning table/text drift | `09_3766093_natural_sci_planning_committee_260527` | accepted-semantic/page-count, visual-probe | Cached cell-vpos reset policy collapses the repeated-header minutes table from many tiny fragments; RHWP `57 -> 51` vs Hancom `51`; full non-landscape board keeps key guard counts | page 1 still has title/agenda geometry drift and font/shape overlap; this is not a full visual-fidelity fix | semantic page-count blocker cleared; keep as guard for repeated-header CELL tables with stale vpos resets | open `/tmp/diff/_review_all_nonlandscape_candidate_09_vpos_2026-06-08/09_3766093_natural_sci_planning_committee_260527/index.html` and focused `/tmp/diff/_review_09_agenda_keep_candidate_2026-06-08/index.html` |
+| Photo/table page-count drift | `photo_form24` | accepted-pagecount/visual-probe | Tail-guard combo keeps the one-line tail before the explicit title-table page break and defers the following late heading/spacer/CELL TAC table. The next accepted local fix preserves the Hancom blank page before the `유학생 특화형` explicit top-reset paragraph and applies a narrow near-top heading reset for the following `성과관리` subsection. The later contact-table fix moves the small contact/signoff CELL TAC table after the large performance table spacer tail onto its own page before the next explicit section title. The latest accepted local fix handles the exact two-bottom-spacer variant of the same small 2x3 CELL TAC contact table before an explicit section title, while rejecting one-spacer and long-spacer-without-large-table forms. Fresh all-nonlandscape board now renders Hancom `89` / RHWP `89`. | page count alone is not a safe acceptance signal. Picture/table scale, vertical geometry, contact-table rule/font weight, and possible section-anchor drift remain visible. Previous broader terminal-contact candidates reached `89/89` but inserted pages at the wrong visual location and remain rejected. | no longer a page-count blocker; keep as visual/anchor probe | open `/tmp/diff/_review_all_nonlandscape_latest_2026-06-08/photo_form24/index.html`; inspect pages 50-52 and 66-69 before changing Rust |
+| Same-count semantic-anchor drift | `09_3766093_natural_sci_planning_committee_260527` | probe | Cached cell-vpos reset policy collapses the repeated-header minutes table from many tiny fragments; RHWP `57 -> 51` vs Hancom `51`; fresh full board keeps total page count aligned. However page 50 pairs different content: Hancom is still on the prior image/table section while RHWP has already started the NEXT Lab report. | this is not solved by page count. Needs heading/anchor-map investigation around pages 44-50 and likely a structural split/keep rule, or classification as cumulative same-count drift if no local owner appears. | active next semantic probe candidate | open `/tmp/diff/_review_all_nonlandscape_latest_2026-06-08/09_3766093_natural_sci_planning_committee_260527/index.html`; inspect pages 49-50 and run a narrow heading map for NEXT Lab anchors |
+| Diagram/table geometry drift | `13_3763367_k_star_visa_track_plan` | probe | Page count is stable at 21/21, but page 4 flowchart/table geometry is visibly wrong: internal text overlaps, borders/line weights differ, and the diagram area is compressed. | likely structural in shape/table geometry; better patch target than global font/stroke tuning if source metadata gives a reusable discriminator. | active visual-layout probe candidate | open `/tmp/diff/_review_all_nonlandscape_latest_2026-06-08/13_3763367_k_star_visa_track_plan/index.html`; inspect page 4 with SVG geometry probes |
 | Page-count / semantic drift | `photo_122p_civil_defense`, `form_07`, `photo_w31`, `internship_plan` | accepted-semantic | civil-defense now 129/129 vs Hancom | visual drift remains on some pages | not a blocker if human review accepts semantic layout | `python3 harness/heading_drift_scan.py photo_122p_civil_defense --dump /tmp/diff/photo_122p_civil_defense/dump_pages_tail_group_candidate3.txt` |
 | Photo-grid / pre-grid | `photo_122p_civil_defense`, `photo_w31`, `15_3740450_research_admin_innovation_meeting_template` | accepted for semantic anchors, probe for visual | page anchors aligned on civil-defense | sizing, spacing, glyph/rule weight | guard, not active unless new semantic drift appears | open `/tmp/diff/_review_civil_defense_tail_group_candidate_2026-06-08/index.html` |
 | CellBreak carried rowspan | `accountability_eval` | probe-no-patch | page count 6/6; page 4 still misses lower band | owner is `rowspan_touched`; naive top-slice prototypes were no-op | not a current ship blocker if acceptable visually; keep as known risk | `python3 harness/svg_geometry_probe.py accountability_eval:4` |
@@ -97,11 +123,12 @@ python3 harness/fidelity_category_status.py \
 2. Treat `05_3781559_medschool_car_2bu_je_plan`, `form_11_응시원서_자기소개서_48KB`,
    and civil-defense as `accepted-semantic, visual-drift-remaining` unless
    human review finds a production-blocking layout issue.
-3. For render fidelity, continue the next unresolved non-landscape mismatch:
-   `photo_form24` page-count drift (`89/88`) as the primary under-height
-   representative, but gate on heading-map alignment before page count. Keep
-   `09_3766093...` (`51/51` after cached-vpos policy) as the opposite-direction
-   guard against broad spacing/table-height tweaks.
+3. For render fidelity, do not chase total page count next; the fresh
+   non-landscape board is page-count clean. Continue with either:
+   - `09_3766093...` pages 49-50 as same-count semantic-anchor drift; or
+   - `13_3763367...` page 4 as structural diagram/table geometry drift.
+   Keep `photo_form24`, `photo_w31`, and `overseas_training` as visual guards
+   against broad scale/font/stroke tweaks.
 4. Start export roundtrip harness if production editing/export is the priority.
 5. Otherwise start table-text-raster/backend fidelity, because that is now the
    largest remaining visual quality bucket.
