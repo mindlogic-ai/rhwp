@@ -65,6 +65,17 @@ python3 harness/fidelity_category_status.py \
 | Clean guard | `report_form` | guard | page count and visual score below drift threshold | none currently | pass | `python3 harness/fidelity_category_status.py --with-gallery report_form` |
 | Export roundtrip | exported HWPX from edited docs | not-started | no gate yet | exported file may not reopen faithfully | blocker before editor production | define roundtrip harness with Hancom/RHWP reopen |
 
+## Rejected Probes
+
+- `photo_form24` title-table contact probe after `b3986582`: allowing a long
+  blank-tail 2x3 CELL TAC contact table to move when the following explicit
+  paragraph contains a 1-row TAC title table fixed the `AI 교육지원센터` section
+  and made total page count `89/89`, but it shifted Hancom pages 66-70 one page
+  late (`+1`) and the focused page 60-68 board paired unrelated content on page
+  66. Rejected; the remaining issue is not safely solved by another broad
+  contact-table deferral. Next structural owner is the large table/appendix
+  split around `pi1107` through `pi1116`.
+
 ## Run Policy
 
 1. Pick one row above.
