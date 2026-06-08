@@ -692,6 +692,7 @@ fn should_move_late_tail_before_explicit_page_break(
     if !next_forces_page {
         return false;
     }
+    let body_height = st.layout.body_area.height;
     let follows_tac_topbottom_table = st
         .current_items
         .last()
@@ -718,10 +719,76 @@ fn should_move_late_tail_before_explicit_page_break(
                         )
             )
         });
-    if follows_tac_topbottom_table && next_para.controls.is_empty() && fmt.height_for_fit <= 20.0 {
+    let page_has_tac_topbottom = page_has_tac_topbottom_table(&st.current_items, paragraphs);
+    let tac_form_saved_overflow_tail =
+        if page_has_tac_topbottom && next_para.controls.is_empty() && fmt.height_for_fit <= 20.0 {
+            let saved_bottom = para
+                .line_segs
+                .last()
+                .map(|seg| {
+                    hwpunit_to_px(
+                        seg.vertical_pos
+                            .saturating_add(seg.line_height)
+                            .saturating_add(seg.line_spacing),
+                        DEFAULT_DPI,
+                    )
+                })
+                .unwrap_or(0.0);
+            let following_full_page_cell_tac =
+                paragraphs.get(para_idx + 2).is_some_and(|after_break| {
+                    after_break.controls.iter().any(|control| {
+                        matches!(
+                            control,
+                            Control::Table(table)
+                                if table.common.treat_as_char
+                                    && matches!(
+                                        table.common.text_wrap,
+                                        crate::model::shape::TextWrap::TopAndBottom
+                                    )
+                                    && matches!(
+                                        table.hwpx_page_break,
+                                        Some(crate::model::table::HwpxTablePageBreak::Cell)
+                                    )
+                                    && table.row_count >= 2
+                                    && hwpunit_to_px(table.common.height as i32, DEFAULT_DPI)
+                                        > st.layout.body_area.height * 0.70
+                        )
+                    })
+                });
+            saved_bottom > st.layout.body_area.height + 0.5 && following_full_page_cell_tac
+        } else {
+            false
+        };
+    if follows_tac_topbottom_table
+        && next_para.controls.is_empty()
+        && fmt.height_for_fit <= 20.0
+        && !tac_form_saved_overflow_tail
+    {
         return false;
     }
-    let body_height = st.layout.body_area.height;
+    let saved_remaining = para
+        .line_segs
+        .last()
+        .map(|seg| {
+            body_height
+                - hwpunit_to_px(
+                    seg.vertical_pos
+                        .saturating_add(seg.line_height)
+                        .saturating_add(seg.line_spacing),
+                    DEFAULT_DPI,
+                )
+        })
+        .unwrap_or_else(|| body_height - (st.current_height + fmt.height_for_fit));
+    if tac_form_saved_overflow_tail {
+        return st.col_count == 1
+            && visible_text
+            && para.controls.is_empty()
+            && fmt.line_heights.len() == 1
+            && !st.current_items.is_empty()
+            && st.current_height > body_height * 0.90
+            && st.current_height + fmt.height_for_fit <= body_height + 12.0
+            && saved_remaining < -0.5;
+    }
     let next_is_explicit_title_table = next_para.controls.iter().any(|control| {
         if let Control::Table(table) = control {
             table.common.treat_as_char
@@ -761,19 +828,6 @@ fn should_move_late_tail_before_explicit_page_break(
 
     let after_tail = st.current_height + fmt.height_for_fit;
     let remaining_after_tail = body_height - after_tail;
-    let saved_remaining = para
-        .line_segs
-        .last()
-        .map(|seg| {
-            body_height
-                - hwpunit_to_px(
-                    seg.vertical_pos
-                        .saturating_add(seg.line_height)
-                        .saturating_add(seg.line_spacing),
-                    DEFAULT_DPI,
-                )
-        })
-        .unwrap_or(remaining_after_tail);
     st.col_count == 1
         && visible_text
         && para.controls.is_empty()
@@ -8739,7 +8793,7 @@ mod tests {
     fn late_one_line_tail_before_explicit_page_break_moves_to_tail_page() {
         use crate::model::control::Control;
         use crate::model::shape::TextWrap;
-        use crate::model::table::Table;
+        use crate::model::table::{HwpxTablePageBreak, Table};
 
         let page_def = a4_page_def();
         let col_def = ColumnDef::default();
@@ -8893,6 +8947,74 @@ mod tests {
                 true
             ),
             "a form footer note after TAC tables should stay with those forms before the next full-page form"
+        );
+
+        let overflow_tail = Paragraph {
+            text: "visible overflow note".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 69_000,
+                line_height: 1_000,
+                line_spacing: 500,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut previous_form_table = Table::default();
+        previous_form_table.row_count = 27;
+        previous_form_table.col_count = 8;
+        previous_form_table.common.treat_as_char = true;
+        previous_form_table.common.text_wrap = TextWrap::TopAndBottom;
+        previous_form_table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        previous_form_table.common.height = (body_height * 0.88 * 75.0) as u32;
+        let mut following_form_table = Table::default();
+        following_form_table.row_count = 2;
+        following_form_table.col_count = 1;
+        following_form_table.common.treat_as_char = true;
+        following_form_table.common.text_wrap = TextWrap::TopAndBottom;
+        following_form_table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        following_form_table.common.height = (body_height * 0.95 * 75.0) as u32;
+        let form_overflow_paras = vec![
+            Paragraph {
+                controls: vec![Control::Table(Box::new(previous_form_table))],
+                ..Default::default()
+            },
+            overflow_tail.clone(),
+            Paragraph {
+                text: "next form title".to_string(),
+                column_type: ColumnBreakType::Page,
+                ..Default::default()
+            },
+            Paragraph {
+                controls: vec![Control::Table(Box::new(following_form_table))],
+                ..Default::default()
+            },
+        ];
+        let mut form_overflow_st =
+            TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        form_overflow_st.current_height = body_height - 27.0;
+        form_overflow_st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        let overflow_note_fmt = FormattedParagraph {
+            total_height: 20.0,
+            line_heights: vec![13.3],
+            line_spacings: vec![6.7],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 20.0,
+        };
+        assert!(
+            should_move_late_tail_before_explicit_page_break(
+                &form_overflow_st,
+                &overflow_tail,
+                &overflow_note_fmt,
+                &form_overflow_paras,
+                1,
+                body_height,
+                true
+            ),
+            "a form note whose saved line bottom exceeds the body should move before the next explicit form page"
         );
 
         let mut guide_table = Table::default();

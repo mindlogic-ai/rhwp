@@ -24,6 +24,7 @@ pixel-perfect Hancom parity as the first production target.
 | category | representative docs | status | before/after | remaining risk | ship/block | next command |
 |---|---|---|---|---|---|---|
 | Cover/body title-band semantic split | `05_3781559_medschool_car_2bu_je_plan` | accepted-semantic | RHWP `3 -> 4` pages vs Hancom `4`; page 1 no longer leaks body title band, page 2 starts with title band + `□ 추진 배경` | cover geometry/font/table-stroke drift remains; this is not a text/raster or cover-position fix | not a semantic blocker; keep as guard for cover/body page split | open `/tmp/diff/_review_fresh_comparable_post_cover_fix_2026-06-08/05_3781559_medschool_car_2bu_je_plan/index.html` |
+| Form tail before explicit form page | `form_11_응시원서_자기소개서_48KB` | accepted-semantic | RHWP `2 -> 3` pages vs Hancom `3`; final note moves to sparse page 2 and `자기소개서` starts page 3 | table/rule/font density still differs; this is not a raster appearance fix | not a semantic blocker; keep as guard for HWPX form tail/page-break split | open `/tmp/diff/_review_fresh_comparable_tail_overflow_debug_2026-06-08/form_11_응시원서_자기소개서_48KB/index.html` |
 | Page-count / semantic drift | `photo_122p_civil_defense`, `form_07`, `photo_w31`, `internship_plan` | accepted-semantic | civil-defense now 129/129 vs Hancom | visual drift remains on some pages | not a blocker if human review accepts semantic layout | `python3 harness/heading_drift_scan.py photo_122p_civil_defense --dump /tmp/diff/photo_122p_civil_defense/dump_pages_tail_group_candidate3.txt` |
 | Photo-grid / pre-grid | `photo_122p_civil_defense`, `photo_w31`, `15_3740450_research_admin_innovation_meeting_template` | accepted for semantic anchors, probe for visual | page anchors aligned on civil-defense | sizing, spacing, glyph/rule weight | guard, not active unless new semantic drift appears | open `/tmp/diff/_review_civil_defense_tail_group_candidate_2026-06-08/index.html` |
 | CellBreak carried rowspan | `accountability_eval` | probe-no-patch | page count 6/6; page 4 still misses lower band | owner is `rowspan_touched`; naive top-slice prototypes were no-op | not a current ship blocker if acceptable visually; keep as known risk | `python3 harness/svg_geometry_probe.py accountability_eval:4` |
@@ -48,10 +49,14 @@ pixel-perfect Hancom parity as the first production target.
 
 ## Recommended Next Track
 
-1. Human-review `/tmp/diff/_review_fresh_comparable_post_cover_fix_2026-06-08/index.html`.
-2. Treat `05_3781559_medschool_car_2bu_je_plan` and civil-defense as
-   `accepted-semantic, visual-drift-remaining` unless human review finds a
-   production-blocking layout issue.
-3. Start export roundtrip harness if production editing/export is the priority.
-4. Otherwise start table-text-raster/backend fidelity, because that is now the
+1. Human-review `/tmp/diff/_review_fresh_comparable_tail_overflow_debug_2026-06-08/index.html`.
+2. Treat `05_3781559_medschool_car_2bu_je_plan`, `form_11_응시원서_자기소개서_48KB`,
+   and civil-defense as `accepted-semantic, visual-drift-remaining` unless
+   human review finds a production-blocking layout issue.
+3. For render fidelity, pick the next unresolved non-landscape mismatch:
+   `photo_form24` page-count drift (`89/86`) if image/table pagination is
+   priority, or `accountability_eval` page-4 lower-band clipping if table
+   fragment visual fidelity is priority.
+4. Start export roundtrip harness if production editing/export is the priority.
+5. Otherwise start table-text-raster/backend fidelity, because that is now the
    largest remaining visual quality bucket.
