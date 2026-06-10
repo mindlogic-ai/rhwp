@@ -116,3 +116,12 @@ EB Garamond는 Garamond(1592) 리바이벌로, MS Office Garamond(Monotype)의 �
 | HYSANB.TTF | HY산B | Hancom `UnlicenseFontList.ini` 등재 (HWP 번들 HY 서체) | webhwp EC2 WebHWP SDK `Shared/TTF/All/` |
 
 주의: 위 항목은 한컴이 자사 제품 내 임베딩 무제한으로 분류한 목록 기준. 자사 뷰어(rhwp) 서빙은 동일 사용 맥락이나, 차기 한컴 B2B 연락 시 서면 확인 1줄 받는 것을 권장. 같은 SDK의 윤고딕(HANYGO*/HANYoonGothic*)·맑은고딕·굴림 등은 해당 목록 미등재 또는 MS 소유로 **복사 금지**.
+
+### 한컴 윤고딕 (HWP 번들 Yoon 서체, 2026-06-10)
+
+| 파일명 | 폰트명 | 라이선스 근거 | 출처 |
+|--------|--------|---------|------|
+| HANYGO230/240/250.ttf | 한컴 윤고딕 230/240/250 | **2026-06-10 한컴 사용 허락 확보 (Jaeho)** | webhwp EC2 WebHWP SDK `Shared/TTF/All/` |
+| HANYoonGothic720/740/760.ttf | 한컴 윤고딕 720/740/760 | 동일 | 동일 |
+
+윤디자인 1XX/3XX 시리즈(-윤명조320 등)는 별개 — 윤디자인 직접 라이선스 필요, KoPub 폴백 유지.

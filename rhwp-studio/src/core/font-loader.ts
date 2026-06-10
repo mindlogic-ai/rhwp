@@ -100,7 +100,14 @@ const FONT_LIST: FontEntry[] = [
   { name: 'HY동녘M', file: 'fonts/HYDNKM.TTF', format: 'truetype' },
   { name: 'HY동녘B', file: 'fonts/HYDNKB.TTF', format: 'truetype' },
   { name: 'HY산B', file: 'fonts/HYSANB.TTF', format: 'truetype' },
-  // === 윤폰트 명시적 폴백 정책 (라이선스 확보 전까지; 윤명조→KoPub바탕, 윤고딕→KoPub돋움) ===
+  // === 한컴 윤고딕 (HWP 번들 Yoon 서체 — 2026-06-10 한컴 사용 허락 확보, webhwp SDK 원본) ===
+  { name: '한컴 윤고딕 230', file: 'fonts/HANYGO230.ttf', format: 'truetype' },
+  { name: '한컴 윤고딕 240', file: 'fonts/HANYGO240.ttf', format: 'truetype' },
+  { name: '한컴 윤고딕 250', file: 'fonts/HANYGO250.ttf', format: 'truetype' },
+  { name: '한컴 윤고딕 720', file: 'fonts/HANYoonGothic720.ttf', format: 'truetype' },
+  { name: '한컴 윤고딕 740', file: 'fonts/HANYoonGothic740.ttf', format: 'truetype' },
+  { name: '한컴 윤고딕 760', file: 'fonts/HANYoonGothic760.ttf', format: 'truetype' },
+  // === 윤폰트 명시적 폴백 정책 (윤디자인 1XX/3XX 시리즈 — 라이선스 확보 전까지; 윤명조→KoPub바탕, 윤고딕→KoPub돋움) ===
   { name: '-윤명조120', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
   { name: '-윤명조140', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
   { name: '-윤명조310', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
