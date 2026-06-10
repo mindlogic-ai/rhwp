@@ -94,9 +94,10 @@ def raster_svg_chromium(svg, png):
     target_h = max(1, round(src_h * target_w / src_w))
     html = (
         "<!doctype html><meta charset='utf-8'>"
-        "<style>html,body{margin:0;background:white;overflow:hidden}"
-        "img{display:block;width:100vw;height:100vh}</style>"
-        f"<img src='file://{os.path.abspath(svg)}'>"
+        "<style>html,body{margin:0;background:white}"
+        "body{display:inline-block}"
+        "img{display:block;width:100%;height:auto}</style>"
+        f"<img id='page' src='file://{os.path.abspath(svg)}' style='width:{target_w}px'>"
     )
     with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as f:
         f.write(html)
@@ -111,7 +112,16 @@ const [html, png, w, h] = process.argv.slice(1);
     deviceScaleFactor: 1,
   });
   await page.goto('file://' + html, { waitUntil: 'networkidle' });
-  await page.screenshot({ path: png, fullPage: false });
+  await page.locator('#page').evaluate(img => img.decode ? img.decode() : Promise.resolve());
+  const size = await page.evaluate(() => ({
+    width: Math.ceil(document.documentElement.scrollWidth),
+    height: Math.ceil(document.documentElement.scrollHeight),
+  }));
+  await page.setViewportSize({
+    width: Math.max(Number(w), size.width),
+    height: Math.max(Number(h), size.height),
+  });
+  await page.screenshot({ path: png, fullPage: true });
   await browser.close();
 })().catch(err => { console.error(err); process.exit(1); });
 """
