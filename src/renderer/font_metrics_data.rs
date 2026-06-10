@@ -87,7 +87,16 @@ fn resolve_metric_alias(name: &str) -> &str {
         "바탕" => "Batang", // 윈도우 TTF 바탕
         "맑은 고딕" => "Malgun Gothic",
         "나눔고딕" => "NanumGothic",
+        "나눔고딕 Light" | "NanumGothic Light" | "NanumGothicLight" => "NanumGothic Light",
+        "나눔고딕 Bold" | "NanumGothic Bold" => "NanumGothic",
+        "나눔고딕 ExtraBold" | "NanumGothic ExtraBold" | "NanumGothicExtraBold" => {
+            "NanumGothicExtraBold"
+        }
         "나눔명조" => "NanumMyeongjo",
+        "나눔명조 Bold" | "NanumMyeongjo Bold" => "NanumMyeongjo",
+        "나눔명조 ExtraBold" | "NanumMyeongjo ExtraBold" | "NanumMyeongjoExtraBold" => {
+            "NanumMyeongjoExtraBold"
+        }
         // 윈도우 시스템 폰트 (가변폭)
         "바탕체" => "BatangChe",
         "굴림" => "Gulim",
@@ -45898,6 +45907,22 @@ mod tests {
             let m = find_metric(name, false, false);
             assert!(m.is_some(), "{} 매핑 실패 (Noto Serif KR 기대)", name);
             assert_eq!(m.unwrap().metric.name, "Noto Serif KR");
+        }
+    }
+
+    #[test]
+    fn nanum_weight_aliases_map_to_bundled_metrics() {
+        for (name, expected) in &[
+            ("나눔고딕 ExtraBold", "NanumGothicExtraBold"),
+            ("NanumGothic ExtraBold", "NanumGothicExtraBold"),
+            ("NanumGothicExtraBold", "NanumGothicExtraBold"),
+            ("나눔명조 ExtraBold", "NanumMyeongjoExtraBold"),
+            ("NanumMyeongjo ExtraBold", "NanumMyeongjoExtraBold"),
+            ("NanumMyeongjoExtraBold", "NanumMyeongjoExtraBold"),
+        ] {
+            let m = find_metric(name, false, false);
+            assert!(m.is_some(), "{} 매핑 실패", name);
+            assert_eq!(m.unwrap().metric.name, *expected);
         }
     }
 

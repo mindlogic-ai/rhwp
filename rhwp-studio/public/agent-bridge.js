@@ -42,7 +42,16 @@
       try { window.parent && window.parent.postMessage(msg, '*'); } catch (e) {}
     }
     function safeParse(s) {
-      try { return JSON.parse(s); } catch { return { ok: false, raw: s }; }
+      try { return JSON.parse(s); }
+      catch (e) {
+        return {
+          ok: false,
+          raw: s,
+          raw_type: typeof s,
+          raw_string: String(s),
+          parse_error: e && e.message ? e.message : String(e),
+        };
+      }
     }
     function pathToCoords(path) {
       const m = /^s(\d+):p(\d+)(?::c(\d+))?$/.exec(path);
@@ -78,6 +87,8 @@
       return row * (colCount || 1) + col;
     }
     function refresh() {
+      cleanSinceLoad = false;
+      originalHwpxBytes = null;
       // Style mutations (applyCharFormat, etc.) update the doc tree but
       // do not invalidate the per-paragraph `<hp:linesegarray>` layout
       // cache. Rendering / export then uses stale vertpos values and
@@ -112,12 +123,17 @@
 
     // ── Agent-active flag — suppress user_edit during our own mutations ──
     let agentDepth = 0;
+    let cleanSinceLoad = false;
+    let originalHwpxBytes = null;
+    let originalFileName = null;
     async function withAgent(fn) {
       agentDepth++;
       try { return await fn(); } finally { agentDepth--; }
     }
     eventBus.on('document-changed', (reason) => {
       if (agentDepth > 0) return;
+      cleanSinceLoad = false;
+      originalHwpxBytes = null;
       // Skip our own re-render emissions (reason === 'agent-mutation' implies depth > 0;
       // user dialogs use other strings).
       const summary = typeof reason === 'string' ? reason : 'user edit';
@@ -381,10 +397,17 @@
             requestId,
           });
         });
+        const loadedName = fileName || 'document.hwp';
+        const sourceFormat = wasm.doc.getSourceFormat();
+        cleanSinceLoad = true;
+        originalFileName = loadedName;
+        originalHwpxBytes = sourceFormat === 'hwpx' || /\.hwpx$/i.test(loadedName)
+          ? new Uint8Array(bytes)
+          : null;
         return {
           page_count: wasm.doc.pageCount(),
-          source_format: wasm.doc.getSourceFormat(),
-          file_name: fileName || 'document.hwp',
+          source_format: sourceFormat,
+          file_name: loadedName,
         };
       },
 
@@ -1284,7 +1307,7 @@
           description = '',
         } = params;
 
-        // Prefer bytes-via-RPC. Server reads S3 → base64 → bridge → bytes,
+        // Prefer bytes-via-RPC. Server reads S3 -> base64 -> bridge -> bytes,
         // avoiding cross-origin fetch from the iframe. image_url stays as
         // a legacy fallback.
         let bytes, ext;
@@ -1400,23 +1423,40 @@
         let hwpVerify = null;
         if (fmt === 'hwp' && typeof doc.exportHwpVerify === 'function') {
           try { hwpVerify = safeParse(doc.exportHwpVerify()); }
-          catch (e) { hwpVerify = { ok: false, error: e.message }; }
+          catch (e) {
+            hwpVerify = {
+              ok: false,
+              error: e && e.message ? e.message : String(e),
+              error_type: typeof e,
+              error_name: e && e.name ? e.name : undefined,
+            };
+          }
         }
         const hwpVerifyFailed = fmt === 'hwp' && hwpVerify
           && (hwpVerify.ok === false || hwpVerify.recovered === false);
         if (hwpVerifyFailed && params.allow_unverified !== true) {
           throw new Error(`HWP export self-verify failed: ${JSON.stringify(hwpVerify)}`);
         }
+        const preserveOriginalHwpx = fmt === 'hwpx'
+          && params.force_reserialize !== true
+          && cleanSinceLoad
+          && originalHwpxBytes instanceof Uint8Array;
         // Belt-and-suspenders: a mutation handler that bypassed refresh()
         // would leave linesegarray stale and the export would bake those
         // stale vertpos values into the bytes (see rhwp #177). Reflow
         // here so persisted snapshots + user downloads always carry a
-        // fresh layout cache.
-        try { if (typeof doc.reflowLinesegs === 'function') doc.reflowLinesegs(); } catch {}
-        const bytes = fmt === 'hwpx' ? doc.exportHwpx() : doc.exportHwp();
+        // fresh layout cache. For unchanged HWPX, return the original package
+        // bytes instead: RHWP's HWPX serializer is not structure-preserving
+        // yet, and no-op export must not drop unsupported tables.
+        if (!preserveOriginalHwpx) {
+          try { if (typeof doc.reflowLinesegs === 'function') doc.reflowLinesegs(); } catch {}
+        }
+        const bytes = preserveOriginalHwpx
+          ? originalHwpxBytes
+          : (fmt === 'hwpx' ? doc.exportHwpx() : doc.exportHwp());
         // wasm.fileName is a getter (not getFileName()); the old check
         // silently fell back to 'document' so every export was named that.
-        const fileName = wasm.fileName || 'document.hwp';
+        const fileName = wasm.fileName || originalFileName || 'document.hwp';
         const baseName = fileName.replace(/\.[^.]+$/, '') || 'document';
         const fullName = `${baseName}.${fmt}`;
         // upload:false (user-clicked download) skips the server round-trip —
@@ -1425,14 +1465,14 @@
         // the network. Default (no flag) keeps the agent's upload-and-link
         // flow so chat replies can hand the user a clickable URL.
         if (params.upload === false) {
-          return { ok: true, file_name: fullName, bytes_len: bytes.length, hwp_verify: hwpVerify, bytes };
+          return { ok: true, file_name: fullName, bytes_len: bytes.length, hwp_verify: hwpVerify, preserved_original: preserveOriginalHwpx, bytes };
         }
         const blob = new Blob([bytes], { type: fmt === 'hwpx' ? 'application/hwp+zip' : 'application/x-hwp' });
         const formData = new FormData();
         formData.append('file', blob, fullName);
         const res = await fetch('/api/upload-export', { method: 'POST', body: formData });
         const data = await res.json();
-        return { ok: true, file_name: fullName, bytes_len: bytes.length, hwp_verify: hwpVerify, download_url: data.url };
+        return { ok: true, file_name: fullName, bytes_len: bytes.length, hwp_verify: hwpVerify, preserved_original: preserveOriginalHwpx, download_url: data.url };
       },
       async convertToEditable() {
         try { return safeParse(getDoc().convertToEditable()); }

@@ -9,28 +9,29 @@
 interface FontEntry {
   name: string;
   file: string;
-  /** woff2(기본) 또는 woff — CDN woff 파일용 */
-  format?: 'woff2' | 'woff';
+  /** woff2(기본), woff, 또는 원본 TTF 파일용 truetype */
+  format?: 'woff2' | 'woff' | 'truetype';
   /** CSS unicode-range — 지정 시 해당 코드포인트만 매칭, 다운로드도 해당 영역 사용 시에만 발생 */
   unicodeRange?: string;
 }
 
-// 함초롬체 CDN (눈누 jsdelivr — 비상업적 사용 허용, 한컴 라이선스)
-const CDN_HAMCHOB_R = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2104@1.0/HANBatang.woff';
-const CDN_HAMCHOB_B = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2104@1.0/HANBatangB.woff';
-const CDN_HAMCHOD_R = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_four@1.0/HCRDotum.woff';
-
 // 한컴 webhwp CSS(@font-face) 매핑 기준 + HWP 문서에서 사용하는 별칭
 const FONT_LIST: FontEntry[] = [
-  // === 함초롬/함초롱/한컴 폰트 (CDN 참조) ===
-  { name: '함초롬돋움', file: CDN_HAMCHOD_R, format: 'woff' },
-  { name: '함초롬바탕', file: CDN_HAMCHOB_R, format: 'woff' },
-  { name: '함초롱돋움', file: CDN_HAMCHOD_R, format: 'woff' },
-  { name: '함초롱바탕', file: CDN_HAMCHOB_R, format: 'woff' },
-  { name: '한컴돋움', file: CDN_HAMCHOD_R, format: 'woff' },
-  { name: '한컴바탕', file: CDN_HAMCHOB_R, format: 'woff' },
-  { name: '새돋움', file: CDN_HAMCHOD_R, format: 'woff' },
-  { name: '새바탕', file: CDN_HAMCHOB_R, format: 'woff' },
+  // === 함초롬/함초롱/한컴 폰트 (webhwp WebHWP SDK 동봉본 — Hancom UnlicenseFontList 등재) ===
+  { name: '함초롬돋움', file: 'fonts/HANDotum.ttf', format: 'truetype' },
+  { name: '함초롬돋움 Bold', file: 'fonts/HANDotumB.ttf', format: 'truetype' },
+  { name: '함초롬돋움 확장', file: 'fonts/HANDotumExt.ttf', format: 'truetype' },
+  { name: '함초롬바탕', file: 'fonts/HANBatang.ttf', format: 'truetype' },
+  { name: '함초롬바탕 Bold', file: 'fonts/HANBatangB.ttf', format: 'truetype' },
+  { name: '함초롬바탕 확장', file: 'fonts/HANBatangExt.ttf', format: 'truetype' },
+  { name: '함초롬바탕 확장B', file: 'fonts/HANBatangExtB.ttf', format: 'truetype' },
+  { name: '함초롬바탕 확장B Bold', file: 'fonts/HANBatangExtBB.ttf', format: 'truetype' },
+  { name: '함초롱돋움', file: 'fonts/HANDotum.ttf', format: 'truetype' },
+  { name: '함초롱바탕', file: 'fonts/HANBatang.ttf', format: 'truetype' },
+  { name: '한컴돋움', file: 'fonts/HANDotum.ttf', format: 'truetype' },
+  { name: '한컴바탕', file: 'fonts/HANBatang.ttf', format: 'truetype' },
+  { name: '새돋움', file: 'fonts/HANDotum.ttf', format: 'truetype' },
+  { name: '새바탕', file: 'fonts/HANBatang.ttf', format: 'truetype' },
   // === 한컴 HY 폰트 → 오픈소스 대체 ===
   { name: 'HY헤드라인M', file: 'fonts/NotoSansKR-Bold.woff2' },
   { name: 'HYHeadLine M', file: 'fonts/NotoSansKR-Bold.woff2' },
@@ -45,6 +46,8 @@ const FONT_LIST: FontEntry[] = [
   { name: 'HY신명조', file: 'fonts/NotoSerifKR-Regular.woff2' },
   { name: 'HY중고딕', file: 'fonts/NotoSansKR-Regular.woff2' },
   { name: '양재튼튼체B', file: 'fonts/NotoSansKR-Bold.woff2' },
+  { name: '휴먼명조', file: 'fonts/NanumMyeongjo-Regular.woff2' },
+  { name: '휴먼고딕', file: 'fonts/NanumGothic-Regular.woff2' },
   // === 한글 시스템 폰트 → 오픈소스 대체 (OS 폰트 없을 때 폴백) ===
   { name: 'Malgun Gothic', file: 'fonts/Pretendard-Regular.woff2' },
   { name: '맑은 고딕', file: 'fonts/Pretendard-Regular.woff2' },
@@ -58,9 +61,81 @@ const FONT_LIST: FontEntry[] = [
   { name: '궁서', file: 'fonts/GowunBatang-Regular.woff2' },
   { name: '궁서체', file: 'fonts/GowunBatang-Regular.woff2' },
   { name: '새궁서', file: 'fonts/GowunBatang-Regular.woff2' },
+  // === 경기천년체 (경기도 공식 배포, 로컬) ===
+  { name: '경기천년바탕', file: 'fonts/GyeonggiBatang-Regular.woff', format: 'woff' },
+  { name: '경기천년바탕 Regular', file: 'fonts/GyeonggiBatang-Regular.woff', format: 'woff' },
+  { name: '경기천년바탕 Bold', file: 'fonts/GyeonggiBatang-Bold.woff', format: 'woff' },
+  { name: '경기천년제목', file: 'fonts/GyeonggiTitle-Medium.woff', format: 'woff' },
+  { name: '경기천년제목 Light', file: 'fonts/GyeonggiTitle-Light.woff', format: 'woff' },
+  { name: '경기천년제목 Medium', file: 'fonts/GyeonggiTitle-Medium.woff', format: 'woff' },
+  { name: '경기천년제목 Bold', file: 'fonts/GyeonggiTitle-Bold.woff', format: 'woff' },
+  { name: '경기천년제목V', file: 'fonts/GyeonggiTitleV.woff', format: 'woff' },
+  { name: '경기천년제목V Bold', file: 'fonts/GyeonggiTitleV.woff', format: 'woff' },
+  // === KoPubWorld 원본 TTF (한국출판인회의 배포) ===
+  { name: 'KoPub돋움체 Light', file: 'fonts/KoPubWorld Dotum Light.ttf', format: 'truetype' },
+  { name: 'KoPub돋움체 Medium', file: 'fonts/KoPubWorld Dotum Medium.ttf', format: 'truetype' },
+  { name: 'KoPub돋움체 Bold', file: 'fonts/KoPubWorld Dotum Bold.ttf', format: 'truetype' },
+  { name: 'KoPub바탕체 Light', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
+  { name: 'KoPub바탕체 Bold', file: 'fonts/KoPubWorld Batang Bold.ttf', format: 'truetype' },
+  { name: 'KoPubWorld돋움체 Light', file: 'fonts/KoPubWorld Dotum Light.ttf', format: 'truetype' },
+  { name: 'KoPubWorld돋움체 Medium', file: 'fonts/KoPubWorld Dotum Medium.ttf', format: 'truetype' },
+  { name: 'KoPubWorld돋움체 Bold', file: 'fonts/KoPubWorld Dotum Bold.ttf', format: 'truetype' },
+  { name: 'KoPubWorld바탕체 Light', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
+  { name: 'KoPubWorld바탕체 Bold', file: 'fonts/KoPubWorld Batang Bold.ttf', format: 'truetype' },
+  // === EBS 주시경체 원본 TTF (EBS 공식 배포) ===
+  { name: 'EBS전용서체-L', file: 'fonts/EBS-Jusigyeong-L.ttf', format: 'truetype' },
+  { name: 'EBS주시경 Light', file: 'fonts/EBS-Jusigyeong-L.ttf', format: 'truetype' },
+  { name: 'EBSJSK Light', file: 'fonts/EBS-Jusigyeong-L.ttf', format: 'truetype' },
+  // === Garamond → EB Garamond (OFL, Garamond 호환 리바이벌, 로컬) ===
+  { name: 'Garamond', file: 'fonts/EBGaramond-Regular.ttf', format: 'truetype' },
+  // === 한컴/HY 번들 서체 (webhwp WebHWP SDK 동봉본 — Hancom UnlicenseFontList 등재) ===
+  { name: '한컴 고딕', file: 'fonts/Hancom Gothic Regular.ttf', format: 'truetype' },
+  { name: 'Hancom Gothic', file: 'fonts/Hancom Gothic Regular.ttf', format: 'truetype' },
+  { name: '한컴 고딕 Bold', file: 'fonts/Hancom Gothic Bold.ttf', format: 'truetype' },
+  { name: 'HY수평선M', file: 'fonts/HYSUPM.TTF', format: 'truetype' },
+  { name: 'HY수평선B', file: 'fonts/HYSUPB.TTF', format: 'truetype' },
+  { name: 'HY울릉도M', file: 'fonts/HYWULM.TTF', format: 'truetype' },
+  { name: 'HY울릉도B', file: 'fonts/HYWULB.TTF', format: 'truetype' },
+  { name: 'HY태백B', file: 'fonts/HYTBRB.TTF', format: 'truetype' },
+  { name: 'HY동녘M', file: 'fonts/HYDNKM.TTF', format: 'truetype' },
+  { name: 'HY동녘B', file: 'fonts/HYDNKB.TTF', format: 'truetype' },
+  { name: 'HY산B', file: 'fonts/HYSANB.TTF', format: 'truetype' },
+  // === 윤폰트 명시적 폴백 정책 (라이선스 확보 전까지; 윤명조→KoPub바탕, 윤고딕→KoPub돋움) ===
+  { name: '-윤명조120', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
+  { name: '-윤명조140', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
+  { name: '-윤명조310', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
+  { name: '-윤명조320', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
+  { name: '-윤명조330', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
+  { name: '-윤명조340', file: 'fonts/KoPubWorld Batang Bold.ttf', format: 'truetype' },
+  { name: '-윤명조350', file: 'fonts/KoPubWorld Batang Bold.ttf', format: 'truetype' },
+  { name: '-윤고딕120', file: 'fonts/KoPubWorld Dotum Light.ttf', format: 'truetype' },
+  { name: '-윤고딕130', file: 'fonts/KoPubWorld Dotum Light.ttf', format: 'truetype' },
+  { name: '-윤고딕320', file: 'fonts/KoPubWorld Dotum Medium.ttf', format: 'truetype' },
+  { name: '-윤고딕330', file: 'fonts/KoPubWorld Dotum Medium.ttf', format: 'truetype' },
+  { name: '-윤고딕340', file: 'fonts/KoPubWorld Dotum Bold.ttf', format: 'truetype' },
+  { name: 'Yoon가변 윤명조 320_TT', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
+  { name: 'Yoon가변 윤고딕 140_TT', file: 'fonts/KoPubWorld Dotum Light.ttf', format: 'truetype' },
+  { name: 'Yoon가변 윤고딕 320_TT', file: 'fonts/KoPubWorld Dotum Medium.ttf', format: 'truetype' },
+  { name: 'Yoon가변 윤고딕 330_TT', file: 'fonts/KoPubWorld Dotum Medium.ttf', format: 'truetype' },
+  // === 기타 미보유 서체 폴백 ===
+  { name: '휴먼둥근헤드라인', file: 'fonts/NotoSansKR-Bold.woff2' },
+  { name: '순천향체', file: 'fonts/KoPubWorld Batang Light.ttf', format: 'truetype' },
   // === 나눔 폰트 (OFL, 로컬) ===
   { name: '나눔고딕', file: 'fonts/NanumGothic-Regular.woff2' },
+  { name: '나눔고딕 Light', file: 'fonts/NanumGothic-Light.woff2' },
+  { name: '나눔고딕 Bold', file: 'fonts/NanumGothic-Bold.woff2' },
+  { name: '나눔고딕 ExtraBold', file: 'fonts/NanumGothic-ExtraBold.woff2' },
+  { name: 'NanumGothic Light', file: 'fonts/NanumGothic-Light.woff2' },
+  { name: 'NanumGothicLight', file: 'fonts/NanumGothic-Light.woff2' },
+  { name: 'NanumGothic Bold', file: 'fonts/NanumGothic-Bold.woff2' },
+  { name: 'NanumGothic ExtraBold', file: 'fonts/NanumGothic-ExtraBold.woff2' },
+  { name: 'NanumGothicExtraBold', file: 'fonts/NanumGothic-ExtraBold.woff2' },
   { name: '나눔명조', file: 'fonts/NanumMyeongjo-Regular.woff2' },
+  { name: '나눔명조 Bold', file: 'fonts/NanumMyeongjo-Bold.woff2' },
+  { name: '나눔명조 ExtraBold', file: 'fonts/NanumMyeongjo-ExtraBold.woff2' },
+  { name: 'NanumMyeongjo Bold', file: 'fonts/NanumMyeongjo-Bold.woff2' },
+  { name: 'NanumMyeongjo ExtraBold', file: 'fonts/NanumMyeongjo-ExtraBold.woff2' },
+  { name: 'NanumMyeongjoExtraBold', file: 'fonts/NanumMyeongjo-ExtraBold.woff2' },
   { name: '나눔고딕코딩', file: 'fonts/NanumGothicCoding-Regular.woff2' },
   // === 영문 폰트 → OS 폴백 (번들 제거) ===
   { name: 'Palatino Linotype', file: 'fonts/NotoSerifKR-Regular.woff2' },
