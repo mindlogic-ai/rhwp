@@ -404,3 +404,209 @@ partial-table text-flow/width accounting in RHWP.
 - Treat the stale `11/4` manifest as a valid target for this staged source.
 - Claim production readiness from the current fitter: Hancom-fitted is 11 pages
   while rhwp-fitted is 5 pages.
+
+## 2026-06-07 Current Recheck
+
+The page-count part of this target has changed in the current accepted renderer
+state.
+
+Fresh current dump:
+
+```text
+docker compose --env-file .env.docker run --rm -v /tmp/diff:/diff dev \
+  /app/target/release/rhwp dump-pages /diff/accountability_eval_fitted_oracle/source.hwpx
+문서 로드: /diff/accountability_eval_fitted_oracle/source.hwpx (11페이지)
+```
+
+Current split sequence:
+
+```text
+rows=0..5
+rows=5..9
+rows=9..12
+rows=12..15
+rows=15..19
+rows=19..22
+rows=22..25
+rows=25..28
+rows=28..32
+rows=32..36
+rows=36..38
+```
+
+Fresh drift check:
+
+```text
+python3 harness/drift.py /tmp/diff/accountability_eval_fitted_oracle
+== accountability_eval_fitted_oracle: hancom=11p rhwp=11p first_divergence=p1
+```
+
+So the old statement "Hancom-fitted is 11 pages while rhwp-fitted is 5 pages"
+is no longer true for the current code. The remaining issue is visual fidelity
+inside the table: RHWP still renders denser/smaller cell text than Hancom on
+page 1, and line counts differ (`h_lines=44`, `r_lines=33` on page 1). Treat
+this as a table-cell typography/composition fidelity class, not as the previous
+table split/page-count blocker.
+
+Fresh gallery:
+
+```text
+python3 harness/review_gallery.py /tmp/diff/_review_accountability_fitted_oracle_2026-06-07 accountability_eval_fitted_oracle --export-current
+python3 harness/audit_review_gallery.py /tmp/diff/_review_accountability_fitted_oracle_2026-06-07
+PASS: no gallery truncation/aspect issues across 1 doc(s)
+```
+
+The gallery audit was updated to avoid false-positive `suspicious-short`
+failures on valid two-column landscape table pages. The old failure class was
+very-wide three-column qlmanage strips around `2304x1103`; the refreshed
+two-column table strips are landscape by document geometry, not truncated.
+
+Validation caveat:
+
+```text
+bash harness/gate.sh --no-build
+[gate] docs=9 improved=0 regressed=0 new_overflow=0
+```
+
+This is not the earlier 151-doc full corpus gate because the current
+`/tmp/diff` staging area only contains 9 source files. Use it only as a local
+staged-source safety check until the full fixture corpus is restored.
+
+## 2026-06-07 Continuation-Table Probe
+
+`repeatHeader=1` with row-0 cells serialized as `header=0` looked suspicious
+because Hancom continuation pages show a narrow top strip. A structural probe
+treated row 0 as an inferred repeated header when no explicit header cells were
+present.
+
+Result: **REVERTED / not landable**.
+
+- Page count stayed 11.
+- Visual fidelity got worse: RHWP repeated the column-heading text (`분류1`,
+  `분류2`, ...) on continuation pages where Hancom's narrow strip is not that
+  header row.
+- Conclusion: this is not a repeat-header inference bug.
+
+Current structural evidence from the new table-fragment diagnostic:
+
+```bash
+python3 harness/table_fragment_diag.py /tmp/diff/accountability_eval_fitted_oracle
+```
+
+Key fragments:
+
+- page 05: `rows=15..19`, `carried=0`; row 15 is an intentional blank
+  separator row, followed by 조직 운영 / 운영시스템 / 고충처리체계 rows.
+- page 11: `rows=36..38`, `carried=0`; the final two source rows render after
+  the last blank separator/page group.
+- SVG row bands confirm RHWP is emitting table geometry for those fragments;
+  this is not gallery truncation and not a missing-image issue.
+
+Next hypothesis:
+
+- The remaining defect is table-cell row-band height / line-density fidelity
+  under `pageBreak=CELL`, rowspans, and cached `lineSegArray`, not page count,
+  repeat header, or missing images.
+- The next safe probe should compare Hancom-visible row bands against
+  `row_cut_content_height`, `cell_units`, `calc_para_lines_height`, and the
+  use of cached line-seg line height/spacing for cell paragraphs.
+- Do not patch `repeatHeader` for this fixture.
+
+## 2026-06-07 Font/Ink-Density Evidence
+
+After adding `saved_line_segs`, `svg_text_y`, and `svg_fonts` to
+`harness/table_fragment_diag.py`, the line-density hypothesis became weaker:
+
+- In a representative page-5 cell (`row=18 col=8`), HWPX lineSegs are spaced
+  at `vertpos=0,1280,2560,3840,5120` HU.
+- RHWP SVG emits that same cell at y positions `526.1,543.1,560.2,577.3,594.3`,
+  i.e. ~17px pitch, which is exactly `1280 HU @ 96 dpi`.
+- SVG body-cell text is `font-size=10.666666666666666` (8pt) and no
+  `font-weight`, matching `charPr id=8 height=800 bold=false`.
+
+But the rendered RHWP PNG has much less dark ink than the Hancom PNG:
+
+```text
+p1:  hancom_dark=41823 rhwp_dark=20635 ratio=0.49
+p5:  hancom_dark=35100 rhwp_dark=12833 ratio=0.37
+p11: hancom_dark=21568 rhwp_dark=10788 ratio=0.50
+```
+
+`table_fragment_diag.py` now also reports:
+
+```text
+font_hint=primary Malgun font not found locally; browser/PDF fallback may be thinner
+```
+
+Current conclusion:
+
+- Do not tune row heights just to compensate for faint text; the saved line
+  pitch is already respected in sampled cells.
+- Do not globally force `맑은 고딕` to `font-weight=500`; the existing
+  medium-weight rule intentionally excludes normal Malgun Gothic.
+- A safe next test is environmental/font-path validation: render the same SVG
+  with a real Malgun Gothic or Hancom-compatible webfont available, then compare
+  ink density before changing Rust layout.
+
+## 2026-06-07 Font-Audit Harness
+
+`harness/table_fragment_diag.py` now has a read-only `--font-audit` mode:
+
+```bash
+python3 harness/table_fragment_diag.py \
+  /tmp/diff/accountability_eval_fitted_oracle \
+  --font-audit --pages 1,5,11
+```
+
+Latest output from the current artifacts:
+
+```text
+p01: hancom_dark=36449 rhwp_dark=16785 ratio=0.46
+p05: hancom_dark=30846 rhwp_dark=10276 ratio=0.33
+p11: hancom_dark=18913 rhwp_dark=8487  ratio=0.45
+```
+
+The page images are essentially the same raster size
+(`Hancom=1404x992`, `RHWP=1400x994`), so this is not a gallery scaling artifact.
+The SVG still declares primary `맑은 고딕`/`Malgun Gothic`, 8pt body text, and no
+normal-cell `font-weight`.
+
+Stop condition for this category:
+
+- P3 `accountability_eval` is **not production-faithful yet**.
+- The remaining concrete defect is now best classified as **font/ink-density
+  fidelity**, not page-count drift, repeated-header inference, row-split order,
+  or missing gallery evidence.
+- The next renderer-adjacent experiment should install/provide the intended
+  Korean font or render with a Hancom-compatible webfont and compare this same
+  audit before making any Rust layout change.
+
+The diagnostic also supports a disposable CSS weight probe:
+
+```bash
+python3 harness/table_fragment_diag.py \
+  /tmp/diff/accountability_eval_fitted_oracle \
+  --weight-probe 500 --pages 1,5,11
+python3 harness/table_fragment_diag.py \
+  /tmp/diff/accountability_eval_fitted_oracle \
+  --weight-probe 600 --pages 1,5,11
+```
+
+Results:
+
+```text
+weight=500:
+  p01 ratio=0.53
+  p05 ratio=0.38
+  p11 ratio=0.53
+
+weight=600:
+  p01 ratio=0.62
+  p05 ratio=0.46
+  p11 ratio=0.63
+```
+
+This improves text darkness but still leaves the worst table page far from
+Hancom. That argues against landing a broad `font-weight:500`/`600` renderer
+rule as the fix. The safer path is font-face parity first, then only consider a
+narrow font policy if real-font rendering still under-shoots Hancom.
