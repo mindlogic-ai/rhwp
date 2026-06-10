@@ -196,6 +196,8 @@ fn test_document_with_paragraphs() {
             },
         ],
         raw_stream: None,
+        hwpx_section_xml: None,
+        hwpx_sec_pr_xml: None,
     });
     doc.set_document(document);
 
@@ -404,6 +406,8 @@ fn create_doc_with_table() -> HwpDocument {
         },
         paragraphs: vec![parent_para],
         raw_stream: None,
+        hwpx_section_xml: None,
+        hwpx_sec_pr_xml: None,
     });
     doc.set_document(document);
     doc

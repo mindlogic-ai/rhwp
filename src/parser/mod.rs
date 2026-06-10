@@ -299,8 +299,11 @@ fn parse_hwp_with_cfb(
     // 자동 번호 할당 (문서 전체에서 순차적으로)
     assign_auto_numbers(&mut doc);
 
-    // [Task #554] HWP3 → HWP5 변환본 식별 + page_def margin_bottom 보정
-    apply_hwp3_origin_fixup(&mut doc);
+    // [Task #554] HWP3 → HWP5 변환본 식별 + page_def margin_bottom 보정.
+    // Low ParaShape/CharShape ratios alone also occur in modern generated HWP
+    // exports, so require independent HWP3-era summary evidence before applying
+    // the destructive margin rewrite.
+    apply_hwp3_origin_fixup(&mut doc, summary_hwp3_era);
 
     // [Task #1001] HwpSummary HWP3 시대 년 AND PS/CS 비율 작음 → 변환본 확정.
     // 두 신호 결합으로 false positive 차단 (exam_eng 등 일반 HWP5 가 본문에
@@ -425,7 +428,11 @@ fn fixup_line_segs_for_variant(paragraphs: &mut [crate::model::paragraph::Paragr
     }
 }
 
-fn apply_hwp3_origin_fixup(doc: &mut Document) {
+fn apply_hwp3_origin_fixup(doc: &mut Document, summary_hwp3_era: bool) {
+    if !summary_hwp3_era {
+        return;
+    }
+
     let total_paragraphs: usize = doc.sections.iter().map(|s| s.paragraphs.len()).sum();
     if total_paragraphs <= 50 {
         return;
@@ -568,9 +575,10 @@ fn parse_hwp_with_lenient(
 
     assign_auto_numbers(&mut doc);
 
-    // [Task #554] HWP3 → HWP5 변환본 식별 + page_def margin_bottom 보정
-    // [Task #1001] 변환본 식별 시 doc.is_hwp3_variant = true 설정
-    apply_hwp3_origin_fixup(&mut doc);
+    // [Task #554] HWP3 → HWP5 변환본 식별 + page_def margin_bottom 보정.
+    // The lenient reader path does not expose the summary detector; avoid
+    // ratio-only false positives on modern generated HWP exports.
+    apply_hwp3_origin_fixup(&mut doc, false);
 
     // [Task #873] BinData Link 타입 의 외부 file path 영역 Picture.external_path 전달.
     // 이후 model::document::populate_external_images_from_dir (Task #741) 가 같은
@@ -1316,6 +1324,35 @@ mod tests {
             doc.sections.len() > 0,
             "Document should have at least one section"
         );
+    }
+
+    #[test]
+    fn hwp3_origin_margin_fixup_requires_summary_era_evidence() {
+        use crate::model::document::{Document, Section, SectionDef};
+        use crate::model::page::PageDef;
+        use crate::model::paragraph::Paragraph;
+        use crate::model::style::{CharShape, ParaShape};
+
+        let mut doc = Document::default();
+        doc.doc_info.para_shapes = vec![ParaShape::default()];
+        doc.doc_info.char_shapes = vec![CharShape::default()];
+        doc.sections.push(Section {
+            section_def: SectionDef {
+                page_def: PageDef {
+                    margin_bottom: 4252,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            paragraphs: vec![Paragraph::default(); 100],
+            ..Default::default()
+        });
+
+        apply_hwp3_origin_fixup(&mut doc, false);
+        assert_eq!(doc.sections[0].section_def.page_def.margin_bottom, 4252);
+
+        apply_hwp3_origin_fixup(&mut doc, true);
+        assert_eq!(doc.sections[0].section_def.page_def.margin_bottom, 2652);
     }
 
     #[test]

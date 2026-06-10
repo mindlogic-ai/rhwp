@@ -23,7 +23,7 @@ use crate::model::shape::{
     VertRelTo,
 };
 
-use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
+use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs, xml_escape};
 use super::SerializeError;
 
 // =====================================================================
@@ -65,6 +65,7 @@ pub fn write_rect<W: Write>(
     write_sz(w, c)?;
     write_pos(w, c)?;
     write_out_margin(w, c)?;
+    write_shape_comment(w, c)?;
 
     // drawText: 글상자 내부 문단
     if let Some(ref tb) = rect.drawing.text_box {
@@ -118,6 +119,7 @@ pub fn write_line<W: Write>(w: &mut Writer<W>, line: &LineShape) -> Result<(), S
     write_sz(w, c)?;
     write_pos(w, c)?;
     write_out_margin(w, c)?;
+    write_shape_comment(w, c)?;
 
     end_tag(w, "hp:line")?;
     Ok(())
@@ -156,6 +158,7 @@ pub fn write_container_open<W: Write>(
     write_sz(w, common)?;
     write_pos(w, common)?;
     write_out_margin(w, common)?;
+    write_shape_comment(w, common)?;
 
     Ok(())
 }
@@ -291,6 +294,8 @@ fn write_sz<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), Serial
 
 fn write_pos<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), SerializeError> {
     let treat = bool01(c.treat_as_char);
+    let flow = bool01(c.flow_with_text);
+    let overlap = bool01(c.allow_overlap);
     let vert_offset = c.vertical_offset.to_string();
     let horz_offset = c.horizontal_offset.to_string();
     empty_tag(
@@ -299,8 +304,8 @@ fn write_pos<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), Seria
         &[
             ("treatAsChar", treat),
             ("affectLSpacing", "0"),
-            ("flowWithText", "1"),
-            ("allowOverlap", "0"),
+            ("flowWithText", flow),
+            ("allowOverlap", overlap),
             ("holdAnchorAndSO", "0"),
             ("vertRelTo", vert_rel_to_str(c.vert_rel_to)),
             ("horzRelTo", horz_rel_to_str(c.horz_rel_to)),
@@ -322,6 +327,24 @@ fn write_out_margin<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<()
         "hp:outMargin",
         &[("left", &l), ("right", &r), ("top", &t), ("bottom", &b)],
     )
+}
+
+fn write_shape_comment<W: Write>(
+    w: &mut Writer<W>,
+    c: &CommonObjAttr,
+) -> Result<(), SerializeError> {
+    if c.description.is_empty() {
+        return Ok(());
+    }
+    w.get_mut()
+        .write_all(
+            format!(
+                "<hp:shapeComment>{}</hp:shapeComment>",
+                xml_escape(&c.description)
+            )
+            .as_bytes(),
+        )
+        .map_err(|e| SerializeError::XmlError(e.to_string()))
 }
 
 fn bool01(b: bool) -> &'static str {
@@ -442,5 +465,31 @@ mod tests {
         assert!(xml.contains("<hp:sz "));
         assert!(xml.contains("<hp:pos "));
         assert!(xml.contains("<hp:outMargin "));
+    }
+
+    #[test]
+    fn rect_pos_preserves_flow_and_overlap_flags() {
+        let mut rect = RectangleShape::default();
+        rect.common.flow_with_text = false;
+        rect.common.allow_overlap = true;
+
+        let xml = serialize_rect(&rect);
+
+        assert!(xml.contains(r#"flowWithText="0""#), "{}", xml);
+        assert!(xml.contains(r#"allowOverlap="1""#), "{}", xml);
+    }
+
+    #[test]
+    fn rect_shape_comment_emits_description() {
+        let mut rect = RectangleShape::default();
+        rect.common.description = "도형 설명\nA < B & C".to_string();
+
+        let xml = serialize_rect(&rect);
+
+        assert!(
+            xml.contains("<hp:shapeComment>도형 설명\nA &lt; B &amp; C</hp:shapeComment>"),
+            "shapeComment must preserve escaped shape description: {}",
+            xml
+        );
     }
 }

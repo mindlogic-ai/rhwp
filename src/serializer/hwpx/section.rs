@@ -32,7 +32,7 @@ use crate::model::shape::{
 use super::context::SerializeContext;
 use super::utils::xml_escape;
 use super::SerializeError;
-use super::{picture, table};
+use super::{field, picture, table};
 
 const EMPTY_SECTION_XML: &str = include_str!("templates/empty_section0.xml");
 const TEXT_SLOT: &str = "<hp:t/>";
@@ -45,6 +45,7 @@ const PARA_CLOSE: &str = "</hp:p></hs:sec>";
 const TEMPLATE_FIRST_P_TAG: &str = r#"<hp:p id="3121190098" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">"#;
 // 템플릿 내 <hp:run charPrIDRef="0"> 직후에 TEXT_SLOT 이 오는 패턴.
 const TEMPLATE_RUN_BEFORE_TEXT: &str = r#"<hp:run charPrIDRef="0"><hp:t/>"#;
+const TEMPLATE_FIRST_P_CLOSE: &str = "</hp:p>";
 
 /// 레퍼런스 기준 줄 레이아웃 파라미터.
 const VERT_STEP: u32 = 1600; // vertsize(1000) + spacing(600)
@@ -60,39 +61,58 @@ pub fn write_section(
     _index: usize,
     ctx: &mut SerializeContext,
 ) -> Result<Vec<u8>, SerializeError> {
+    if let Some(raw) = &section.hwpx_section_xml {
+        return Ok(raw.clone());
+    }
+
     let mut vert_cursor: u32 = 0;
 
     let first_para = section.paragraphs.first();
-    let (first_t, first_linesegs, first_advance) = match first_para {
-        Some(p) => render_paragraph_parts(p, vert_cursor, ctx),
-        None => render_paragraph_parts_for_text("", vert_cursor),
-    };
-    vert_cursor = first_advance;
-
-    let mut out = EMPTY_SECTION_XML.replacen(TEXT_SLOT, &first_t, 1);
-    out = replace_first_linesegs(&out, &first_linesegs);
-
-    // 첫 문단 `<hp:p>` 태그를 IR 기반 속성으로 교체
-    if let Some(p) = first_para {
-        let new_p_tag = render_hp_p_open(p, 0);
-        out = out.replacen(TEMPLATE_FIRST_P_TAG, &new_p_tag, 1);
-
-        // 첫 문단의 텍스트용 <hp:run> 의 charPrIDRef 를 IR 기반으로 교체
-        // 템플릿에서 TEXT_SLOT 이 있던 자리 바로 앞의 <hp:run charPrIDRef="0"> 패턴.
-        let first_run_cs = first_run_char_shape_id(p);
-        let new_run = format!(r#"<hp:run charPrIDRef="{}">"#, first_run_cs);
-        let replacement = format!("{}{}", new_run, &first_t);
-        // 이미 first_t 는 out 에 들어갔으므로 그 직전의 <hp:run charPrIDRef="0"> 만 변경
-        let anchor = format!("{}{}", r#"<hp:run charPrIDRef="0">"#, &first_t);
-        if out.contains(&anchor) {
-            out = out.replacen(&anchor, &replacement, 1);
+    let mut out = if let Some(raw) = first_para.and_then(|p| p.hwpx_para_xml.as_ref()) {
+        if let Some(p) = first_para {
+            vert_cursor = next_vert_cursor_from_ir(&p.line_segs, vert_cursor);
         }
-    }
+        replace_template_first_paragraph(EMPTY_SECTION_XML, &String::from_utf8_lossy(raw))
+    } else {
+        let (first_t, first_linesegs, first_advance) = match first_para {
+            Some(p) => render_paragraph_parts(p, vert_cursor, ctx),
+            None => render_paragraph_parts_for_text("", vert_cursor),
+        };
+        vert_cursor = first_advance;
+
+        let mut out = EMPTY_SECTION_XML.replacen(TEXT_SLOT, &first_t, 1);
+        out = replace_first_linesegs(&out, &first_linesegs);
+
+        // 첫 문단 `<hp:p>` 태그를 IR 기반 속성으로 교체
+        if let Some(p) = first_para {
+            let new_p_tag = render_hp_p_open(p, 0);
+            out = out.replacen(TEMPLATE_FIRST_P_TAG, &new_p_tag, 1);
+
+            // 첫 문단의 텍스트용 <hp:run> 의 charPrIDRef 를 IR 기반으로 교체
+            // 템플릿에서 TEXT_SLOT 이 있던 자리 바로 앞의 <hp:run charPrIDRef="0"> 패턴.
+            let first_run_cs = first_run_char_shape_id(p);
+            let new_run = format!(r#"<hp:run charPrIDRef="{}">"#, first_run_cs);
+            let replacement = format!("{}{}", new_run, &first_t);
+            // 이미 first_t 는 out 에 들어갔으므로 그 직전의 <hp:run charPrIDRef="0"> 만 변경
+            let anchor = format!("{}{}", r#"<hp:run charPrIDRef="0">"#, &first_t);
+            if out.contains(&anchor) {
+                out = out.replacen(&anchor, &replacement, 1);
+            }
+        }
+        out
+    };
 
     // 추가 문단: `</hp:p></hs:sec>` 직전에 `<hp:p>` 요소를 삽입.
     if section.paragraphs.len() > 1 {
         let mut extra = String::new();
         for (idx, p) in section.paragraphs.iter().enumerate().skip(1) {
+            if let Some(raw) = &p.hwpx_para_xml {
+                if raw_para_linesegs_match_ir(raw, &p.line_segs) {
+                    extra.push_str(&String::from_utf8_lossy(raw));
+                    vert_cursor = next_vert_cursor_from_ir(&p.line_segs, vert_cursor);
+                    continue;
+                }
+            }
             let (t, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
             vert_cursor = advance;
             let cs = first_run_char_shape_id(p);
@@ -104,6 +124,10 @@ pub fn write_section(
             extra.push_str(r#"</hp:linesegarray></hp:p>"#);
         }
         out = out.replacen(PARA_CLOSE, &format!("</hp:p>{}</hs:sec>", extra), 1);
+    }
+
+    if let Some(sec_pr) = &section.hwpx_sec_pr_xml {
+        out = replace_first_sec_pr(&out, &String::from_utf8_lossy(sec_pr));
     }
 
     Ok(out.into_bytes())
@@ -128,6 +152,117 @@ fn render_hp_p_open(p: &Paragraph, id: u32) -> String {
         r#"<hp:p id="{}" paraPrIDRef="{}" styleIDRef="{}" pageBreak="{}" columnBreak="{}" merged="0">"#,
         id, p.para_shape_id, p.style_id, page_break, column_break,
     )
+}
+
+/// Render a full `<hp:p>` fragment for nested paragraph containers such as
+/// table-cell subLists. Unlike the section template path, this returns raw XML
+/// and preserves the normal paragraph run/control/lineseg serialization.
+pub(super) fn render_paragraph_xml_fragment(
+    p: &Paragraph,
+    id: u32,
+    vert_start: u32,
+    ctx: &mut SerializeContext,
+) -> (String, u32) {
+    let (t, linesegs, advance) = render_paragraph_parts(p, vert_start, ctx);
+    let cs = first_run_char_shape_id(p);
+    let xml = format!(
+        r#"{p_open}<hp:run charPrIDRef="{cs}">{t}</hp:run><hp:linesegarray>{linesegs}</hp:linesegarray></hp:p>"#,
+        p_open = render_hp_p_open(p, id),
+        cs = cs,
+        t = t,
+        linesegs = linesegs,
+    );
+    (xml, advance)
+}
+
+fn replace_template_first_paragraph(template: &str, replacement: &str) -> String {
+    let Some(start) = template.find(TEMPLATE_FIRST_P_TAG) else {
+        return template.to_string();
+    };
+    let Some(close_rel) = template[start..].find(TEMPLATE_FIRST_P_CLOSE) else {
+        return template.to_string();
+    };
+    let end = start + close_rel + TEMPLATE_FIRST_P_CLOSE.len();
+    let mut out = String::with_capacity(template.len() + replacement.len());
+    out.push_str(&template[..start]);
+    out.push_str(replacement);
+    out.push_str(&template[end..]);
+    out
+}
+
+fn replace_first_sec_pr(xml: &str, replacement: &str) -> String {
+    let Some(start) = xml.find("<hp:secPr") else {
+        return xml.to_string();
+    };
+    let Some(close_rel) = xml[start..].find("</hp:secPr>") else {
+        return xml.to_string();
+    };
+    let end = start + close_rel + "</hp:secPr>".len();
+    let mut out = String::with_capacity(xml.len() + replacement.len());
+    out.push_str(&xml[..start]);
+    out.push_str(replacement);
+    out.push_str(&xml[end..]);
+    out
+}
+
+fn raw_para_linesegs_match_ir(raw: &[u8], line_segs: &[LineSeg]) -> bool {
+    let raw = String::from_utf8_lossy(raw);
+    let mut parsed = Vec::new();
+    let mut rest = raw.as_ref();
+    while let Some(start) = rest.find("<hp:lineseg ") {
+        let after_start = &rest[start..];
+        let Some(end) = after_start.find('>') else {
+            return false;
+        };
+        let tag = &after_start[..=end];
+        let Some(line_seg) = parse_lineseg_tag(tag) else {
+            return false;
+        };
+        parsed.push(line_seg);
+        rest = &after_start[end + 1..];
+    }
+    parsed.len() == line_segs.len()
+        && parsed.iter().zip(line_segs).all(|(raw, ir)| {
+            raw.text_start == ir.text_start
+                && raw.vertical_pos == ir.vertical_pos
+                && raw.line_height == ir.line_height
+                && raw.text_height == ir.text_height
+                && raw.baseline_distance == ir.baseline_distance
+                && raw.line_spacing == ir.line_spacing
+                && raw.column_start == ir.column_start
+                && raw.segment_width == ir.segment_width
+                && raw.tag == ir.tag
+        })
+}
+
+fn parse_lineseg_tag(tag: &str) -> Option<LineSeg> {
+    Some(LineSeg {
+        text_start: attr_u32(tag, "textpos")?,
+        vertical_pos: attr_i32(tag, "vertpos")?,
+        line_height: attr_i32(tag, "vertsize")?,
+        text_height: attr_i32(tag, "textheight")?,
+        baseline_distance: attr_i32(tag, "baseline")?,
+        line_spacing: attr_i32(tag, "spacing")?,
+        column_start: attr_i32(tag, "horzpos")?,
+        segment_width: attr_i32(tag, "horzsize")?,
+        tag: attr_u32(tag, "flags")?,
+    })
+}
+
+fn attr_u32(tag: &str, name: &str) -> Option<u32> {
+    attr_str(tag, name)?.parse().ok()
+}
+
+fn attr_i32(tag: &str, name: &str) -> Option<i32> {
+    attr_str(tag, name)?.parse().ok()
+}
+
+fn attr_str<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!(r#"{name}=""#);
+    let start = tag.find(&needle)? + needle.len();
+    let tail = &tag[start..];
+    let end = tail.find('"')?;
+    Some(&tail[..end])
 }
 
 /// 문단 첫 run 의 charPrIDRef. IR의 `char_shapes[0].char_shape_id` 사용.
@@ -196,6 +331,14 @@ fn render_hp_t_content(text: &str) -> String {
 
 /// Paragraph의 본문 run 콘텐츠를 `<hp:t>`와 인라인 컨트롤 XML로 직렬화한다.
 fn render_run_content(para: &Paragraph, ctx: &mut SerializeContext) -> String {
+    if !para.field_ranges.is_empty() {
+        return render_run_content_with_fields(para, ctx);
+    }
+
+    if para.controls.is_empty() && para.char_shapes.len() > 1 {
+        return render_char_shape_run_content(para);
+    }
+
     let slot_count = inferred_control_slot_count(para);
     let slots: Vec<&Control> = if slot_count == para.controls.len() {
         para.controls.iter().collect()
@@ -258,6 +401,104 @@ fn render_run_content(para: &Paragraph, ctx: &mut SerializeContext) -> String {
     }
 }
 
+fn render_char_shape_run_content(para: &Paragraph) -> String {
+    let mut out = String::new();
+    let mut text_buf = String::new();
+    let mut current_cs = first_run_char_shape_id(para);
+
+    for (idx, c) in para.text.chars().enumerate() {
+        let cs = para.char_shape_id_at(idx).unwrap_or(current_cs);
+        if cs != current_cs {
+            flush_text_fragment(&mut out, &mut text_buf);
+            out.push_str("</hp:run>");
+            out.push_str(&format!(r#"<hp:run charPrIDRef="{}">"#, cs));
+            current_cs = cs;
+        }
+        text_buf.push(c);
+    }
+
+    flush_text_fragment(&mut out, &mut text_buf);
+    if out.is_empty() {
+        render_hp_t_content("")
+    } else {
+        out
+    }
+}
+
+fn render_run_content_with_fields(para: &Paragraph, ctx: &mut SerializeContext) -> String {
+    let mut out = String::new();
+    let mut text_buf = String::new();
+    let char_len = para.text.chars().count();
+
+    for (idx, c) in para.text.chars().enumerate() {
+        for range in para.field_ranges.iter().filter(|r| r.start_char_idx == idx) {
+            flush_text_fragment(&mut out, &mut text_buf);
+            if let Some(Control::Field(f)) = para.controls.get(range.control_idx) {
+                render_field_begin(&mut out, f);
+            }
+        }
+
+        text_buf.push(c);
+
+        let next_idx = idx + 1;
+        for range in para
+            .field_ranges
+            .iter()
+            .filter(|r| r.end_char_idx == next_idx)
+        {
+            flush_text_fragment(&mut out, &mut text_buf);
+            if let Some(Control::Field(f)) = para.controls.get(range.control_idx) {
+                render_field_end(&mut out, f.field_id);
+            }
+        }
+    }
+
+    flush_text_fragment(&mut out, &mut text_buf);
+
+    for range in para
+        .field_ranges
+        .iter()
+        .filter(|r| r.start_char_idx >= char_len)
+    {
+        if let Some(Control::Field(f)) = para.controls.get(range.control_idx) {
+            render_field_begin(&mut out, f);
+            render_field_end(&mut out, f.field_id);
+        }
+    }
+
+    for ctrl in para.controls.iter().filter(|c| is_hwpx_inline_slot(c)) {
+        render_control_slot(&mut out, ctrl, ctx);
+    }
+
+    if out.is_empty() {
+        render_hp_t_content("")
+    } else {
+        out
+    }
+}
+
+fn render_field_begin(out: &mut String, f: &crate::model::control::Field) {
+    match writer_to_string(|w| field::write_field_begin(w, f)) {
+        Ok(xml) => {
+            out.push_str("<hp:ctrl>");
+            out.push_str(&xml);
+            out.push_str("</hp:ctrl>");
+        }
+        Err(e) => eprintln!("[hwpx] FieldBegin 직렬화 실패: {e}"),
+    }
+}
+
+fn render_field_end(out: &mut String, field_id: u32) {
+    match writer_to_string(|w| field::write_field_end(w, field_id)) {
+        Ok(xml) => {
+            out.push_str("<hp:ctrl>");
+            out.push_str(&xml);
+            out.push_str("</hp:ctrl>");
+        }
+        Err(e) => eprintln!("[hwpx] FieldEnd 직렬화 실패: {e}"),
+    }
+}
+
 fn inferred_control_slot_count(para: &Paragraph) -> usize {
     let text_units: u32 = para.text.chars().map(char_utf16_width).sum();
     let from_char_count = para.char_count.saturating_sub(1).saturating_sub(text_units) / 8;
@@ -284,7 +525,6 @@ fn is_hwpx_inline_slot(control: &Control) -> bool {
             | Control::CharOverlap(_)
             | Control::Ruby(_)
             | Control::Equation(_)
-            | Control::Field(_)
             | Control::Form(_)
             | Control::Footnote(_)
             | Control::Endnote(_)
@@ -311,6 +551,10 @@ fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeC
             Ok(xml) => out.push_str(&xml),
             Err(e) => eprintln!("[hwpx] Picture 직렬화 실패: {e}"),
         },
+        Control::Field(f) => {
+            render_field_begin(out, f);
+            render_field_end(out, f.field_id);
+        }
         Control::Shape(shape) => {
             out.push_str(&render_shape(shape, ctx));
         }
@@ -635,7 +879,7 @@ fn push_lineseg_static(out: &mut String, textpos: u32, vertpos: u32) {
 
 fn replace_first_linesegs(xml: &str, new_inner: &str) -> String {
     let open = xml
-        .find(LINESEG_SLOT_OPEN)
+        .rfind(LINESEG_SLOT_OPEN)
         .expect("template has linesegarray");
     let inner_start = open + LINESEG_SLOT_OPEN.len();
     let close_rel = xml[inner_start..]
@@ -666,6 +910,156 @@ mod tests {
         let mut doc = Document::default();
         doc.sections.push(section.clone());
         (doc, section)
+    }
+
+    #[test]
+    fn write_section_preserves_clean_hwpx_source_xml() {
+        let raw = br#"<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"><hp:p id="raw"/></hs:sec>"#.to_vec();
+        let mut section = Section::default();
+        section.hwpx_section_xml = Some(raw.clone());
+        section.paragraphs.push(Paragraph {
+            text: "regenerated text must not leak".to_string(),
+            ..Default::default()
+        });
+
+        let mut doc = Document::default();
+        doc.sections.push(section.clone());
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let bytes = write_section(&section, &doc, 0, &mut ctx).unwrap();
+        assert_eq!(bytes, raw);
+    }
+
+    #[test]
+    fn write_section_preserves_clean_paragraph_source_xml() {
+        let raw_para = br#"<hp:p id="raw" paraPrIDRef="9" styleIDRef="0"><hp:run charPrIDRef="2"><hp:t>raw paragraph</hp:t></hp:run><hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1" textheight="1" baseline="1" spacing="0" horzpos="0" horzsize="1" flags="0"/></hp:linesegarray></hp:p>"#.to_vec();
+        let mut section = Section::default();
+        section.paragraphs.push(Paragraph {
+            text: "regenerated text must not leak".to_string(),
+            hwpx_para_xml: Some(raw_para.clone()),
+            ..Default::default()
+        });
+
+        let mut doc = Document::default();
+        doc.sections.push(section.clone());
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let xml = String::from_utf8(write_section(&section, &doc, 0, &mut ctx).unwrap()).unwrap();
+        assert!(xml.contains(std::str::from_utf8(&raw_para).unwrap()));
+        assert!(!xml.contains("regenerated text must not leak"));
+    }
+
+    #[test]
+    fn write_section_regenerates_following_paragraph_after_dirty_paragraph() {
+        let stale_raw_para = br#"<hp:p id="stale" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t>stale raw paragraph</hp:t></hp:run><hp:linesegarray><hp:lineseg textpos="0" vertpos="11428" vertsize="10948" textheight="10948" baseline="9306" spacing="480" horzpos="0" horzsize="48188" flags="393216"/></hp:linesegarray></hp:p>"#.to_vec();
+        let mut section = Section::default();
+        section.paragraphs.push(Paragraph {
+            text: "edited".to_string(),
+            line_segs: vec![LineSeg {
+                text_start: 0,
+                vertical_pos: 0,
+                line_height: 900,
+                text_height: 900,
+                baseline_distance: 765,
+                line_spacing: 360,
+                column_start: 0,
+                segment_width: 42520,
+                tag: 393216,
+            }],
+            ..Default::default()
+        });
+        section.paragraphs.push(Paragraph {
+            text: "current paragraph".to_string(),
+            hwpx_para_xml: Some(stale_raw_para),
+            line_segs: vec![LineSeg {
+                text_start: 0,
+                vertical_pos: 1260,
+                line_height: 900,
+                text_height: 900,
+                baseline_distance: 765,
+                line_spacing: 360,
+                column_start: 0,
+                segment_width: 42520,
+                tag: 393216,
+            }],
+            ..Default::default()
+        });
+
+        let mut doc = Document::default();
+        doc.sections.push(section.clone());
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let xml = String::from_utf8(write_section(&section, &doc, 0, &mut ctx).unwrap()).unwrap();
+        assert!(xml.contains("current paragraph"));
+        assert!(xml.contains(r#"vertpos="1260""#));
+        assert!(!xml.contains("stale raw paragraph"));
+        assert!(!xml.contains(r#"vertpos="11428""#));
+    }
+
+    #[test]
+    fn write_section_preserves_following_raw_paragraph_when_linesegs_match_ir() {
+        let raw_para = br#"<hp:p id="raw-complex" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t>raw complex paragraph</hp:t></hp:run><hp:linesegarray><hp:lineseg textpos="0" vertpos="1260" vertsize="900" textheight="900" baseline="765" spacing="360" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray></hp:p>"#.to_vec();
+        let mut section = Section::default();
+        section.paragraphs.push(Paragraph {
+            text: "edited predecessor".to_string(),
+            line_segs: vec![LineSeg {
+                text_start: 0,
+                vertical_pos: 0,
+                line_height: 900,
+                text_height: 900,
+                baseline_distance: 765,
+                line_spacing: 360,
+                column_start: 0,
+                segment_width: 42520,
+                tag: 393216,
+            }],
+            ..Default::default()
+        });
+        section.paragraphs.push(Paragraph {
+            text: "regenerated text must not leak".to_string(),
+            hwpx_para_xml: Some(raw_para.clone()),
+            line_segs: vec![LineSeg {
+                text_start: 0,
+                vertical_pos: 1260,
+                line_height: 900,
+                text_height: 900,
+                baseline_distance: 765,
+                line_spacing: 360,
+                column_start: 0,
+                segment_width: 42520,
+                tag: 393216,
+            }],
+            ..Default::default()
+        });
+
+        let mut doc = Document::default();
+        doc.sections.push(section.clone());
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let xml = String::from_utf8(write_section(&section, &doc, 0, &mut ctx).unwrap()).unwrap();
+        assert!(xml.contains(std::str::from_utf8(&raw_para).unwrap()));
+        assert!(!xml.contains("regenerated text must not leak"));
+    }
+
+    #[test]
+    fn write_section_preserves_raw_sec_pr_when_paragraph_regenerates() {
+        let raw_sec_pr = br#"<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:pagePr landscape="WIDELY" width="59528" height="84186" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="5669" right="5669" top="4251" bottom="4252"/></hp:pagePr></hp:secPr>"#.to_vec();
+        let mut section = Section {
+            hwpx_sec_pr_xml: Some(raw_sec_pr.clone()),
+            ..Default::default()
+        };
+        section.paragraphs.push(Paragraph {
+            text: "edited".to_string(),
+            ..Default::default()
+        });
+
+        let mut doc = Document::default();
+        doc.sections.push(section.clone());
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let xml = String::from_utf8(write_section(&section, &doc, 0, &mut ctx).unwrap()).unwrap();
+        assert!(xml.contains(std::str::from_utf8(&raw_sec_pr).unwrap()));
+        assert!(!xml.contains(r#"left="8504""#));
     }
 
     #[test]
@@ -706,6 +1100,32 @@ mod tests {
             "first run must use char_shape_id 42, xml excerpt around <hp:t>: {:?}",
             xml.find("<hp:t>")
                 .map(|i| &xml[i.saturating_sub(50)..(i + 50).min(xml.len())])
+        );
+    }
+
+    #[test]
+    fn multi_char_shape_paragraph_emits_multiple_runs() {
+        let mut para = Paragraph::default();
+        para.text = "hello".to_string();
+        para.char_offsets = vec![0, 1, 2, 3, 4];
+        para.char_shapes.push(CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 3,
+        });
+        para.char_shapes.push(CharShapeRef {
+            start_pos: 2,
+            char_shape_id: 4,
+        });
+
+        let (doc, section) = make_doc_with_paragraph(para);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_section(&section, &doc, 0, &mut ctx).unwrap();
+        let xml = std::str::from_utf8(&bytes).unwrap();
+
+        assert!(
+            xml.contains(r#"<hp:run charPrIDRef="3"><hp:t>he</hp:t></hp:run><hp:run charPrIDRef="4"><hp:t>llo</hp:t>"#),
+            "char shape transition must split runs, got: {}",
+            xml
         );
     }
 

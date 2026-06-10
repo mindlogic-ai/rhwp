@@ -36,7 +36,7 @@ impl DocumentCore {
         }
 
         // 편집 시 raw 스트림 무효화 (재직렬화 유도)
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
 
         // 텍스트 삽입
         let new_chars_count = text.chars().count();
@@ -148,7 +148,7 @@ impl DocumentCore {
         }
 
         // 편집 시 raw 스트림 무효화 (재직렬화 유도)
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
 
         // 텍스트 삭제
         self.document.sections[section_idx].paragraphs[para_idx].delete_text_at(char_offset, count);
@@ -298,7 +298,7 @@ impl DocumentCore {
         );
 
         // raw 스트림 무효화, 재페이지네이션 (셀 편집 → composed 불변, section dirty만 설정)
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -349,7 +349,7 @@ impl DocumentCore {
         );
 
         // raw 스트림 무효화, 재페이지네이션 (셀 편집 → composed 불변)
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -609,7 +609,7 @@ impl DocumentCore {
         cell_ctx: Option<(usize, usize, usize)>,
     ) -> Result<String, HwpError> {
         // Section raw 스트림 무효화 (재직렬화 유도)
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         // DocInfo raw_stream은 유지 (전체 재직렬화 시 FIX-4 문제 발생)
 
         if let Some((ppi, ci, cei)) = cell_ctx {
@@ -833,7 +833,7 @@ impl DocumentCore {
         }
 
         // 편집 시 raw 스트림 무효화 (재직렬화 유도)
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
 
         // 문단 분리
         let new_para =
@@ -917,7 +917,7 @@ impl DocumentCore {
             )));
         }
 
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
 
         // 문단 분리
         let new_para =
@@ -982,7 +982,7 @@ impl DocumentCore {
             )));
         }
 
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
 
         // 문단 분리
         let new_para =
@@ -1092,7 +1092,7 @@ impl DocumentCore {
         }
 
         // 조판 갱신
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.rebuild_section(section_idx);
 
         Ok("{\"ok\":true}".to_string())
@@ -1126,7 +1126,7 @@ impl DocumentCore {
         }
 
         // 편집 시 raw 스트림 무효화 (재직렬화 유도)
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
 
         // 현재 문단을 이전 문단에 병합
         let current_para = self.document.sections[section_idx]
@@ -1212,7 +1212,7 @@ impl DocumentCore {
             .text
             .chars()
             .count();
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.document.sections[section_idx]
             .paragraphs
             .remove(para_idx);
@@ -1294,7 +1294,7 @@ impl DocumentCore {
             )));
         }
 
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
 
         let new_para = Paragraph::new_empty();
         self.document.sections[section_idx]
@@ -1408,7 +1408,7 @@ impl DocumentCore {
         );
 
         // raw 스트림 무효화, section dirty, 재페이지네이션
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -1502,7 +1502,7 @@ impl DocumentCore {
         );
 
         // raw 스트림 무효화, section dirty, 재페이지네이션
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -2182,6 +2182,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn insert_text_invalidates_preserved_hwpx_section_xml() {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        core.document.sections[0].raw_stream = Some(vec![1, 2, 3]);
+        core.document.sections[0].hwpx_section_xml = Some(b"<hs:sec/>".to_vec());
+        core.document.sections[0].paragraphs[0].hwpx_para_xml = Some(b"<hp:p/>".to_vec());
+
+        core.insert_text_native(0, 0, 0, "edited").unwrap();
+
+        assert!(core.document.sections[0].raw_stream.is_none());
+        assert!(core.document.sections[0].hwpx_section_xml.is_none());
+        assert!(core.document.sections[0].paragraphs[0]
+            .hwpx_para_xml
+            .is_none());
+    }
+
+    #[test]
     fn test_page_overflow_with_enter() {
         let mut core = DocumentCore::new_empty();
         core.create_blank_document_native().unwrap();
@@ -2675,7 +2692,7 @@ impl DocumentCore {
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
 
         // 리플로우 (최외곽 표 기준 — 중첩 표 셀 폭은 별도 계산이 필요하나 우선 section dirty로 처리)
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -2706,7 +2723,7 @@ impl DocumentCore {
 
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -2772,7 +2789,7 @@ impl DocumentCore {
 
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -2842,7 +2859,7 @@ impl DocumentCore {
 
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 

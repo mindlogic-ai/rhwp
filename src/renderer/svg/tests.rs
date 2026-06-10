@@ -54,6 +54,57 @@ fn test_svg_draw_text_medium_weight() {
 }
 
 #[test]
+fn test_svg_bold_named_face_does_not_force_synthetic_bold() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "일정",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "경기천년바탕 Bold".to_string(),
+            bold: false,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert!(output.contains("font-family=\"경기천년바탕 Bold"));
+    assert!(
+        !output.contains("font-weight=\"bold\""),
+        "font face names that already select a Bold face should not add synthetic CSS bold"
+    );
+}
+
+#[test]
+fn test_svg_gyeonggi_fallback_paints_slightly_smaller() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "일정",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "경기천년바탕 Bold".to_string(),
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert!(
+        output.contains("font-size=\"14.4\""),
+        "Gyeonggi fallback fonts should keep layout size but paint at 90%"
+    );
+}
+
+#[test]
+fn test_svg_malgun_paints_with_noto_sans_face() {
+    let family = svg_paint_font_family("맑은 고딕");
+    let faces: Vec<&str> = family.split(',').take(3).collect();
+    assert_eq!(faces, vec!["Noto Sans KR"]);
+}
+
+#[test]
 fn test_svg_draw_rect() {
     let mut renderer = SvgRenderer::new();
     renderer.begin_page(800.0, 600.0);
@@ -191,6 +242,28 @@ fn test_svg_text_char_positions() {
     // 2개 문자 = 2개 <text> 요소
     let text_count = output.matches("<text ").count();
     assert_eq!(text_count, 2);
+}
+
+#[test]
+fn test_svg_single_char_clusters_do_not_force_text_length() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "A1",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 12.0,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert_eq!(output.matches("<text ").count(), 2);
+    assert!(
+        !output.contains("textLength="),
+        "single-glyph text runs should not force SVG textLength"
+    );
+    assert!(!output.contains("lengthAdjust="));
 }
 
 #[test]
@@ -385,4 +458,31 @@ fn test_compute_image_crop_src_fallback_when_original_size_missing() {
     assert!((sy - 0.0).abs() < 0.01);
     assert!((sw - 1364.88).abs() < 0.01);
     assert!((sh - 354.4).abs() < 0.01);
+}
+
+#[test]
+fn cropped_image_page_rect_positions_full_image_under_clip() {
+    let bbox = crate::renderer::render_tree::BoundingBox {
+        x: 399.88,
+        y: 733.10,
+        width: 303.89,
+        height: 276.56,
+    };
+    let (x, y, w, h) = cropped_image_page_rect(&bbox, 0.0, 111.43, 1000.0, 350.97, 1000.0, 462.0);
+
+    assert!((x - 399.88).abs() < 0.01);
+    assert!(
+        y < bbox.y,
+        "cropped top offset must move the full image above the clipped box"
+    );
+    assert!((w - 303.89).abs() < 0.01);
+    assert!(h > bbox.height);
+}
+
+#[test]
+fn thin_black_svg_strokes_are_raster_scaled() {
+    assert!((svg_raster_stroke_width("#000000", 0.4) - 0.07).abs() < 0.001);
+    assert!((svg_raster_stroke_width("#000000", 1.0) - 0.175).abs() < 0.001);
+    assert!((svg_raster_stroke_width("#7f7f7f", 0.6) - 0.6).abs() < 0.001);
+    assert!((svg_raster_stroke_width("#000000", 1.2) - 1.2).abs() < 0.001);
 }

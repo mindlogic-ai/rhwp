@@ -28,10 +28,13 @@ use std::io::Write;
 
 use quick_xml::Writer;
 
-use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo};
-use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
+use crate::model::shape::{
+    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo,
+};
+use crate::model::table::{Cell, HwpxTablePageBreak, Table, TablePageBreak, VerticalAlign};
 
 use super::context::SerializeContext;
+use super::section;
 use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
 use super::SerializeError;
 
@@ -56,7 +59,10 @@ pub fn write_table<W: Write>(
     let text_wrap = text_wrap_str(table.common.text_wrap);
     let text_flow = text_flow_str(table.common.text_wrap);
     let lock = bool01(false);
-    let page_break = table_page_break_str(table.page_break);
+    let page_break = table
+        .hwpx_page_break
+        .map(hwpx_table_page_break_str)
+        .unwrap_or_else(|| table_page_break_str(table.page_break));
     let repeat_header = bool01(table.repeat_header);
     let row_cnt = table.row_count.to_string();
     let col_cnt = table.col_count.to_string();
@@ -89,6 +95,9 @@ pub fn write_table<W: Write>(
     write_sz(w, &table.common)?;
     write_pos(w, &table.common)?;
     write_out_margin(w, table)?;
+    if let Some(caption) = &table.caption {
+        write_caption(w, caption, ctx)?;
+    }
     write_in_margin(w, table)?;
 
     // tr[]: 행 단위 반복. 각 행에 속한 셀 (cell.row == r) 을 col 오름차순으로 출력.
@@ -124,6 +133,8 @@ fn write_sz<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), Serial
 
 fn write_pos<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), SerializeError> {
     let treat = bool01(c.treat_as_char);
+    let flow = bool01(c.flow_with_text);
+    let overlap = bool01(c.allow_overlap);
     let vert_offset = c.vertical_offset.to_string();
     let horz_offset = c.horizontal_offset.to_string();
     empty_tag(
@@ -132,8 +143,8 @@ fn write_pos<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), Seria
         &[
             ("treatAsChar", treat),
             ("affectLSpacing", "0"),
-            ("flowWithText", "1"),
-            ("allowOverlap", "0"),
+            ("flowWithText", flow),
+            ("allowOverlap", overlap),
             ("holdAnchorAndSO", "0"),
             ("vertRelTo", vert_rel_to_str(c.vert_rel_to)),
             ("horzRelTo", horz_rel_to_str(c.horz_rel_to)),
@@ -177,6 +188,64 @@ fn write_in_margin<W: Write>(w: &mut Writer<W>, t: &Table) -> Result<(), Seriali
             ("bottom", &bottom),
         ],
     )
+}
+
+fn write_caption<W: Write>(
+    w: &mut Writer<W>,
+    caption: &Caption,
+    ctx: &mut SerializeContext,
+) -> Result<(), SerializeError> {
+    let full_sz = bool01(caption.include_margin);
+    let width = caption.width.to_string();
+    let gap = caption.spacing.to_string();
+    let last_width = caption.max_width.to_string();
+    start_tag_attrs(
+        w,
+        "hp:caption",
+        &[
+            ("side", caption_direction_str(caption.direction)),
+            ("fullSz", full_sz),
+            ("width", &width),
+            ("gap", &gap),
+            ("lastWidth", &last_width),
+        ],
+    )?;
+
+    start_tag_attrs(
+        w,
+        "hp:subList",
+        &[
+            ("id", ""),
+            ("textDirection", "HORIZONTAL"),
+            ("lineWrap", "BREAK"),
+            ("vertAlign", "TOP"),
+            ("linkListIDRef", "0"),
+            ("linkListNextIDRef", "0"),
+            ("textWidth", "0"),
+            ("textHeight", "0"),
+            ("hasTextRef", "0"),
+            ("hasNumRef", "0"),
+        ],
+    )?;
+
+    let mut vert_cursor = 0u32;
+    for (pi, para) in caption.paragraphs.iter().enumerate() {
+        ctx.para_shape_ids.reference(para.para_shape_id);
+        ctx.style_ids.reference(para.style_id as u16);
+        if let Some(cs_ref) = para.char_shapes.first() {
+            ctx.char_shape_ids.reference(cs_ref.char_shape_id);
+        }
+        let (xml, next_vert_cursor) =
+            section::render_paragraph_xml_fragment(para, pi as u32, vert_cursor, ctx);
+        w.get_mut()
+            .write_all(xml.as_bytes())
+            .map_err(|e| SerializeError::XmlError(e.to_string()))?;
+        vert_cursor = next_vert_cursor;
+    }
+
+    end_tag(w, "hp:subList")?;
+    end_tag(w, "hp:caption")?;
+    Ok(())
 }
 
 fn write_cell<W: Write>(
@@ -243,7 +312,9 @@ fn write_sub_list<W: Write>(
         ],
     )?;
 
-    // 셀 내부 문단 재귀 — 각 문단은 간단한 <hp:p><hp:run><hp:t>텍스트</hp:t></hp:run></hp:p> 구조
+    // 셀 내부 문단 재귀. 일반 section 문단과 같은 writer를 사용해야 nested
+    // Table/Picture controls and source lineSeg arrays survive edited HWPX export.
+    let mut vert_cursor = 0u32;
     for (pi, para) in cell.paragraphs.iter().enumerate() {
         ctx.para_shape_ids.reference(para.para_shape_id);
         ctx.style_ids.reference(para.style_id as u16);
@@ -251,53 +322,12 @@ fn write_sub_list<W: Write>(
             ctx.char_shape_ids.reference(cs_ref.char_shape_id);
         }
 
-        let pi_str = pi.to_string();
-        let ppr = para.para_shape_id.to_string();
-        let sp = para.style_id.to_string();
-        start_tag_attrs(
-            w,
-            "hp:p",
-            &[
-                ("id", &pi_str),
-                ("paraPrIDRef", &ppr),
-                ("styleIDRef", &sp),
-                ("pageBreak", "0"),
-                ("columnBreak", "0"),
-                ("merged", "0"),
-            ],
-        )?;
-
-        let cs = para
-            .char_shapes
-            .first()
-            .map(|r| r.char_shape_id)
-            .unwrap_or(0);
-        let cs_str = cs.to_string();
-        start_tag_attrs(w, "hp:run", &[("charPrIDRef", &cs_str)])?;
-        // 텍스트만 출력 (탭·소프트브레이크는 Stage 3 범위에서 제외 — section.rs 와 동일 방식으로 단순화)
-        write_cell_text(w, &para.text)?;
-        end_tag(w, "hp:run")?;
-
-        // <hp:linesegarray> 최소 1개 lineseg
-        start_tag(w, "hp:linesegarray")?;
-        empty_tag(
-            w,
-            "hp:lineseg",
-            &[
-                ("textpos", "0"),
-                ("vertpos", "0"),
-                ("vertsize", "1000"),
-                ("textheight", "1000"),
-                ("baseline", "850"),
-                ("spacing", "600"),
-                ("horzpos", "0"),
-                ("horzsize", "12964"),
-                ("flags", "393216"),
-            ],
-        )?;
-        end_tag(w, "hp:linesegarray")?;
-
-        end_tag(w, "hp:p")?;
+        let (xml, next_vert_cursor) =
+            section::render_paragraph_xml_fragment(para, pi as u32, vert_cursor, ctx);
+        w.get_mut()
+            .write_all(xml.as_bytes())
+            .map_err(|e| SerializeError::XmlError(e.to_string()))?;
+        vert_cursor = next_vert_cursor;
     }
 
     end_tag(w, "hp:subList")?;
@@ -388,6 +418,16 @@ fn table_page_break_str(pb: TablePageBreak) -> &'static str {
     }
 }
 
+fn hwpx_table_page_break_str(pb: HwpxTablePageBreak) -> &'static str {
+    use HwpxTablePageBreak::*;
+    match pb {
+        None => "NONE",
+        Table => "TABLE",
+        Cell => "CELL",
+        Row => "ROW",
+    }
+}
+
 fn vert_rel_to_str(v: VertRelTo) -> &'static str {
     use VertRelTo::*;
     match v {
@@ -426,6 +466,16 @@ fn horz_align_str(h: HorzAlign) -> &'static str {
         Right => "RIGHT",
         Inside => "INSIDE",
         Outside => "OUTSIDE",
+    }
+}
+
+fn caption_direction_str(d: CaptionDirection) -> &'static str {
+    use CaptionDirection::*;
+    match d {
+        Left => "LEFT",
+        Right => "RIGHT",
+        Top => "TOP",
+        Bottom => "BOTTOM",
     }
 }
 
@@ -497,6 +547,33 @@ mod tests {
     }
 
     #[test]
+    fn tbl_preserves_original_hwpx_page_break_spelling() {
+        let mut t = empty_table(1, 1);
+        t.page_break = TablePageBreak::RowBreak;
+        t.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+
+        let xml = serialize(&t);
+
+        assert!(
+            xml.contains(r#"pageBreak="CELL""#),
+            "HWPX export should preserve original pageBreak spelling: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn tbl_pos_preserves_flow_and_overlap_flags() {
+        let mut t = empty_table(1, 1);
+        t.common.flow_with_text = false;
+        t.common.allow_overlap = true;
+
+        let xml = serialize(&t);
+
+        assert!(xml.contains(r#"flowWithText="0""#), "{}", xml);
+        assert!(xml.contains(r#"allowOverlap="1""#), "{}", xml);
+    }
+
+    #[test]
     fn tr_count_matches_row_count() {
         let t = empty_table(4, 2);
         let xml = serialize(&t);
@@ -521,6 +598,32 @@ mod tests {
         let cz = xml.find("<hp:cellSz ").unwrap();
         let cm = xml.find("<hp:cellMargin ").unwrap();
         assert!(sl < ca && ca < cs && cs < cz && cz < cm);
+    }
+
+    #[test]
+    fn caption_paragraphs_are_emitted_before_in_margin() {
+        let mut t = empty_table(1, 1);
+        let mut p = Paragraph::default();
+        p.text = "caption".to_string();
+        t.caption = Some(Caption {
+            direction: CaptionDirection::Bottom,
+            width: 8504,
+            spacing: 850,
+            max_width: 35914,
+            paragraphs: vec![p],
+            ..Default::default()
+        });
+
+        let xml = serialize(&t);
+        assert!(xml.contains("<hp:caption "), "caption missing: {}", xml);
+        assert!(
+            xml.contains("<hp:t>caption</hp:t>"),
+            "caption text missing: {}",
+            xml
+        );
+        let cap = xml.find("<hp:caption ").unwrap();
+        let im = xml.find("<hp:inMargin ").unwrap();
+        assert!(cap < im, "caption must precede inMargin");
     }
 
     #[test]

@@ -70,6 +70,7 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
     // 3. header.xml → DocInfo, DocProperties
     let header_xml = reader.read_file("Contents/header.xml")?;
     let (mut doc_info, doc_properties) = header::parse_hwpx_header(&header_xml)?;
+    doc_info.hwpx_header_xml = Some(header_xml.as_bytes().to_vec());
 
     // [Task #554] HWP3 → HWPX 변환본 식별: hwpml 스키마 버전 = "1.4"
     // 변환본은 한글97의 "마지막 줄 tolerance" (1600 HU) 가 누락되어 페이지 수가
@@ -103,6 +104,7 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         let section_xml = reader.read_file(section_href)?;
         match section::parse_hwpx_section(&section_xml) {
             Ok(mut section) => {
+                section.hwpx_section_xml = Some(section_xml.as_bytes().to_vec());
                 if let Some(master_page_files) =
                     package_info.section_master_page_files.get(section_idx)
                 {

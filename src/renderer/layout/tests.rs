@@ -6,7 +6,7 @@ use super::*;
 use crate::model::page::{ColumnDef, PageDef};
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
 use crate::model::style::{Numbering, NumberingHead};
-use crate::renderer::composer::compose_paragraph;
+use crate::renderer::composer::{compose_paragraph, ComposedLine, ComposedParagraph};
 use crate::renderer::style_resolver::ResolvedStyleSet;
 use crate::renderer::{TabStop, TextStyle};
 
@@ -23,6 +23,243 @@ fn a4_page_def() -> PageDef {
         margin_gutter: 0,
         ..Default::default()
     }
+}
+
+#[test]
+fn suppressed_split_table_host_advance_uses_spacing_only() {
+    let para = Paragraph {
+        line_segs: vec![LineSeg {
+            line_height: 1600,
+            line_spacing: 960,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let advance = suppressed_split_table_host_advance(&para, crate::renderer::DEFAULT_DPI);
+    let expected = crate::renderer::hwpunit_to_px(960, crate::renderer::DEFAULT_DPI);
+    assert!((advance - expected).abs() < 0.01);
+}
+
+fn tac_topbottom_table() -> crate::model::table::Table {
+    let mut table = crate::model::table::Table::default();
+    table.common.treat_as_char = true;
+    table.common.text_wrap = crate::model::shape::TextWrap::TopAndBottom;
+    table
+}
+
+fn non_tac_topbottom_picture(height: u32) -> crate::model::image::Picture {
+    let mut picture = crate::model::image::Picture::default();
+    picture.common.treat_as_char = false;
+    picture.common.text_wrap = crate::model::shape::TextWrap::TopAndBottom;
+    picture.common.vert_rel_to = crate::model::shape::VertRelTo::Para;
+    picture.common.horz_rel_to = crate::model::shape::HorzRelTo::Column;
+    picture.common.height = height;
+    picture.common.width = 48_190;
+    picture
+}
+
+fn composed_with_line_height(line_height: i32) -> ComposedParagraph {
+    ComposedParagraph {
+        lines: vec![ComposedLine {
+            runs: vec![],
+            line_height,
+            baseline_distance: 0,
+            segment_width: 0,
+            column_start: 0,
+            line_spacing: 0,
+            has_line_break: false,
+            char_start: 0,
+        }],
+        para_style_id: 0,
+        inline_controls: vec![],
+        numbering_text: None,
+        tac_controls: vec![],
+        footnote_positions: vec![],
+        tab_extended: vec![],
+    }
+}
+
+#[test]
+fn consecutive_tac_table_gap_uses_synthetic_host_line_only_when_lineseg_missing() {
+    let current = Paragraph {
+        controls: vec![Control::Table(Box::new(tac_topbottom_table()))],
+        ..Default::default()
+    };
+    let next = Paragraph {
+        controls: vec![Control::Table(Box::new(tac_topbottom_table()))],
+        ..Default::default()
+    };
+    let gap = consecutive_tac_table_synthetic_host_gap(
+        &[current.clone(), next.clone()],
+        &[
+            composed_with_line_height(900),
+            composed_with_line_height(900),
+        ],
+        0,
+        0,
+        crate::renderer::DEFAULT_DPI,
+    );
+    assert!((11.9..=12.1).contains(&gap), "gap={gap}");
+
+    let with_lineseg = Paragraph {
+        line_segs: vec![LineSeg {
+            line_height: 900,
+            ..Default::default()
+        }],
+        ..current
+    };
+    assert_eq!(
+        consecutive_tac_table_synthetic_host_gap(
+            &[with_lineseg, next.clone()],
+            &[
+                composed_with_line_height(900),
+                composed_with_line_height(900)
+            ],
+            0,
+            0,
+            crate::renderer::DEFAULT_DPI,
+        ),
+        0.0
+    );
+
+    let next_with_text = Paragraph {
+        text: "visible".to_string(),
+        controls: vec![Control::Table(Box::new(tac_topbottom_table()))],
+        ..Default::default()
+    };
+    assert_eq!(
+        consecutive_tac_table_synthetic_host_gap(
+            &[next, next_with_text],
+            &[
+                composed_with_line_height(900),
+                composed_with_line_height(900)
+            ],
+            0,
+            0,
+            crate::renderer::DEFAULT_DPI,
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn cached_picture_anchor_vpos_skips_only_after_tiny_spacer_run_and_tac_table() {
+    let title = Paragraph {
+        controls: vec![Control::Table(Box::new(tac_topbottom_table()))],
+        line_segs: vec![LineSeg {
+            vertical_pos: 3_011,
+            line_height: 2_731,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let spacer_a = Paragraph {
+        line_segs: vec![LineSeg {
+            vertical_pos: 3_011,
+            line_height: 400,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let spacer_b = Paragraph {
+        line_segs: vec![LineSeg {
+            vertical_pos: 3_411,
+            line_height: 100,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let picture_anchor = Paragraph {
+        controls: vec![Control::Picture(Box::new(non_tac_topbottom_picture(
+            41_685,
+        )))],
+        line_segs: vec![LineSeg {
+            vertical_pos: 3_511,
+            line_height: 1_500,
+            line_spacing: 152,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let paragraphs = vec![title, spacer_a, spacer_b, picture_anchor.clone()];
+    assert!(should_skip_cached_picture_anchor_vpos(
+        &paragraphs,
+        3,
+        0,
+        crate::renderer::DEFAULT_DPI,
+    ));
+
+    let without_spacer = vec![
+        paragraphs[0].clone(),
+        Paragraph {
+            text: "visible".to_string(),
+            ..Default::default()
+        },
+        picture_anchor,
+    ];
+    assert!(!should_skip_cached_picture_anchor_vpos(
+        &without_spacer,
+        2,
+        0,
+        crate::renderer::DEFAULT_DPI,
+    ));
+}
+
+#[test]
+fn body_wide_reserved_accepts_top_aligned_narrow_topbottom_float() {
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+    let mut pic = Picture {
+        common: CommonObjAttr {
+            width: 14_000,
+            height: 24_000,
+            vertical_offset: 0,
+            treat_as_char: false,
+            text_wrap: TextWrap::TopAndBottom,
+            vert_rel_to: VertRelTo::Para,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let page_items = vec![PageItem::Shape {
+        para_index: 0,
+        control_index: 0,
+    }];
+    let columns = vec![ColumnContent {
+        column_index: 0,
+        items: page_items,
+        zone_layout: None,
+        zone_y_offset: 0.0,
+        wrap_around_paras: Vec::new(),
+        used_height: 0.0,
+        wrap_anchors: std::collections::HashMap::new(),
+    }];
+    let top_para = Paragraph {
+        controls: vec![Control::Picture(Box::new(pic.clone()))],
+        ..Default::default()
+    };
+
+    let reserved =
+        engine.calculate_body_wide_shape_reserved(&[top_para], &columns, &layout.body_area);
+    assert_eq!(reserved.len(), 1);
+    assert!(
+        reserved[0].1 > layout.body_area.y + 300.0,
+        "top-aligned TopAndBottom object should reserve a page band, got {:?}",
+        reserved
+    );
+
+    pic.common.vertical_offset = 1_200;
+    let lower_para = Paragraph {
+        controls: vec![Control::Picture(Box::new(pic))],
+        ..Default::default()
+    };
+    assert!(engine
+        .calculate_body_wide_shape_reserved(&[lower_para], &columns, &layout.body_area)
+        .is_empty());
 }
 
 #[test]
@@ -897,6 +1134,719 @@ fn test_layout_table_cell_positions() {
     // 셀 (0,1)의 y좌표는 셀 (0,0)의 y + row_height 이후
     let row_height = 720.0 * 96.0 / 7200.0;
     assert!((cell_01.bbox.y - cell_00.bbox.y - row_height).abs() < 0.1);
+}
+
+#[test]
+fn non_tac_cell_picture_negative_para_offset_stays_inside_cell() {
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
+    use crate::model::shape::{CommonObjAttr, HorzAlign, TextWrap, VertAlign, VertRelTo};
+    use crate::model::table::{Cell, Table};
+
+    fn first_image_child(node: &RenderNode) -> Option<&RenderNode> {
+        if matches!(node.node_type, RenderNodeType::Image(_)) {
+            return Some(node);
+        }
+        node.children.iter().find_map(first_image_child)
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+    let picture = Picture {
+        common: CommonObjAttr {
+            width: 12_000,
+            height: 9_000,
+            vertical_offset: (-20_000i32) as u32,
+            treat_as_char: false,
+            text_wrap: TextWrap::TopAndBottom,
+            vert_rel_to: VertRelTo::Para,
+            vert_align: VertAlign::Top,
+            horz_align: HorzAlign::Left,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 16_000,
+            height: 16_000,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(picture))],
+                line_segs: vec![LineSeg {
+                    line_height: 900,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let paragraphs = vec![Paragraph {
+        controls: vec![Control::Table(Box::new(table))],
+        line_segs: vec![LineSeg {
+            line_height: 400,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            items: vec![PageItem::Table {
+                para_index: 0,
+                control_index: 0,
+            }],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    };
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &ResolvedStyleSet::default(),
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+    let table_node = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .and_then(|body| body.children.first())
+        .and_then(|col| {
+            col.children
+                .iter()
+                .find(|n| matches!(n.node_type, RenderNodeType::Table(_)))
+        })
+        .expect("table should render");
+    let cell_node = table_node
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::TableCell(_)))
+        .expect("table cell should render");
+    let image_node = first_image_child(cell_node).expect("cell picture should render");
+    assert!(
+        image_node.bbox.y + 0.1 >= cell_node.bbox.y,
+        "cell-owned picture escaped above cell: image y={} cell y={}",
+        image_node.bbox.y,
+        cell_node.bbox.y
+    );
+    assert!(
+        image_node.bbox.y + image_node.bbox.height
+            <= cell_node.bbox.y + cell_node.bbox.height + 0.1,
+        "cell-owned picture escaped below cell: image bottom={} cell bottom={}",
+        image_node.bbox.y + image_node.bbox.height,
+        cell_node.bbox.y + cell_node.bbox.height
+    );
+}
+
+#[test]
+fn tac_photo_grid_cell_picture_starts_after_host_line() {
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
+    use crate::model::shape::{CommonObjAttr, HorzAlign, TextWrap, VertAlign, VertRelTo};
+    use crate::model::table::{Cell, Table, TablePageBreak};
+
+    fn first_image_child(node: &RenderNode) -> Option<&RenderNode> {
+        if matches!(node.node_type, RenderNodeType::Image(_)) {
+            return Some(node);
+        }
+        node.children.iter().find_map(first_image_child)
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+    let picture = Picture {
+        common: CommonObjAttr {
+            width: 12_000,
+            height: 9_000,
+            treat_as_char: false,
+            text_wrap: TextWrap::TopAndBottom,
+            vert_rel_to: VertRelTo::Para,
+            vert_align: VertAlign::Top,
+            horz_align: HorzAlign::Left,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        page_break: TablePageBreak::RowBreak,
+        common: CommonObjAttr {
+            treat_as_char: true,
+            text_wrap: TextWrap::TopAndBottom,
+            width: 16_000,
+            height: 16_000,
+            ..Default::default()
+        },
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 16_000,
+            height: 16_000,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(picture))],
+                line_segs: vec![LineSeg {
+                    line_height: 900,
+                    line_spacing: 540,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let paragraphs = vec![Paragraph {
+        controls: vec![Control::Table(Box::new(table))],
+        line_segs: vec![LineSeg {
+            line_height: 400,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            items: vec![PageItem::Table {
+                para_index: 0,
+                control_index: 0,
+            }],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    };
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &ResolvedStyleSet::default(),
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+    let table_node = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .and_then(|body| body.children.first())
+        .and_then(|col| {
+            col.children
+                .iter()
+                .find(|n| matches!(n.node_type, RenderNodeType::Table(_)))
+        })
+        .expect("table should render");
+    let cell_node = table_node
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::TableCell(_)))
+        .expect("table cell should render");
+    let image_node = first_image_child(cell_node).expect("cell picture should render");
+    let host_line_advance = crate::renderer::hwpunit_to_px(900 + 540, crate::renderer::DEFAULT_DPI);
+    assert!(
+        image_node.bbox.y >= cell_node.bbox.y + host_line_advance - 0.1,
+        "TAC photo-grid picture should start after host line: image y={} cell y={} host={}",
+        image_node.bbox.y,
+        cell_node.bbox.y,
+        host_line_advance
+    );
+}
+
+#[test]
+fn large_non_tac_picture_visual_shift_does_not_advance_following_flow() {
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
+    use crate::model::shape::{
+        CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo,
+    };
+    use crate::model::table::{Cell, Table};
+
+    fn first_image_child(node: &RenderNode) -> Option<&RenderNode> {
+        if matches!(node.node_type, RenderNodeType::Image(_)) {
+            return Some(node);
+        }
+        node.children.iter().find_map(first_image_child)
+    }
+
+    fn first_table_child(node: &RenderNode) -> Option<&RenderNode> {
+        if matches!(node.node_type, RenderNodeType::Table(_)) {
+            return Some(node);
+        }
+        node.children.iter().find_map(first_table_child)
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+    let host_line_height = 900;
+    let host_line_spacing = 540;
+    let picture_height = 11_400;
+    let picture = Picture {
+        common: CommonObjAttr {
+            width: 48_190,
+            height: picture_height,
+            treat_as_char: false,
+            text_wrap: TextWrap::TopAndBottom,
+            vert_rel_to: VertRelTo::Para,
+            horz_rel_to: HorzRelTo::Column,
+            vert_align: VertAlign::Top,
+            horz_align: HorzAlign::Left,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let following_table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        common: CommonObjAttr {
+            width: 12_000,
+            height: 4_000,
+            treat_as_char: true,
+            text_wrap: TextWrap::TopAndBottom,
+            ..Default::default()
+        },
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 12_000,
+            height: 4_000,
+            paragraphs: vec![Paragraph {
+                text: "cell".to_string(),
+                line_segs: vec![LineSeg {
+                    line_height: 900,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let paragraphs = vec![
+        Paragraph {
+            controls: vec![Control::Picture(Box::new(picture))],
+            line_segs: vec![LineSeg {
+                line_height: host_line_height,
+                line_spacing: host_line_spacing,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Paragraph {
+            controls: vec![Control::Table(Box::new(following_table))],
+            line_segs: vec![LineSeg {
+                line_height: 900,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    ];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            items: vec![
+                PageItem::FullParagraph { para_index: 0 },
+                PageItem::Shape {
+                    para_index: 0,
+                    control_index: 0,
+                },
+                PageItem::Table {
+                    para_index: 1,
+                    control_index: 0,
+                },
+            ],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    };
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &ResolvedStyleSet::default(),
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+    let body_node = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body should render");
+    let image_node = first_image_child(body_node).expect("picture should render");
+    let table_node = first_table_child(body_node).expect("following table should render");
+    let host_line_advance = crate::renderer::hwpunit_to_px(
+        host_line_height + host_line_spacing,
+        crate::renderer::DEFAULT_DPI,
+    );
+    let picture_h =
+        crate::renderer::hwpunit_to_px(picture_height as i32, crate::renderer::DEFAULT_DPI);
+    assert!(
+        image_node.bbox.y >= body_node.bbox.y + host_line_advance * 2.0 - 0.1,
+        "large non-TAC picture should visually start after the rendered empty host line: image y={} body y={} host={}",
+        image_node.bbox.y,
+        body_node.bbox.y,
+        host_line_advance
+    );
+    assert!(
+        (table_node.bbox.y - (body_node.bbox.y + picture_h + host_line_advance)).abs() < 0.1,
+        "visual-only picture shift should not push following flow: table y={} expected={}",
+        table_node.bbox.y,
+        body_node.bbox.y + picture_h + host_line_advance
+    );
+}
+
+#[test]
+fn empty_host_first_partial_topbottom_table_starts_after_host_line() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertAlign, VertRelTo};
+    use crate::model::table::{Cell, Table};
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        outer_margin_top: 283,
+        common: CommonObjAttr {
+            width: 12_000,
+            height: 4_000,
+            vertical_offset: 1_200,
+            treat_as_char: false,
+            text_wrap: TextWrap::TopAndBottom,
+            vert_rel_to: VertRelTo::Para,
+            vert_align: VertAlign::Top,
+            ..Default::default()
+        },
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 12_000,
+            height: 4_000,
+            paragraphs: vec![Paragraph {
+                text: "cell".to_string(),
+                line_segs: vec![LineSeg {
+                    line_height: 900,
+                    line_spacing: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let paragraphs = vec![Paragraph {
+        controls: vec![Control::Table(Box::new(table))],
+        line_segs: vec![LineSeg {
+            line_height: 900,
+            line_spacing: 720,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            items: vec![PageItem::PartialTable {
+                para_index: 0,
+                control_index: 0,
+                start_row: 0,
+                end_row: 1,
+                is_continuation: false,
+                start_cut: Vec::new(),
+                end_cut: Vec::new(),
+                is_block_split: false,
+            }],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    };
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &ResolvedStyleSet::default(),
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+    let table_node = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .and_then(|body| body.children.first())
+        .and_then(|col| {
+            col.children
+                .iter()
+                .find(|n| matches!(n.node_type, RenderNodeType::Table(_)))
+        })
+        .expect("partial table should render");
+    let expected_y = page_content.layout.body_area.y
+        + (900.0 + 720.0) * 96.0 / 7200.0
+        + 283.0 * 96.0 / 7200.0
+        + 1_200.0 * 96.0 / 7200.0;
+    assert!(
+        (table_node.bbox.y - expected_y).abs() < 0.1,
+        "first partial empty-host TopAndBottom table should include host line and outer top before vertical offset: got {} expected {}",
+        table_node.bbox.y,
+        expected_y
+    );
+}
+
+#[test]
+fn first_partial_topbottom_table_does_not_paint_following_host_text_before_table() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertAlign, VertRelTo};
+    use crate::model::table::{Cell, Table};
+
+    fn collect_text_runs(node: &RenderNode, out: &mut Vec<String>) {
+        if let RenderNodeType::TextRun(run) = &node.node_type {
+            out.push(run.text.clone());
+        }
+        for child in &node.children {
+            collect_text_runs(child, out);
+        }
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        outer_margin_top: 283,
+        common: CommonObjAttr {
+            width: 12_000,
+            height: 4_000,
+            vertical_offset: 1_200,
+            treat_as_char: false,
+            text_wrap: TextWrap::TopAndBottom,
+            vert_rel_to: VertRelTo::Para,
+            vert_align: VertAlign::Top,
+            ..Default::default()
+        },
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 12_000,
+            height: 4_000,
+            paragraphs: vec![Paragraph {
+                text: "cell".to_string(),
+                line_segs: vec![LineSeg {
+                    line_height: 900,
+                    line_spacing: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let paragraphs = vec![Paragraph {
+        text: "after".to_string(),
+        // The 8-code-unit gap before the first real character places the
+        // table control before this text in the paragraph stream.
+        char_offsets: vec![8, 9, 10, 11, 12],
+        hwpx_para_xml: Some(
+            br#"<hp:p><hp:run><hp:tbl id="1"></hp:tbl><hp:t>after</hp:t></hp:run></hp:p>"#.to_vec(),
+        ),
+        controls: vec![Control::Table(Box::new(table))],
+        line_segs: vec![LineSeg {
+            line_height: 900,
+            line_spacing: 720,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            items: vec![PageItem::PartialTable {
+                para_index: 0,
+                control_index: 0,
+                start_row: 0,
+                end_row: 1,
+                is_continuation: false,
+                start_cut: Vec::new(),
+                end_cut: Vec::new(),
+                is_block_split: false,
+            }],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    };
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &ResolvedStyleSet::default(),
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+    let body = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body should render");
+    let table_node = body
+        .children
+        .first()
+        .and_then(|col| {
+            col.children
+                .iter()
+                .find(|n| matches!(n.node_type, RenderNodeType::Table(_)))
+        })
+        .expect("partial table should render");
+    let expected_y = page_content.layout.body_area.y
+        + (900.0 + 720.0) * 96.0 / 7200.0
+        + 283.0 * 96.0 / 7200.0
+        + 1_200.0 * 96.0 / 7200.0;
+    assert!(
+        (table_node.bbox.y - expected_y).abs() < 0.1,
+        "first partial table before host text should use empty-host anchor: got {} expected {}",
+        table_node.bbox.y,
+        expected_y
+    );
+    let mut text_runs = Vec::new();
+    collect_text_runs(body, &mut text_runs);
+    assert!(
+        !text_runs.iter().any(|text| text == "after"),
+        "text after the table control must not be painted before the first partial table: {:?}",
+        text_runs
+    );
 }
 
 #[test]

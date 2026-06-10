@@ -24,7 +24,7 @@ use crate::model::shape::{
     SizeCriterion, TextBox, TextWrap, VertAlign, VertRelTo,
 };
 use crate::model::style::{Fill, ShapeBorderLine};
-use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
+use crate::model::table::{Cell, HwpxTablePageBreak, Table, TablePageBreak, VerticalAlign};
 use crate::model::HwpUnit16;
 use crate::parser::tags;
 
@@ -38,6 +38,8 @@ use super::HwpxError;
 /// section*.xml을 파싱하여 Section 모델로 변환한다.
 pub fn parse_hwpx_section(xml: &str) -> Result<Section, HwpxError> {
     let mut section = Section::default();
+    let raw_paragraphs = extract_top_level_paragraph_xml(xml);
+    section.hwpx_sec_pr_xml = extract_first_element_xml(xml, b"secPr");
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
 
@@ -49,10 +51,11 @@ pub fn parse_hwpx_section(xml: &str) -> Result<Section, HwpxError> {
                 match local {
                     b"p" => {
                         // 최상위 문단
-                        let (para, sec_def_opt) = parse_paragraph(e, &mut reader)?;
+                        let (mut para, sec_def_opt) = parse_paragraph(e, &mut reader)?;
                         if let Some(sec_def) = sec_def_opt {
                             section.section_def = sec_def;
                         }
+                        para.hwpx_para_xml = raw_paragraphs.get(section.paragraphs.len()).cloned();
                         section.paragraphs.push(para);
                     }
                     _ => {}
@@ -66,6 +69,133 @@ pub fn parse_hwpx_section(xml: &str) -> Result<Section, HwpxError> {
     }
 
     Ok(section)
+}
+
+fn extract_top_level_paragraph_xml(xml: &str) -> Vec<Vec<u8>> {
+    let bytes = xml.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut current_start: Option<usize> = None;
+    let mut i = 0usize;
+
+    while let Some(rel_start) = bytes[i..].iter().position(|&b| b == b'<') {
+        let start = i + rel_start;
+        let Some(end) = find_xml_tag_end(bytes, start) else {
+            break;
+        };
+        let tag = &bytes[start..=end];
+        if tag.starts_with(b"<!--") || tag.starts_with(b"<![CDATA[") || tag.starts_with(b"<?") {
+            i = end + 1;
+            continue;
+        }
+
+        let is_end = tag.get(1) == Some(&b'/');
+        let is_empty = !is_end && tag[..tag.len().saturating_sub(1)].ends_with(b"/");
+        let name = xml_tag_local_name(tag, is_end);
+
+        if is_end {
+            if name == b"p" && depth == 2 {
+                if let Some(open) = current_start.take() {
+                    out.push(bytes[open..=end].to_vec());
+                }
+            }
+            depth = depth.saturating_sub(1);
+        } else {
+            if name == b"p" && depth == 1 {
+                if is_empty {
+                    out.push(bytes[start..=end].to_vec());
+                } else {
+                    current_start = Some(start);
+                }
+            }
+            if !is_empty {
+                depth += 1;
+            }
+        }
+        i = end + 1;
+    }
+
+    out
+}
+
+fn extract_first_element_xml(xml: &str, target_local_name: &[u8]) -> Option<Vec<u8>> {
+    let bytes = xml.as_bytes();
+    let mut depth = 0usize;
+    let mut target_depth = None;
+    let mut target_start = None;
+    let mut i = 0usize;
+
+    while let Some(rel_start) = bytes[i..].iter().position(|&b| b == b'<') {
+        let start = i + rel_start;
+        let Some(end) = find_xml_tag_end(bytes, start) else {
+            break;
+        };
+        let tag = &bytes[start..=end];
+        if tag.starts_with(b"<!--") || tag.starts_with(b"<![CDATA[") || tag.starts_with(b"<?") {
+            i = end + 1;
+            continue;
+        }
+
+        let is_end = tag.get(1) == Some(&b'/');
+        let is_empty = !is_end && tag[..tag.len().saturating_sub(1)].ends_with(b"/");
+        let name = xml_tag_local_name(tag, is_end);
+
+        if is_end {
+            if Some(depth) == target_depth && name == target_local_name {
+                if let Some(open) = target_start {
+                    return Some(bytes[open..=end].to_vec());
+                }
+            }
+            depth = depth.saturating_sub(1);
+        } else {
+            if target_depth.is_none() && name == target_local_name {
+                if is_empty {
+                    return Some(bytes[start..=end].to_vec());
+                }
+                target_start = Some(start);
+                target_depth = Some(depth + 1);
+            }
+            if !is_empty {
+                depth += 1;
+            }
+        }
+        i = end + 1;
+    }
+
+    None
+}
+
+fn find_xml_tag_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, &b) in bytes[start..].iter().enumerate() {
+        match (quote, b) {
+            (Some(q), c) if c == q => quote = None,
+            (None, b'"') | (None, b'\'') => quote = Some(b),
+            (None, b'>') => return Some(start + offset),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn xml_tag_local_name(tag: &[u8], is_end: bool) -> &[u8] {
+    let mut start = if is_end { 2 } else { 1 };
+    while start < tag.len() && tag[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = start;
+    while end < tag.len() {
+        let b = tag[end];
+        if b.is_ascii_whitespace() || b == b'/' || b == b'>' {
+            break;
+        }
+        end += 1;
+    }
+    let name = &tag[start..end];
+    match name.iter().rposition(|&b| b == b':') {
+        Some(pos) => &name[pos + 1..],
+        None => name,
+    }
 }
 
 /// masterpage*.xml을 파싱하여 기존 HWP 바탕쪽 모델로 변환한다.
@@ -1405,6 +1535,13 @@ fn parse_table(
             }
             b"pageBreak" => {
                 let val = attr_str(&attr);
+                table.hwpx_page_break = match val.as_str() {
+                    "TABLE" | "TABLE_BREAK" => Some(HwpxTablePageBreak::Table),
+                    "CELL" | "CELL_BREAK" => Some(HwpxTablePageBreak::Cell),
+                    "ROW" | "ROW_BREAK" => Some(HwpxTablePageBreak::Row),
+                    "NONE" => Some(HwpxTablePageBreak::None),
+                    _ => None,
+                };
                 table.page_break = match val.as_str() {
                     // HWPX pageBreak="CELL" is serialized by Hancom as HWP5
                     // row-break (TABLE attr bit 1). HWPX pageBreak="TABLE"
@@ -5006,6 +5143,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extract_top_level_paragraph_xml_ignores_nested_paragraphs() {
+        let xml = r#"<hs:sec xmlns:hs="s" xmlns:hp="p">
+  <hp:p id="top1"><hp:run><hp:t>A</hp:t></hp:run></hp:p>
+  <hp:tbl><hp:tr><hp:tc><hp:subList><hp:p id="nested"/></hp:subList></hp:tc></hp:tr></hp:tbl>
+  <hp:p id="top2"><hp:run><hp:t>B</hp:t></hp:run></hp:p>
+</hs:sec>"#;
+
+        let paragraphs = extract_top_level_paragraph_xml(xml);
+
+        assert_eq!(paragraphs.len(), 2);
+        assert!(std::str::from_utf8(&paragraphs[0])
+            .unwrap()
+            .contains(r#"id="top1""#));
+        assert!(std::str::from_utf8(&paragraphs[1])
+            .unwrap()
+            .contains(r#"id="top2""#));
+    }
+
+    #[test]
+    fn parse_section_stores_top_level_paragraph_source_xml() {
+        let xml = r#"<hs:sec xmlns:hs="s" xmlns:hp="p">
+  <hp:p id="top1" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t>A</hp:t></hp:run></hp:p>
+  <hp:p id="top2" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t>B</hp:t></hp:run></hp:p>
+</hs:sec>"#;
+
+        let section = parse_hwpx_section(xml).unwrap();
+
+        assert_eq!(section.paragraphs.len(), 2);
+        assert!(section.paragraphs[0]
+            .hwpx_para_xml
+            .as_ref()
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .unwrap()
+            .contains(r#"id="top1""#));
+        assert!(section.paragraphs[1]
+            .hwpx_para_xml
+            .as_ref()
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .unwrap()
+            .contains(r#"id="top2""#));
+    }
+
+    #[test]
+    fn parse_section_stores_raw_sec_pr_xml() {
+        let xml = r#"<hs:sec xmlns:hs="s" xmlns:hp="p">
+  <hp:p id="top1" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0">
+    <hp:secPr textDirection="HORIZONTAL" tabStopVal="4000" tabStopUnit="HWPUNIT">
+      <hp:pagePr landscape="WIDELY" width="59528" height="84186" gutterType="LEFT_ONLY">
+        <hp:margin header="2834" footer="2834" gutter="0" left="5669" right="5669" top="4251" bottom="4252"/>
+      </hp:pagePr>
+    </hp:secPr>
+  </hp:run></hp:p>
+</hs:sec>"#;
+
+        let section = parse_hwpx_section(xml).unwrap();
+        let sec_pr = std::str::from_utf8(section.hwpx_sec_pr_xml.as_ref().unwrap()).unwrap();
+
+        assert!(sec_pr.contains(r#"tabStopVal="4000""#));
+        assert!(sec_pr.contains(r#"left="5669""#));
+    }
+
+    #[test]
     fn test_parse_simple_section() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <hs:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"
@@ -5275,6 +5474,8 @@ mod tests {
         assert_eq!(tables.len(), 2);
         assert_eq!(tables[0].page_break, TablePageBreak::CellBreak);
         assert_eq!(tables[1].page_break, TablePageBreak::RowBreak);
+        assert_eq!(tables[0].hwpx_page_break, Some(HwpxTablePageBreak::Table));
+        assert_eq!(tables[1].hwpx_page_break, Some(HwpxTablePageBreak::Cell));
     }
 
     #[test]

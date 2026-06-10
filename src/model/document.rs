@@ -160,6 +160,10 @@ pub struct DocInfo {
     pub distribute_doc_data_removed: bool,
     /// raw_stream이 model 변경과 동기화되지 않음 (serializer에서 재생성 필요)
     pub raw_stream_dirty: bool,
+    /// Original HWPX `Contents/header.xml` bytes. HWPX export can preserve this
+    /// byte-for-byte while DocInfo is unchanged, avoiding lossy style-table
+    /// regeneration on body-only edits.
+    pub hwpx_header_xml: Option<Vec<u8>>,
 }
 
 /// 본문의 구역 (Section)
@@ -172,6 +176,14 @@ pub struct Section {
     /// 원본 BodyText 레코드 스트림 바이트 (직렬화 시 원본 복원용)
     /// 편집 시 None으로 초기화하여 재직렬화 유도
     pub raw_stream: Option<Vec<u8>>,
+    /// Original HWPX `Contents/sectionN.xml` bytes. HWPX export can preserve
+    /// untouched sections byte-for-byte while edited sections are regenerated.
+    pub hwpx_section_xml: Option<Vec<u8>>,
+    /// Original HWPX `<hp:secPr>...</hp:secPr>` bytes for this section.
+    ///
+    /// Body text edits can regenerate paragraph text while preserving page
+    /// setup attributes that are not fully represented in the current IR.
+    pub hwpx_sec_pr_xml: Option<Vec<u8>>,
 }
 
 /// 구역 정의 (HWPTAG_CTRL_HEADER - 'secd')

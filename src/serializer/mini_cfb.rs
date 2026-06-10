@@ -20,6 +20,7 @@ const HEADER_DIFAT_COUNT: usize = 109;
 const ENDOFCHAIN: u32 = 0xFFFFFFFE;
 const FREESECT: u32 = 0xFFFFFFFF;
 const FATSECT: u32 = 0xFFFFFFFD;
+const DIFSECT: u32 = 0xFFFFFFFC;
 const NOSTREAM: u32 = 0xFFFFFFFF;
 
 /// CFB 시그니처 (Magic Number)
@@ -135,20 +136,32 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
         mini_fat_sector_count = 0;
     }
 
-    // FAT 섹터 수 계산 (고정점 반복)
+    // FAT/DIFAT 섹터 수 계산 (고정점 반복)
     let non_fat_sectors = next_sector;
     let mut fat_count = 1u32;
+    let mut difat_count = 0u32;
     loop {
-        let total = non_fat_sectors + fat_count;
-        let needed = ((total as usize) + FAT_ENTRIES_PER_SECTOR - 1) / FAT_ENTRIES_PER_SECTOR;
-        if needed as u32 <= fat_count {
+        let total = non_fat_sectors + fat_count + difat_count;
+        let needed_fat = ((total as usize) + FAT_ENTRIES_PER_SECTOR - 1) / FAT_ENTRIES_PER_SECTOR;
+        let needed_difat = if needed_fat <= HEADER_DIFAT_COUNT {
+            0
+        } else {
+            (needed_fat - HEADER_DIFAT_COUNT + 126) / 127
+        };
+        if needed_fat as u32 == fat_count && needed_difat as u32 == difat_count {
             break;
         }
-        fat_count = needed as u32;
+        fat_count = needed_fat as u32;
+        difat_count = needed_difat as u32;
     }
 
     let fat_start = non_fat_sectors;
-    let total_sectors = non_fat_sectors + fat_count;
+    let difat_start = if difat_count > 0 {
+        fat_start + fat_count
+    } else {
+        ENDOFCHAIN
+    };
+    let total_sectors = non_fat_sectors + fat_count + difat_count;
 
     // 5. FAT 구축
     let mut fat = vec![FREESECT; total_sectors as usize];
@@ -207,6 +220,13 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
         fat[fat_start as usize + i] = FATSECT;
     }
 
+    // DIFAT 섹터 마커
+    if difat_start != ENDOFCHAIN {
+        for i in 0..difat_count as usize {
+            fat[difat_start as usize + i] = DIFSECT;
+        }
+    }
+
     // 6. 바이너리 조립
     let file_size = 512 + total_sectors as usize * SECTOR_SIZE;
     let mut output = vec![0u8; file_size];
@@ -216,6 +236,8 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
         &mut output,
         fat_count,
         fat_start,
+        difat_start,
+        difat_count,
         mini_fat_start,
         mini_fat_sector_count,
     );
@@ -261,6 +283,34 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
         let offset =
             512 + (fat_start as usize + fat_sector_idx) * SECTOR_SIZE + entry_in_sector * 4;
         output[offset..offset + 4].copy_from_slice(&fat_entry.to_le_bytes());
+    }
+
+    // DIFAT 작성: 헤더의 109개를 초과하는 FAT 섹터 SID 목록을 127개씩 연결한다.
+    if difat_start != ENDOFCHAIN {
+        let mut next_fat_idx = HEADER_DIFAT_COUNT as u32;
+        for sector_idx in 0..difat_count {
+            let sector_id = difat_start + sector_idx;
+            let offset = 512 + sector_id as usize * SECTOR_SIZE;
+
+            for slot in 0..127usize {
+                let value = if next_fat_idx < fat_count {
+                    let sid = fat_start + next_fat_idx;
+                    next_fat_idx += 1;
+                    sid
+                } else {
+                    FREESECT
+                };
+                let pos = offset + slot * 4;
+                output[pos..pos + 4].copy_from_slice(&value.to_le_bytes());
+            }
+
+            let next = if sector_idx + 1 < difat_count {
+                difat_start + sector_idx + 1
+            } else {
+                ENDOFCHAIN
+            };
+            output[offset + 127 * 4..offset + 128 * 4].copy_from_slice(&next.to_le_bytes());
+        }
     }
 
     Ok(output)
@@ -358,6 +408,8 @@ fn write_header(
     output: &mut [u8],
     fat_count: u32,
     fat_start: u32,
+    difat_start: u32,
+    difat_count: u32,
     mini_fat_start: u32,
     mini_fat_sector_count: u32,
 ) {
@@ -399,10 +451,9 @@ fn write_header(
     // Total mini FAT sectors
     output[64..68].copy_from_slice(&mini_fat_sector_count.to_le_bytes());
 
-    // First DIFAT sector: ENDOFCHAIN (109개 이내)
-    output[68..72].copy_from_slice(&ENDOFCHAIN.to_le_bytes());
-    // Total DIFAT sectors: 0
-    // output[72..76] — 이미 0
+    // First DIFAT sector + DIFAT sector count
+    output[68..72].copy_from_slice(&difat_start.to_le_bytes());
+    output[72..76].copy_from_slice(&difat_count.to_le_bytes());
 
     // DIFAT 배열 (109개 엔트리, 각 4바이트)
     let difat_start = 76;
@@ -569,6 +620,37 @@ mod tests {
         std::io::Read::read_to_end(&mut cfb.open_stream("/BigStream").unwrap(), &mut read_data)
             .unwrap();
         assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_build_cfb_writes_difat_for_many_fat_sectors() {
+        // > 109 FAT sectors forces an external DIFAT chain. Without DIFAT,
+        // standard CFB readers cannot follow streams placed late in the file.
+        let big = vec![0x42u8; 8 * 1024 * 1024];
+        let small = vec![0x24u8; 128];
+        let streams = vec![
+            ("/BigStream", big.as_slice()),
+            ("/SmallStream", small.as_slice()),
+        ];
+        let bytes = build_cfb(&streams).unwrap();
+
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut cfb = cfb::CompoundFile::open(cursor).unwrap();
+
+        let mut big_read = Vec::new();
+        std::io::Read::read_to_end(&mut cfb.open_stream("/BigStream").unwrap(), &mut big_read)
+            .unwrap();
+        assert_eq!(big_read.len(), big.len());
+        assert_eq!(&big_read[..16], &big[..16]);
+        assert_eq!(&big_read[big_read.len() - 16..], &big[big.len() - 16..]);
+
+        let mut small_read = Vec::new();
+        std::io::Read::read_to_end(
+            &mut cfb.open_stream("/SmallStream").unwrap(),
+            &mut small_read,
+        )
+        .unwrap();
+        assert_eq!(small_read, small);
     }
 
     #[test]

@@ -580,8 +580,33 @@ impl DocumentCore {
     /// 어댑터 호출은 IR 자체를 변경하므로 `&mut self` 를 요구한다.
     pub fn export_hwp_with_adapter(&mut self) -> Result<Vec<u8>, HwpError> {
         use crate::document_core::converters::hwpx_to_hwp::convert_if_hwpx_source;
-        let _report = convert_if_hwpx_source(&mut self.document, self.source_format);
+        let report = convert_if_hwpx_source(&mut self.document, self.source_format);
+        if report.changed_anything() {
+            self.refresh_derived_layout_state();
+        }
+        // The adapter materializes HWP5-compatible layout/record contracts.
+        // Repaginate before serializing so the in-memory document state and a
+        // reloaded HWP are compared on the same post-adapter model.
+        self.paginate();
         self.export_hwp_native()
+    }
+
+    fn refresh_derived_layout_state(&mut self) {
+        self.styles = crate::renderer::style_resolver::resolve_styles_with_variant(
+            &self.document.doc_info,
+            self.dpi,
+            self.document.is_hwp3_variant,
+        );
+        self.composed = self
+            .document
+            .sections
+            .iter()
+            .map(|s| compose_section(s))
+            .collect();
+        self.mark_all_sections_dirty();
+        self.measured_tables.clear();
+        self.measured_sections.clear();
+        self.pagination.clear();
     }
 
     /// 어댑터 적용 + 직렬화 + 자기 재로드 검증을 한 번에 수행한다 (#178 Stage 6).
@@ -601,8 +626,8 @@ impl DocumentCore {
     /// 1회 paginate + 1회 직렬화 + 1회 from_bytes (paginate 포함). 작은 문서 ~수 ms,
     /// 큰 문서 수백 ms 가능.
     pub fn serialize_hwp_with_verify(&mut self) -> Result<HwpExportVerification, HwpError> {
-        let page_count_before = self.page_count();
         let bytes = self.export_hwp_with_adapter()?;
+        let page_count_before = self.page_count();
         let bytes_len = bytes.len();
         let reloaded = DocumentCore::from_bytes(&bytes)?;
         let page_count_after = reloaded.page_count();
@@ -1202,5 +1227,46 @@ mod validate_linesegs_tests {
         seg.line_height = 1000;
         para.line_segs.push(seg);
         assert!(DocumentCore::needs_reflow_broadly(&para));
+    }
+
+    #[test]
+    fn edited_large_hwpx_exports_hwp_that_reloads_docinfo() {
+        let default_path =
+            "/Users/jaehoshin/Desktop/mindlogic/factchat/worktree-hwpx-final/hwp-agent-spike/samples/corpus/15_007p_active_admin_stress.hwpx";
+        let path_string =
+            std::env::var("RHWP_EXPORT_FIXTURE").unwrap_or_else(|_| default_path.to_string());
+        let path = std::path::Path::new(&path_string);
+        if !path.exists() {
+            eprintln!("fixture not present: {}", path.display());
+            return;
+        }
+
+        let bytes = std::fs::read(path).expect("read fixture");
+        let mut core = DocumentCore::from_bytes(&bytes).expect("parse fixture");
+        core.insert_text_native(0, 0, 0, "[export-probe] ")
+            .expect("mutate fixture");
+
+        let doc_info_bytes = crate::serializer::doc_info::serialize_doc_info(
+            &core.document.doc_info,
+            &core.document.doc_properties,
+        );
+        crate::parser::record::Record::read_all(&doc_info_bytes)
+            .expect("generated DocInfo records should be internally well-formed");
+
+        let bytes = core
+            .export_hwp_with_adapter()
+            .expect("HWP export should reload after self-verify");
+        let page_count_before = core.page_count();
+        let reloaded = DocumentCore::from_bytes(&bytes).expect("HWP export should reload");
+        let page_count_after = reloaded.page_count();
+        assert_eq!(
+            page_count_before, page_count_after,
+            "HWP export reload page count should recover"
+        );
+        assert!(
+            page_count_before == page_count_after,
+            "HWP export self-verify should recover"
+        );
+        assert!(!bytes.is_empty());
     }
 }

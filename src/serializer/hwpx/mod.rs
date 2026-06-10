@@ -690,6 +690,15 @@ mod tests {
 
         let mut doc = Document::default();
         doc.doc_info
+            .char_shapes
+            .push(crate::model::style::CharShape::default());
+        doc.doc_info
+            .para_shapes
+            .push(crate::model::style::ParaShape::default());
+        doc.doc_info
+            .styles
+            .push(crate::model::style::Style::default());
+        doc.doc_info
             .border_fills
             .push(crate::model::style::BorderFill::default());
 
@@ -723,6 +732,197 @@ mod tests {
             .iter()
             .any(|c| matches!(c, Control::Table(_)));
         assert!(has_table, "table control missing after roundtrip");
+    }
+
+    #[test]
+    fn table_cell_nested_picture_and_linesegs_roundtrip() {
+        use crate::model::bin_data::BinDataContent;
+        use crate::model::control::Control;
+        use crate::model::image::{ImageAttr, Picture};
+        use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
+        use crate::model::shape::CommonObjAttr;
+        use crate::model::table::{Cell, Table};
+
+        let fake_png = b"\x89PNG\r\n\x1a\nnested_cell_picture";
+
+        let mut doc = Document::default();
+        doc.doc_info
+            .char_shapes
+            .push(crate::model::style::CharShape::default());
+        doc.doc_info
+            .para_shapes
+            .push(crate::model::style::ParaShape::default());
+        doc.doc_info
+            .styles
+            .push(crate::model::style::Style::default());
+        doc.doc_info
+            .border_fills
+            .push(crate::model::style::BorderFill::default());
+        doc.bin_data_content.push(BinDataContent {
+            id: 1,
+            data: fake_png.to_vec(),
+            extension: "png".to_string(),
+        });
+
+        let mut cell_para = Paragraph {
+            text: "B".to_string(),
+            char_offsets: vec![8],
+            char_count: 10,
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            line_segs: vec![LineSeg {
+                text_start: 0,
+                vertical_pos: 321,
+                line_height: 1234,
+                text_height: 1111,
+                baseline_distance: 900,
+                line_spacing: 222,
+                column_start: 33,
+                segment_width: 4444,
+                tag: 393216,
+            }],
+            ..Default::default()
+        };
+        cell_para.controls.push(Control::Picture(Box::new(Picture {
+            common: CommonObjAttr {
+                width: 700,
+                height: 600,
+                treat_as_char: true,
+                ..Default::default()
+            },
+            image_attr: ImageAttr {
+                bin_data_id: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        })));
+
+        let mut table = Table {
+            row_count: 1,
+            col_count: 1,
+            border_fill_id: 0,
+            common: CommonObjAttr {
+                width: 5000,
+                height: 2000,
+                treat_as_char: true,
+                ..Default::default()
+            },
+            cells: vec![Cell {
+                col: 0,
+                row: 0,
+                col_span: 1,
+                row_span: 1,
+                width: 5000,
+                height: 2000,
+                border_fill_id: 0,
+                paragraphs: vec![cell_para],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        table.rebuild_grid();
+
+        let mut section = crate::model::document::Section::default();
+        let mut para = Paragraph::default();
+        para.text = "A".to_string();
+        para.char_offsets = vec![8];
+        para.char_count = 10;
+        para.controls.push(Control::Table(Box::new(table)));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize nested cell picture");
+
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut sec0 = archive.by_name("Contents/section0.xml").expect("section0");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
+        assert!(xml.contains("<hp:pic "), "nested picture missing: {}", xml);
+        assert!(
+            xml.contains(r#"vertpos="321""#) && xml.contains(r#"horzsize="4444""#),
+            "cell lineSeg was not preserved: {}",
+            xml
+        );
+        drop(sec0);
+
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let table = parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table after roundtrip");
+        let nested_pic_count = table.cells[0].paragraphs[0]
+            .controls
+            .iter()
+            .filter(|c| matches!(c, Control::Picture(_)))
+            .count();
+        assert_eq!(nested_pic_count, 1, "nested cell picture lost");
+        assert_eq!(
+            table.cells[0].paragraphs[0].line_segs[0].vertical_pos, 321,
+            "cell lineSeg vertical_pos changed"
+        );
+    }
+
+    #[test]
+    fn field_control_roundtrip_preserves_control() {
+        use crate::model::control::{Control, Field, FieldType};
+
+        let mut doc = Document::default();
+        doc.doc_info
+            .char_shapes
+            .push(crate::model::style::CharShape::default());
+        doc.doc_info
+            .para_shapes
+            .push(crate::model::style::ParaShape::default());
+        doc.doc_info
+            .styles
+            .push(crate::model::style::Style::default());
+
+        let mut section = crate::model::document::Section::default();
+        let mut para = crate::model::paragraph::Paragraph::default();
+        para.text = "필드".to_string();
+        para.char_offsets = vec![8, 9];
+        para.char_count = 11;
+        para.field_ranges.push(crate::model::paragraph::FieldRange {
+            start_char_idx: 0,
+            end_char_idx: 2,
+            control_idx: 0,
+        });
+        para.controls.push(Control::Field(Field {
+            field_type: FieldType::ClickHere,
+            field_id: 77,
+            ctrl_data_name: Some("name".to_string()),
+            ..Default::default()
+        }));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize field");
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut sec0 = archive.by_name("Contents/section0.xml").expect("section0");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
+        assert!(
+            xml.contains("<hp:fieldBegin"),
+            "fieldBegin missing: {}",
+            xml
+        );
+        assert!(xml.contains("<hp:fieldEnd"), "fieldEnd missing: {}", xml);
+        drop(sec0);
+
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let has_field = parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .any(|c| matches!(c, Control::Field(_)));
+        assert!(has_field, "field control missing after roundtrip");
     }
 
     #[test]

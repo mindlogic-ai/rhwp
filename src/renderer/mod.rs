@@ -209,6 +209,11 @@ impl TextStyle {
     pub fn is_medium_weight(&self) -> bool {
         !self.bold && crate::renderer::style_resolver::is_medium_weight_face(&self.font_family)
     }
+
+    /// Font size used for painting. Layout keeps the original HWP font size.
+    pub fn visual_font_size(&self, font_size: f64) -> f64 {
+        font_size * crate::renderer::style_resolver::visual_font_size_scale(&self.font_family)
+    }
 }
 
 impl Default for TextStyle {
@@ -669,10 +674,13 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
     // 1순위 사용 → 영향 0. PUA 글리프 부재 시에만 함초롬바탕 매칭.
     if font_family.is_empty() {
         // Sans-serif: Windows → macOS/iOS → Android → 오픈소스 → 한컴 → generic
-        return "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+        return "'Malgun Gothic','맑은 고딕','Pretendard','Nanum Gothic','Apple SD Gothic Neo','Noto Sans KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
     }
     // 고정폭 키워드
     let lower = font_family.to_ascii_lowercase();
+    if lower.contains("kopub") && (font_family.contains("바탕") || lower.contains("batang")) {
+        return "'KoPub Batang','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+    }
     if font_family.contains("굴림체")
         || font_family.contains("바탕체")
         || lower.contains("gulimche")
@@ -692,7 +700,7 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         // AppleMyungjo 보다 앞에 두어야 macOS Chrome 에서 CJK 글리프 bold 매칭 성공.
         // 'Source Han Serif K Old Hangul' (Task #528): @font-face unicode-range 가 옛한글
         // 영역 (U+1100-11FF, U+A960-A97F, U+D7B0-D7FF) 만 매칭하므로 일반 한글에 영향 없음.
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        return "'Batang','바탕','KoPub Batang','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     // 세리프 키워드 (영문) — "serif" 포함하되 "sans" 부분 문자열을 가진 폰트명 전체 제외
     if lower.contains("times")
@@ -703,11 +711,11 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
         || lower.contains("gungsuh")
         || (lower.contains("serif") && !lower.contains("sans"))
     {
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        return "'Batang','바탕','KoPub Batang','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
     }
     // Sans-serif: Windows → macOS/iOS → Android → 오픈소스 → 한컴 → generic
     // 'Source Han Serif K Old Hangul' (Task #528): unicode-range 옛한글 자모 영역 한정
-    "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif"
+    "'Malgun Gothic','맑은 고딕','Pretendard','Nanum Gothic','Apple SD Gothic Neo','Noto Sans KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif"
 }
 
 // ============================================================
@@ -1101,14 +1109,16 @@ mod tests {
 
     #[test]
     fn test_generic_fallback() {
-        let serif = "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
-        let sans = "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
+        let serif = "'Batang','바탕','KoPub Batang','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        let kopub_serif = "'KoPub Batang','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',serif";
+        let sans = "'Malgun Gothic','맑은 고딕','Pretendard','Nanum Gothic','Apple SD Gothic Neo','Noto Sans KR','HCR Batang Ext-B','함초롬바탕 확장B','HCR Batang Ext','함초롬바탕 확장','HCR Batang','함초롬바탕','Source Han Serif K Old Hangul',sans-serif";
         let mono = "'GulimChe','굴림체','D2Coding','Noto Sans Mono',monospace";
         // 세리프 계열
         assert_eq!(generic_fallback("함초롬바탕"), serif);
         assert_eq!(generic_fallback("바탕"), serif);
         assert_eq!(generic_fallback("궁서"), serif);
         assert_eq!(generic_fallback("HY견명조"), serif);
+        assert_eq!(generic_fallback("KoPub바탕체 Light"), kopub_serif);
         assert_eq!(generic_fallback("Times New Roman"), serif);
         assert_eq!(generic_fallback("Palatino Linotype"), serif);
         // 산세리프 계열
@@ -1136,12 +1146,33 @@ mod tests {
 
     #[test]
     fn test_medium_weight_face() {
-        use crate::renderer::style_resolver::is_medium_weight_face;
+        use crate::renderer::style_resolver::{is_heavy_display_face, is_medium_weight_face};
+        assert!(!is_heavy_display_face("경기천년바탕 Bold"));
+        assert!(!is_heavy_display_face("Arial Bold"));
+        assert!(is_heavy_display_face("HY헤드라인M"));
         assert!(is_medium_weight_face("HY중고딕"));
         assert!(is_medium_weight_face("신명 중고딕"));
         assert!(is_medium_weight_face("한양중고딕"));
         assert!(is_medium_weight_face("HY태고딕"));
         assert!(is_medium_weight_face("신명 태고딕"));
+        assert!(is_medium_weight_face("경기천년제목 Medium"));
+        assert!(is_medium_weight_face("한컴 윤고딕 250"));
+        assert_eq!(
+            crate::renderer::style_resolver::visual_font_size_scale("경기천년바탕 Bold"),
+            0.77
+        );
+        assert_eq!(
+            crate::renderer::style_resolver::visual_font_size_scale("함초롬바탕"),
+            1.0
+        );
+        assert_eq!(
+            crate::renderer::style_resolver::fallback_font_advance_scale("경기천년제목 Medium"),
+            0.88
+        );
+        assert_eq!(
+            crate::renderer::style_resolver::fallback_font_advance_scale("함초롬바탕"),
+            1.0
+        );
         assert!(!is_medium_weight_face("HY헤드라인M"));
         assert!(!is_medium_weight_face("돋움"));
         assert!(!is_medium_weight_face("바탕"));

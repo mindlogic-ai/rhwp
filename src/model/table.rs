@@ -30,6 +30,10 @@ pub struct Table {
     pub cell_grid: Vec<Option<usize>>,
     /// 쪽 경계에서 나눔 (0: 나누지 않음, 1: 셀 단위로 나눔)
     pub page_break: TablePageBreak,
+    /// HWPX 원본의 pageBreak enum spelling. Renderer semantics use
+    /// `page_break`; HWPX export uses this when present to avoid flipping
+    /// TABLE/CELL on edited round-trip.
+    pub hwpx_page_break: Option<HwpxTablePageBreak>,
     /// 제목 줄 자동 반복
     pub repeat_header: bool,
     /// 캡션 정보
@@ -63,6 +67,15 @@ pub enum TablePageBreak {
     CellBreak,
     /// 나눔 (2) — 행 경계에서만 나눔 (인트라-로우 분할 없음)
     RowBreak,
+}
+
+/// Original HWPX `<hp:tbl pageBreak="...">` enum spelling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HwpxTablePageBreak {
+    None,
+    Table,
+    Cell,
+    Row,
 }
 
 /// 표 영역 속성

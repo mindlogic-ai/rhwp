@@ -23,6 +23,71 @@ use crate::model::shape::{
 use crate::model::style::Alignment;
 
 impl LayoutEngine {
+    pub(crate) fn layout_picture_fill_rect(
+        &self,
+        tree: &mut PageRenderTree,
+        parent_node: &mut RenderNode,
+        picture: &crate::model::image::Picture,
+        target: &LayoutRect,
+        bin_data_content: &[BinDataContent],
+        section_index: Option<usize>,
+        para_index: Option<usize>,
+        control_index: Option<usize>,
+    ) {
+        let bin_data_id = picture.image_attr.bin_data_id;
+        let image_data = find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.clone());
+        let crop = {
+            let c = &picture.crop;
+            if c.right > c.left
+                && c.bottom > c.top
+                && (c.left != 0 || c.top != 0 || c.right != 0 || c.bottom != 0)
+            {
+                Some((c.left, c.top, c.right, c.bottom))
+            } else {
+                None
+            }
+        };
+        let original_size_hu =
+            if picture.shape_attr.original_width > 0 && picture.shape_attr.original_height > 0 {
+                Some((
+                    picture.shape_attr.original_width,
+                    picture.shape_attr.original_height,
+                ))
+            } else {
+                None
+            };
+
+        let img_id = tree.next_id();
+        let img_node = RenderNode::new(
+            img_id,
+            RenderNodeType::Image(ImageNode {
+                section_index,
+                para_index,
+                control_index,
+                crop,
+                original_size_hu,
+                effect: picture.image_attr.effect,
+                brightness: picture.image_attr.brightness,
+                contrast: picture.image_attr.contrast,
+                text_wrap: Some(picture.common.text_wrap),
+                transform: extract_shape_transform(&picture.shape_attr),
+                external_path: picture.image_attr.external_path.clone(),
+                ..ImageNode::new(bin_data_id, image_data)
+            }),
+            BoundingBox::new(target.x, target.y, target.width, target.height),
+        );
+        parent_node.children.push(img_node);
+        self.render_picture_border(
+            tree,
+            parent_node,
+            picture,
+            target.x,
+            target.y,
+            target.width,
+            target.height,
+        );
+    }
+
     pub(crate) fn layout_picture(
         &self,
         tree: &mut PageRenderTree,

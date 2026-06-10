@@ -24,7 +24,7 @@ use crate::model::footnote::{FootnoteShape, NumberFormat};
 use crate::model::header_footer::MasterPage;
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::{
-    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, VertAlign, VertRelTo,
+    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo,
 };
 use crate::model::style::{
     Alignment, BorderLine, BorderLineType, HeadType, Numbering, UnderlineType,
@@ -98,6 +98,184 @@ impl CellContext {
 
 fn para_has_visible_text(para: &Paragraph) -> bool {
     para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}')
+}
+
+fn para_has_visible_text_before_control(para: &Paragraph, control_index: usize) -> bool {
+    if matches!(para.controls.get(control_index), Some(Control::Table(_))) {
+        if let Some(has_text) = hwpx_has_visible_text_before_table_control(para, control_index) {
+            return has_text;
+        }
+    }
+    let Some(&control_pos) = para.control_text_positions().get(control_index) else {
+        return para_has_visible_text(para);
+    };
+    para.text
+        .chars()
+        .take(control_pos)
+        .any(|c| c > '\u{001F}' && c != '\u{FFFC}')
+}
+
+fn is_tac_topbottom_table_control(control: Option<&Control>) -> bool {
+    matches!(
+        control,
+        Some(Control::Table(table))
+            if table.common.treat_as_char
+                && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+    )
+}
+
+fn is_empty_tiny_cached_spacer_para(para: &Paragraph) -> bool {
+    if para_has_visible_text(para) || !para.controls.is_empty() {
+        return false;
+    }
+    let Some(seg) = para.line_segs.first() else {
+        return false;
+    };
+    para.line_segs.len() == 1 && seg.line_height <= 700 && seg.line_spacing <= 180
+}
+
+fn para_has_tac_topbottom_table(para: &Paragraph) -> bool {
+    para.controls
+        .iter()
+        .any(|control| is_tac_topbottom_table_control(Some(control)))
+}
+
+fn should_skip_cached_picture_anchor_vpos(
+    paragraphs: &[Paragraph],
+    para_index: usize,
+    control_index: usize,
+    dpi: f64,
+) -> bool {
+    let Some(para) = paragraphs.get(para_index) else {
+        return false;
+    };
+    if para_has_visible_text(para) || para.controls.len() != 1 || control_index != 0 {
+        return false;
+    }
+    let Some(Control::Picture(pic)) = para.controls.get(control_index) else {
+        return false;
+    };
+    if pic.common.treat_as_char
+        || !matches!(pic.common.text_wrap, TextWrap::TopAndBottom)
+        || !matches!(pic.common.vert_rel_to, VertRelTo::Para)
+        || pic.common.vertical_offset != 0
+    {
+        return false;
+    }
+    let Some(seg) = para.line_segs.first() else {
+        return false;
+    };
+    let cached_vpos_px = hwpunit_to_px(seg.vertical_pos, dpi);
+    let picture_height_px =
+        hwpunit_to_px(pic.common.height.min(i32::MAX as u32) as i32, dpi).max(1.0);
+    if !(0.5..=64.0).contains(&cached_vpos_px) || cached_vpos_px > picture_height_px * 0.2 {
+        return false;
+    }
+
+    let mut saw_spacer = false;
+    let mut prev_index = para_index;
+    while prev_index > 0 {
+        prev_index -= 1;
+        let prev = &paragraphs[prev_index];
+        if is_empty_tiny_cached_spacer_para(prev) {
+            saw_spacer = true;
+            continue;
+        }
+        return saw_spacer && para_has_tac_topbottom_table(prev);
+    }
+    false
+}
+
+fn next_para_starts_with_tac_topbottom_table(paragraphs: &[Paragraph], para_index: usize) -> bool {
+    let Some(next_para) = paragraphs.get(para_index + 1) else {
+        return false;
+    };
+    if para_has_visible_text(next_para) {
+        return false;
+    }
+    let Some((control_index, _)) = next_para
+        .controls
+        .iter()
+        .enumerate()
+        .find(|(_, control)| is_tac_topbottom_table_control(Some(control)))
+    else {
+        return false;
+    };
+    !para_has_visible_text_before_control(next_para, control_index)
+}
+
+fn consecutive_tac_table_synthetic_host_gap(
+    paragraphs: &[Paragraph],
+    composed: &[ComposedParagraph],
+    para_index: usize,
+    control_index: usize,
+    dpi: f64,
+) -> f64 {
+    let Some(para) = paragraphs.get(para_index) else {
+        return 0.0;
+    };
+    if !is_tac_topbottom_table_control(para.controls.get(control_index))
+        || para.line_segs.get(control_index).is_some()
+        || !next_para_starts_with_tac_topbottom_table(paragraphs, para_index)
+    {
+        return 0.0;
+    }
+
+    let line_height = composed
+        .get(para_index)
+        .and_then(|comp| comp.lines.first())
+        .map(|line| hwpunit_to_px(line.line_height, dpi))
+        .unwrap_or(0.0);
+    if !(6.0..=24.0).contains(&line_height) {
+        return 0.0;
+    }
+    line_height
+}
+
+fn hwpx_has_visible_text_before_table_control(
+    para: &Paragraph,
+    control_index: usize,
+) -> Option<bool> {
+    let xml = para.hwpx_para_xml.as_ref()?;
+    let table_ordinal = para.controls[..=control_index]
+        .iter()
+        .filter(|control| matches!(control, Control::Table(_)))
+        .count()
+        .checked_sub(1)?;
+    let xml = String::from_utf8_lossy(xml);
+    let mut search_from = 0usize;
+    let mut table_start = None;
+    for _ in 0..=table_ordinal {
+        let rel = xml[search_from..].find("<hp:tbl")?;
+        let abs = search_from + rel;
+        table_start = Some(abs);
+        search_from = abs + "<hp:tbl".len();
+    }
+    Some(hwpx_prefix_has_visible_text(&xml[..table_start?]))
+}
+
+fn hwpx_prefix_has_visible_text(xml: &str) -> bool {
+    let mut search_from = 0usize;
+    while let Some(rel) = xml[search_from..].find("<hp:t") {
+        let tag_start = search_from + rel;
+        let Some(tag_end_rel) = xml[tag_start..].find('>') else {
+            break;
+        };
+        let text_start = tag_start + tag_end_rel + 1;
+        let Some(text_end_rel) = xml[text_start..].find("</hp:t>") else {
+            search_from = text_start;
+            continue;
+        };
+        let text = &xml[text_start..text_start + text_end_rel];
+        if text
+            .chars()
+            .any(|c| c > '\u{001F}' && !c.is_whitespace() && c != '\u{FFFC}')
+        {
+            return true;
+        }
+        search_from = text_start + text_end_rel + "</hp:t>".len();
+    }
+    false
 }
 
 /// 문단 번호 상태 (수준별 카운터)
@@ -402,6 +580,13 @@ pub(crate) use utils::{
 mod integration_tests;
 #[cfg(test)]
 mod tests;
+
+fn suppressed_split_table_host_advance(para: &Paragraph, dpi: f64) -> f64 {
+    para.line_segs
+        .first()
+        .map(|seg| hwpunit_to_px(seg.line_spacing.max(0), dpi))
+        .unwrap_or(0.0)
+}
 
 impl LayoutEngine {
     pub fn new(dpi: f64) -> Self {
@@ -2609,7 +2794,19 @@ impl LayoutEngine {
                 }
             }
 
-            if !shape_jumped && !prev_tac_seg_applied {
+            let skip_cached_picture_anchor_vpos = matches!(
+                item,
+                PageItem::Shape {
+                    para_index,
+                    control_index,
+                } if should_skip_cached_picture_anchor_vpos(
+                    paragraphs,
+                    *para_index,
+                    *control_index,
+                    self.dpi,
+                )
+            );
+            if !shape_jumped && !prev_tac_seg_applied && !skip_cached_picture_anchor_vpos {
                 // [Task #1027 Stage C] inter-item VPOS_CORR 보정을 HeightCursor 에 위임 (동작 동일).
                 // 이전 문단 overlay-shape/분할표 bypass, page/lazy base 산출, sb 차감,
                 // ≤8px 백워드 클램프를 모두 캡슐화 (Stage A/B 함수 결합). 렌더러·페이지네이터 공유.
@@ -2785,12 +2982,29 @@ impl LayoutEngine {
 
             // 자가 검증: 배치 후 y_offset이 단 영역 하단을 초과하는지 확인
             let col_bottom = col_area.y + col_area.height;
-            let tolerance = 2.0; // 반올림 오차 허용 (2px)
-                                 // [Task #1046 Stage 3 Class B] 표 항목은 표 뒤 trailing 간격(host 문단 줄간격/
-                                 // spacing_after)이 더해진 y_offset 대신 실제 콘텐츠 하단으로 초과를 판정한다.
-                                 // 페이지 바닥의 후행 간격은 다음 항목이 다음 페이지로 가므로 시각적 초과가
-                                 // 아니다(문단 trailing_ls 정책 #359/#404 의 표 대응). 표가 아니거나 콘텐츠
-                                 // 하단 미기록(NaN)이면 종전대로 y_offset 사용.
+            let tolerance = match item {
+                PageItem::Shape {
+                    para_index,
+                    control_index,
+                } if matches!(
+                    paragraphs
+                        .get(*para_index)
+                        .and_then(|p| p.controls.get(*control_index)),
+                    Some(Control::Equation(_))
+                ) =>
+                {
+                    6.0
+                }
+                _ => 2.0,
+            };
+            // 반올림 오차 허용. Inline Equation controls can descend a few
+            // pixels below the text line at a page bottom without creating a
+            // table/picture-style layout overflow.
+            // [Task #1046 Stage 3 Class B] 표 항목은 표 뒤 trailing 간격(host 문단 줄간격/
+            // spacing_after)이 더해진 y_offset 대신 실제 콘텐츠 하단으로 초과를 판정한다.
+            // 페이지 바닥의 후행 간격은 다음 항목이 다음 페이지로 가므로 시각적 초과가
+            // 아니다(문단 trailing_ls 정책 #359/#404 의 표 대응). 표가 아니거나 콘텐츠
+            // 하단 미기록(NaN)이면 종전대로 y_offset 사용.
             let check_y = match item {
                 PageItem::Table { .. }
                 | PageItem::PartialTable { .. }
@@ -3709,8 +3923,7 @@ impl LayoutEngine {
                         true
                     };
                 if host_is_not_square {
-                    let has_real_text =
-                        para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}');
+                    let has_real_text = para_has_visible_text_before_control(para, control_index);
                     if has_real_text {
                         if let Some(comp) = composed.get(para_index) {
                             let text_start_line = comp.lines.iter().position(|line| {
@@ -4180,6 +4393,13 @@ impl LayoutEngine {
                 if outer_margin_bottom_px > 0.0 {
                     y_offset += outer_margin_bottom_px;
                 }
+                y_offset += consecutive_tac_table_synthetic_host_gap(
+                    paragraphs,
+                    composed,
+                    para_index,
+                    control_index,
+                    self.dpi,
+                );
                 return (y_offset, true);
             }
             // ── 같은 문단의 인라인 TAC 표 렌더링 ──
@@ -4300,8 +4520,26 @@ impl LayoutEngine {
                     .map(|c| matches!(c, Control::Table(t) if t.common.treat_as_char))
                     .unwrap_or(false);
                 if !is_tac {
-                    let has_real_text =
-                        para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}');
+                    let suppress_split_table_host_text = !is_continuation
+                        && start_row == 0
+                        && start_cut.is_empty()
+                        && para.controls.get(control_index).is_some_and(|control| {
+                            matches!(
+                                control,
+                                Control::Table(t)
+                                    if t.repeat_header
+                                        && matches!(
+                                            t.page_break,
+                                            crate::model::table::TablePageBreak::RowBreak
+                                        )
+                                        && matches!(
+                                            t.common.text_wrap,
+                                            crate::model::shape::TextWrap::TopAndBottom
+                                        )
+                            )
+                        });
+                    let has_real_text = !suppress_split_table_host_text
+                        && para_has_visible_text_before_control(para, control_index);
                     if has_real_text {
                         if let Some(comp) = composed.get(para_index) {
                             let text_start_line = comp.lines.iter().position(|line| {
@@ -4371,7 +4609,37 @@ impl LayoutEngine {
                     && matches!(t.common.vert_rel_to, crate::model::shape::VertRelTo::Para)
                     && (t.common.vertical_offset as i32) > 0
                 {
-                    para_start_y.get(&para_index).copied().unwrap_or(y_offset)
+                    let para_anchor_y = para_start_y.get(&para_index).copied().unwrap_or(y_offset);
+                    let suppress_split_table_host_text = !is_continuation
+                        && start_row == 0
+                        && start_cut.is_empty()
+                        && t.repeat_header
+                        && matches!(t.page_break, crate::model::table::TablePageBreak::RowBreak)
+                        && matches!(
+                            t.common.text_wrap,
+                            crate::model::shape::TextWrap::TopAndBottom
+                        );
+                    if !is_continuation
+                        && start_row == 0
+                        && start_cut.is_empty()
+                        && (!para_has_visible_text_before_control(para, control_index)
+                            || suppress_split_table_host_text)
+                    {
+                        let host_line_advance = if suppress_split_table_host_text {
+                            suppressed_split_table_host_advance(para, self.dpi)
+                        } else {
+                            para.line_segs
+                                .first()
+                                .map(|seg| {
+                                    hwpunit_to_px(seg.line_height + seg.line_spacing, self.dpi)
+                                })
+                                .unwrap_or(0.0)
+                        };
+                        let outer_top = hwpunit_to_px(t.outer_margin_top as i32, self.dpi);
+                        para_anchor_y + host_line_advance + outer_top
+                    } else {
+                        para_anchor_y
+                    }
                 } else {
                     y_offset
                 }
@@ -4645,7 +4913,20 @@ impl LayoutEngine {
                                 None,
                             )
                             .is_some();
-                        if !has_real_text && !already_registered {
+                        let has_full_para_item = page_content.column_contents.iter().any(|cc| {
+                            cc.items.iter().any(|it| {
+                                matches!(
+                                    it,
+                                    PageItem::FullParagraph { para_index: pi }
+                                        if *pi == para_index
+                                )
+                            })
+                        });
+                        let is_large_routed_tac_picture = !has_full_para_item
+                            && col_area.width > 0.0
+                            && pic_w >= col_area.width * 0.8
+                            && pic_h >= layout.body_area.height * 0.5;
+                        if (!has_real_text || is_large_routed_tac_picture) && !already_registered {
                             let bin_data_id = pic.image_attr.bin_data_id;
                             let image_data = find_bin_data(bin_data_content, bin_data_id)
                                 .map(|c| c.data.clone());
@@ -4716,7 +4997,9 @@ impl LayoutEngine {
                                 .map(|ls| hwpunit_to_px(ls.line_height + ls.line_spacing, self.dpi))
                                 .unwrap_or(pic_h);
                             result_y = pic_y + line_advance.max(pic_h);
-                        } else if !has_real_text && already_registered {
+                        } else if (!has_real_text || is_large_routed_tac_picture)
+                            && already_registered
+                        {
                             // [Task #418/#376] paragraph_layout 가 이미 emit 함 — push 스킵, result_y 만 갱신
                             // [Task #462] 동일하게 LINE_SEG 기반 advance 사용
                             let line_advance = para
@@ -4864,9 +5147,15 @@ impl LayoutEngine {
                                     .take(control_index)
                                     .filter_map(|c| {
                                         let common = match c {
-                                            Control::Picture(p) if !p.common.treat_as_char => &p.common,
-                                            Control::Shape(s) if !s.common().treat_as_char => s.common(),
-                                            Control::Table(t) if !t.common.treat_as_char => &t.common,
+                                            Control::Picture(p) if !p.common.treat_as_char => {
+                                                &p.common
+                                            }
+                                            Control::Shape(s) if !s.common().treat_as_char => {
+                                                s.common()
+                                            }
+                                            Control::Table(t) if !t.common.treat_as_char => {
+                                                &t.common
+                                            }
                                             _ => return None,
                                         };
                                         if !is_para_topbottom_float(common) {
@@ -4899,38 +5188,36 @@ impl LayoutEngine {
                             // (or_insert pins it to the anchor page) can't express this. A
                             // single full-width SQUARE keeps the wc47 path (count < 2);
                             // narrow side-by-side and TopAndBottom fail the discriminator.
-                            let fw_square_stack_count = para
-                                .controls
-                                .iter()
-                                .filter(|c| {
-                                    let cm = match c {
-                                        Control::Picture(p) => Some(&p.common),
-                                        Control::Shape(s) => match s.as_ref() {
-                                            crate::model::shape::ShapeObject::Picture(p) => {
-                                                Some(&p.common)
-                                            }
+                            let fw_square_stack_count =
+                                para.controls
+                                    .iter()
+                                    .filter(|c| {
+                                        let cm = match c {
+                                            Control::Picture(p) => Some(&p.common),
+                                            Control::Shape(s) => match s.as_ref() {
+                                                crate::model::shape::ShapeObject::Picture(p) => {
+                                                    Some(&p.common)
+                                                }
+                                                _ => None,
+                                            },
                                             _ => None,
-                                        },
-                                        _ => None,
-                                    };
-                                    cm.map(|cm| {
-                                        !cm.treat_as_char
-                                            && matches!(
+                                        };
+                                        cm.map(|cm| {
+                                            !cm.treat_as_char
+                                                && matches!(
                                                 cm.text_wrap,
                                                 crate::model::shape::TextWrap::Square
                                                     | crate::model::shape::TextWrap::TopAndBottom
-                                            )
-                                            && matches!(
+                                            ) && matches!(
                                                 cm.vert_rel_to,
                                                 crate::model::shape::VertRelTo::Para
-                                            )
-                                            && col_area.width > 0.0
-                                            && hwpunit_to_px(cm.width as i32, self.dpi)
-                                                >= col_area.width * 0.9
+                                            ) && col_area.width > 0.0
+                                                && hwpunit_to_px(cm.width as i32, self.dpi)
+                                                    >= col_area.width * 0.9
+                                        })
+                                        .unwrap_or(false)
                                     })
-                                    .unwrap_or(false)
-                                })
-                                .count();
+                                    .count();
                             // Same terminal-gallery gate as typeset.rs: only stack when this
                             // anchor is the section's last content paragraph (nothing
                             // substantial follows). Keeps embedded stacks (wb18) on the
@@ -4966,16 +5253,90 @@ impl LayoutEngine {
                                 && col_area.width > 0.0
                                 && hwpunit_to_px(pic.common.width as i32, self.dpi)
                                     >= col_area.width * 0.9;
+                            let has_full_para_item =
+                                page_content.column_contents.iter().any(|cc| {
+                                    cc.items.iter().any(|it| {
+                                        matches!(
+                                            it,
+                                            PageItem::FullParagraph { para_index: pi }
+                                                if *pi == para_index
+                                        )
+                                    })
+                                });
+                            let host_line_advance = para
+                                .line_segs
+                                .first()
+                                .map(|seg| {
+                                    hwpunit_to_px(seg.line_height + seg.line_spacing, self.dpi)
+                                })
+                                .unwrap_or(0.0);
+                            let has_real_text =
+                                para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}');
+                            let (pic_width_hu_for_anchor, _) = picture_display_size_hu(pic);
+                            let pic_w_for_anchor = hwpunit_to_px(pic_width_hu_for_anchor, self.dpi);
+                            let skip_cached_picture_anchor_vpos =
+                                should_skip_cached_picture_anchor_vpos(
+                                    paragraphs,
+                                    para_index,
+                                    control_index,
+                                    self.dpi,
+                                );
+                            let place_after_rendered_empty_host_line = !is_fw_square_stack_float
+                                && !skip_cached_picture_anchor_vpos
+                                && !pic.common.treat_as_char
+                                && has_full_para_item
+                                && !has_real_text
+                                && prior_tab_float_h.abs() < 0.1
+                                && is_para_topbottom_float(&pic.common)
+                                && matches!(pic.common.vert_rel_to, VertRelTo::Para)
+                                && matches!(pic.common.horz_rel_to, HorzRelTo::Column)
+                                && col_area.width > 0.0
+                                && pic_w_for_anchor >= col_area.width * 0.8
+                                && host_line_advance > 0.0;
+                            let baseline_pic_y = tac_effective_anchor + prior_tab_float_h;
+                            let visual_only_anchor_shift = if place_after_rendered_empty_host_line {
+                                (y_offset + host_line_advance - baseline_pic_y).max(0.0)
+                            } else {
+                                0.0
+                            };
                             let pic_y = if is_fw_square_stack_float {
                                 y_offset
                             } else {
-                                tac_effective_anchor + prior_tab_float_h
+                                baseline_pic_y + visual_only_anchor_shift
                             };
+                            let render_float_drift =
+                                std::env::var("RHWP_FLOAT_RENDER_DRIFT").is_ok();
                             // === [/Mindlogic patch] ===
+                            let mut effective_col_area = **col_area;
+                            let column_base_fallback = if !pic.common.treat_as_char
+                                && matches!(
+                                    pic.common.text_wrap,
+                                    crate::model::shape::TextWrap::Square
+                                )
+                                && matches!(
+                                    pic.common.vert_rel_to,
+                                    crate::model::shape::VertRelTo::Para
+                                )
+                                && matches!(pic.common.horz_rel_to, HorzRelTo::Column)
+                            {
+                                let (pic_width_hu, _) = picture_display_size_hu(pic);
+                                let pic_w = hwpunit_to_px(pic_width_hu, self.dpi);
+                                let h_offset_px =
+                                    hwpunit_to_px(pic.common.horizontal_offset as i32, self.dpi);
+                                let cur_x = col_area.x + h_offset_px;
+                                let body_x = layout.body_area.x + h_offset_px;
+                                cur_x >= layout.body_area.x + layout.body_area.width
+                                    && body_x + pic_w <= layout.body_area.x + layout.body_area.width
+                            } else {
+                                false
+                            };
+                            if column_base_fallback {
+                                effective_col_area.x = layout.body_area.x;
+                            }
                             let pic_container = LayoutRect {
-                                x: col_area.x,
+                                x: effective_col_area.x,
                                 y: pic_y,
-                                width: col_area.width,
+                                width: effective_col_area.width,
                                 height: col_area.height - (pic_y - col_area.y),
                             };
                             let saved_y_offset = y_offset;
@@ -5006,7 +5367,7 @@ impl LayoutEngine {
                                 col_node,
                                 pic,
                                 &pic_container,
-                                col_area,
+                                &effective_col_area,
                                 &layout.body_area,
                                 &LayoutRect {
                                     x: 0.0,
@@ -5023,6 +5384,55 @@ impl LayoutEngine {
                                 control_index,
                                 vpos_accounts_for_height,
                             );
+                            if visual_only_anchor_shift > 0.0 {
+                                result_y =
+                                    (result_y - visual_only_anchor_shift).max(saved_y_offset);
+                            }
+                            if render_float_drift {
+                                let (pic_width_hu, _) = picture_display_size_hu(pic);
+                                let pic_w = hwpunit_to_px(pic_width_hu, self.dpi);
+                                let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+                                let h_offset_px =
+                                    hwpunit_to_px(pic.common.horizontal_offset as i32, self.dpi);
+                                let pic_emit_x = match pic.common.horz_align {
+                                    crate::model::shape::HorzAlign::Left
+                                    | crate::model::shape::HorzAlign::Inside => {
+                                        effective_col_area.x + h_offset_px
+                                    }
+                                    crate::model::shape::HorzAlign::Center => {
+                                        effective_col_area.x
+                                            + (effective_col_area.width - pic_w) / 2.0
+                                            + h_offset_px
+                                    }
+                                    crate::model::shape::HorzAlign::Right
+                                    | crate::model::shape::HorzAlign::Outside => {
+                                        effective_col_area.x + effective_col_area.width
+                                            - pic_w
+                                            - h_offset_px
+                                    }
+                                };
+                                eprintln!(
+                                    "FLOAT_RENDER: page={} col_x={:.1} pi={} ci={} wrap={:?} horz={:?} vert={:?} y_in={:.1} para_anchor={:.1} pic_y={:.1} result_y={:.1} x={:.1}..{:.1} pic_h={:.1} prior_h={:.1} stack={} vpos_accounted={} col_base_fallback={}",
+                                    page_content.page_index,
+                                    col_area.x,
+                                    para_index,
+                                    control_index,
+                                    pic.common.text_wrap,
+                                    pic.common.horz_rel_to,
+                                    pic.common.vert_rel_to,
+                                    y_offset,
+                                    tac_effective_anchor,
+                                    pic_y,
+                                    result_y,
+                                    pic_emit_x,
+                                    pic_emit_x + pic_w,
+                                    pic_h,
+                                    prior_tab_float_h,
+                                    is_fw_square_stack_float,
+                                    vpos_accounts_for_height,
+                                    column_base_fallback,
+                                );
+                            }
                             // [Mindlogic patch — multi full-width SQUARE float stacking] a
                             // stacked full-width float must ADVANCE the flow cursor by its own
                             // height so the next float on this page (next layout_shape_item
@@ -5052,19 +5462,21 @@ impl LayoutEngine {
                                 let pic_emit_x = match pic.common.horz_align {
                                     crate::model::shape::HorzAlign::Left
                                     | crate::model::shape::HorzAlign::Inside => {
-                                        col_area.x + h_offset_px
+                                        effective_col_area.x + h_offset_px
                                     }
                                     crate::model::shape::HorzAlign::Center => {
-                                        col_area.x
-                                            + (col_area.width - pic_width_px) / 2.0
+                                        effective_col_area.x
+                                            + (effective_col_area.width - pic_width_px) / 2.0
                                             + h_offset_px
                                     }
                                     crate::model::shape::HorzAlign::Right
                                     | crate::model::shape::HorzAlign::Outside => {
-                                        col_area.x + col_area.width - pic_width_px - h_offset_px
+                                        effective_col_area.x + effective_col_area.width
+                                            - pic_width_px
+                                            - h_offset_px
                                     }
                                 };
-                                if pic_emit_x >= col_area.x + col_area.width {
+                                if pic_emit_x >= effective_col_area.x + effective_col_area.width {
                                     result_y = saved_y_offset;
                                 }
                             }
@@ -5125,6 +5537,14 @@ impl LayoutEngine {
                                 let col_w = col_area.width;
                                 if col_w > 0.0 && pic_w >= col_w * 0.9 {
                                     result_y = y_offset + pic_h;
+                                } else if !para_has_visible_text(para) {
+                                    let v_off =
+                                        hwpunit_to_px(pic.common.vertical_offset as i32, self.dpi)
+                                            .max(0.0);
+                                    let mb =
+                                        hwpunit_to_px(pic.common.margin.bottom as i32, self.dpi)
+                                            .max(0.0);
+                                    result_y = y_offset + v_off + pic_h + mb;
                                 } else {
                                     result_y = y_offset;
                                 }
@@ -5158,16 +5578,15 @@ impl LayoutEngine {
                         // 하지 않는다 — 이중 가산 방지(Task #974 c3e32151 회귀).
                         // FullParagraph 항목이 없으면(선행 표 등에 이어 붙은
                         // Shape, 예: hy-001 pi=27) Task #974 동작을 유지한다.
-                        let has_full_para_item =
-                            page_content.column_contents.iter().any(|cc| {
-                                cc.items.iter().any(|it| {
-                                    matches!(
-                                        it,
-                                        PageItem::FullParagraph { para_index: pi }
-                                            if *pi == para_index
-                                    )
-                                })
-                            });
+                        let has_full_para_item = page_content.column_contents.iter().any(|cc| {
+                            cc.items.iter().any(|it| {
+                                matches!(
+                                    it,
+                                    PageItem::FullParagraph { para_index: pi }
+                                        if *pi == para_index
+                                )
+                            })
+                        });
 
                         // [Mindlogic patch — tac-inline shape on table paragraph (wc60 Ⅳ banner)]
                         // Normally a tac shape's inline_pos is registered by paragraph_layout

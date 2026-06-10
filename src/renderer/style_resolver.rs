@@ -706,6 +706,9 @@ pub(crate) fn is_heavy_display_face(font_family: &str) -> bool {
         .trim()
         .trim_matches('\'')
         .trim_matches('"');
+    if primary.contains("굵") {
+        return true;
+    }
     matches!(
         primary,
         "HY헤드라인M"
@@ -733,8 +736,57 @@ pub(crate) fn is_medium_weight_face(font_family: &str) -> bool {
     let lower = primary.to_lowercase();
     lower.contains("중고딕")
         || lower.contains("태고딕")
+        || lower.contains("medium")
+        || lower.contains("semibold")
+        || primary.contains("윤고딕 250")
         || lower.contains("mediumgothic")
         || lower.contains("hymedium")
+}
+
+/// Paint-size scale for Korean public-document fonts that are commonly absent
+/// from browser/server render environments.
+///
+/// Gyeonggi and Malgun-family public-document faces have a smaller visual em in
+/// Hancom output than the browser/server fallback faces RHWP commonly paints.
+/// Keep layout metrics unchanged, but paint fallback glyphs smaller so dense
+/// official schedule/evaluation tables do not look overfilled.
+pub(crate) fn visual_font_size_scale(font_family: &str) -> f64 {
+    let primary = font_family
+        .split(',')
+        .next()
+        .unwrap_or(font_family)
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"');
+    if primary.starts_with("경기천년") {
+        0.77
+    } else if primary == "휴먼명조" {
+        0.88
+    } else if matches!(primary, "맑은 고딕" | "Malgun Gothic") {
+        0.76
+    } else {
+        1.0
+    }
+}
+
+/// Advance-width scale for known missing font families.
+///
+/// This is deliberately separate from paint size: layout and line breaking use
+/// advance metrics, while the backend uses paint metrics. The generic
+/// unregistered-font fallback remains unchanged.
+pub(crate) fn fallback_font_advance_scale(font_family: &str) -> f64 {
+    let primary = font_family
+        .split(',')
+        .next()
+        .unwrap_or(font_family)
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"');
+    if primary.starts_with("경기천년") {
+        0.88
+    } else {
+        1.0
+    }
 }
 
 /// ParaShape → ResolvedParaStyle 목록
@@ -1316,6 +1368,20 @@ mod tests {
     fn test_resolve_ttf_malgun_gothic() {
         // 맑은 고딕은 웹폰트로 등록되어 있으므로 치환하지 않음
         assert_eq!(resolve_ttf_font("맑은 고딕"), None);
+    }
+
+    #[test]
+    fn test_malgun_gothic_visual_scale_is_paint_only() {
+        assert!((visual_font_size_scale("맑은 고딕") - 0.76).abs() < 0.001);
+        assert!((visual_font_size_scale("Malgun Gothic") - 0.76).abs() < 0.001);
+        assert!((fallback_font_advance_scale("맑은 고딕") - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_human_myeongjo_visual_scale_is_paint_only() {
+        assert!((visual_font_size_scale("휴먼명조") - 0.88).abs() < 0.001);
+        assert!((visual_font_size_scale("휴먼명조,'Batang',serif") - 0.88).abs() < 0.001);
+        assert!((fallback_font_advance_scale("휴먼명조") - 1.0).abs() < 0.001);
     }
 
     #[test]

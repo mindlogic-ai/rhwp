@@ -124,6 +124,78 @@ fn textbox_tac_space_advance_override(
     }
 }
 
+fn composed_textbox_content_height(
+    paragraphs: &[Paragraph],
+    composed_paras: &[ComposedParagraph],
+    styles: &ResolvedStyleSet,
+    dpi: f64,
+) -> f64 {
+    paragraphs
+        .iter()
+        .zip(composed_paras.iter())
+        .map(|(para, composed)| {
+            if composed.lines.is_empty() {
+                if para.line_segs.is_empty() && para.text.trim().is_empty() {
+                    let para_style = styles.para_styles.get(para.para_shape_id as usize);
+                    let max_fs = para
+                        .char_shapes
+                        .first()
+                        .and_then(|cs| styles.char_styles.get(cs.char_shape_id as usize))
+                        .map(|style| style.font_size)
+                        .unwrap_or(12.0);
+                    let (line_height, line_spacing) = crate::renderer::corrected_line_metrics(
+                        max_fs,
+                        0.0,
+                        max_fs,
+                        para_style
+                            .map(|style| style.line_spacing_type)
+                            .unwrap_or(crate::model::style::LineSpacingType::Percent),
+                        para_style.map(|style| style.line_spacing).unwrap_or(160.0),
+                    );
+                    line_height + line_spacing
+                } else {
+                    0.0
+                }
+            } else {
+                let para_style = styles.para_styles.get(composed.para_style_id as usize);
+                composed
+                    .lines
+                    .iter()
+                    .map(|line| {
+                        let max_fs = line
+                            .runs
+                            .iter()
+                            .map(|run| {
+                                let style = resolved_to_text_style(
+                                    styles,
+                                    run.char_style_id,
+                                    run.lang_index,
+                                );
+                                if style.font_size > 0.0 {
+                                    style.font_size
+                                } else {
+                                    12.0
+                                }
+                            })
+                            .fold(0.0f64, f64::max)
+                            .max(12.0);
+                        let (line_height, line_spacing) = crate::renderer::corrected_line_metrics(
+                            hwpunit_to_px(line.line_height, dpi),
+                            hwpunit_to_px(line.line_spacing, dpi),
+                            max_fs,
+                            para_style
+                                .map(|style| style.line_spacing_type)
+                                .unwrap_or(crate::model::style::LineSpacingType::Percent),
+                            para_style.map(|style| style.line_spacing).unwrap_or(160.0),
+                        );
+                        line_height + line_spacing
+                    })
+                    .sum()
+            }
+        })
+        .sum()
+}
+
 impl LayoutEngine {
     pub(crate) fn scan_textbox_overflow(
         &self,
@@ -1855,6 +1927,14 @@ impl LayoutEngine {
                         .map(|ls| hwpunit_to_px(ls.vertical_pos + ls.line_height, self.dpi))
                         .last()
                         .unwrap_or(0.0);
+                    if total_content_height <= 0.0 {
+                        total_content_height = composed_textbox_content_height(
+                            &text_box.paragraphs[..para_count],
+                            &composed_paras,
+                            styles,
+                            self.dpi,
+                        );
+                    }
 
                     for para in &text_box.paragraphs[..para_count] {
                         let para_vpos = para
@@ -2838,14 +2918,17 @@ impl LayoutEngine {
                         continue;
                     }
                 }
-                // body_area 너비의 80% 이상 차지하는 개체만 (2단에 걸치는 개체)
+                // TopAndBottom flow reserves a vertical band. Wide objects do so even
+                // when slightly below the top; narrower objects only at the top edge,
+                // where Hancom still keeps text above/below instead of beside them.
                 let shape_w = hwpunit_to_px(common.width as i32, self.dpi);
-                if shape_w < body_area.width * 0.8 {
-                    continue;
-                }
+                let spans_body = shape_w >= body_area.width * 0.8;
                 let (bottom_y, shape_y) = self.calc_shape_bottom_y(common, body_area, body_area);
                 let threshold_y = body_area.y + body_area.height / 3.0;
                 if shape_y > threshold_y {
+                    continue;
+                }
+                if !spans_body && (shape_y - body_area.y).abs() > 1.0 {
                     continue;
                 }
                 if let Some(existing) = result.iter_mut().find(|(pi, _)| *pi == *para_index) {

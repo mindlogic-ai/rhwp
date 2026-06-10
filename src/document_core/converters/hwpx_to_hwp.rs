@@ -97,6 +97,10 @@ pub struct AdapterReport {
     pub master_page_autonum_placeholder_removed: u32,
     /// HWPX 바탕쪽 line shape rendering matrix를 HWP5 size ratio contract로 보정한 횟수
     pub master_page_line_rendering_size_ratio_materialized: u32,
+    /// HWPX ParaShape head_type/level 을 HWP5 attr1 bit contract로 보정한 횟수
+    pub para_shape_head_bits_materialized: u32,
+    /// HWPX/HWP3-origin renderer-only bottom tolerance 를 HWP5 PAGE_DEF margin 으로 materialize한 횟수
+    pub page_bottom_tolerance_materialized: u32,
 }
 
 impl AdapterReport {
@@ -142,7 +146,9 @@ impl AdapterReport {
                 + self.autonum_fwspace_char_shape_offsets_materialized
                 + self.header_footer_fwspace_control_materialized
                 + self.master_page_autonum_placeholder_removed
-                + self.master_page_line_rendering_size_ratio_materialized)
+                + self.master_page_line_rendering_size_ratio_materialized
+                + self.para_shape_head_bits_materialized
+                + self.page_bottom_tolerance_materialized)
                 > 0
     }
 }
@@ -172,6 +178,7 @@ pub fn convert_hwpx_to_hwp_ir(doc: &mut Document) -> AdapterReport {
     normalize_file_header_for_hwp(doc, &mut report);
     normalize_doc_properties_for_hwp(doc, &mut report);
     normalize_bin_data_for_hwp(doc, &mut report);
+    materialize_para_shape_head_bits_for_hwp(doc, &mut report);
 
     // Stage 4: SectionDef 컨트롤 삽입 (HWPX 파서가 만들지 않으므로 직렬화기가 PAGE_DEF 출력 못 함)
     for (section_idx, section) in doc.sections.iter_mut().enumerate() {
@@ -190,6 +197,35 @@ pub fn convert_hwpx_to_hwp_ir(doc: &mut Document) -> AdapterReport {
     }
 
     report
+}
+
+fn materialize_para_shape_head_bits_for_hwp(doc: &mut Document, report: &mut AdapterReport) {
+    use crate::model::style::HeadType;
+
+    let mut changed = false;
+    for ps in &mut doc.doc_info.para_shapes {
+        let mut attr1 = ps.attr1;
+        attr1 &= !(0x03 << 23);
+        attr1 |= (match ps.head_type {
+            HeadType::None => 0u32,
+            HeadType::Outline => 1,
+            HeadType::Number => 2,
+            HeadType::Bullet => 3,
+        }) << 23;
+        attr1 &= !(0x07 << 25);
+        attr1 |= (ps.para_level as u32 & 0x07) << 25;
+
+        if ps.attr1 != attr1 {
+            ps.attr1 = attr1;
+            ps.raw_data = None;
+            changed = true;
+            report.para_shape_head_bits_materialized += 1;
+        }
+    }
+
+    if changed {
+        doc.doc_info.raw_stream_dirty = true;
+    }
 }
 
 /// HWPX embedded BinData를 한컴 HWP 저장 관례에 맞춰 materialize한다.
@@ -697,6 +733,7 @@ fn materialize_para_header_tail(para: &mut Paragraph, report: &mut AdapterReport
 }
 
 fn adapt_section_def(section_def: &mut SectionDef, report: &mut AdapterReport) {
+    materialize_page_bottom_tolerance(section_def, report);
     materialize_single_master_page_flags(section_def, report);
     materialize_multi_master_page_flags(section_def, report);
     materialize_section_def_master_page_tail(section_def, report);
@@ -708,6 +745,18 @@ fn adapt_section_def(section_def: &mut SectionDef, report: &mut AdapterReport) {
             ParagraphContext::MasterPage,
         );
     }
+}
+
+fn materialize_page_bottom_tolerance(section_def: &mut SectionDef, report: &mut AdapterReport) {
+    let tolerance = section_def.page_def.pagination_bottom_tolerance;
+    if tolerance == 0 {
+        return;
+    }
+
+    let applied = tolerance.min(section_def.page_def.margin_bottom);
+    section_def.page_def.margin_bottom = section_def.page_def.margin_bottom.saturating_sub(applied);
+    section_def.page_def.pagination_bottom_tolerance = 0;
+    report.page_bottom_tolerance_materialized += 1;
 }
 
 fn materialize_master_page_autonum_placeholder(
@@ -1679,6 +1728,30 @@ mod tests {
 
         assert_eq!(report.table_layout_ctrl_data_materialized, 0);
         assert!(para.ctrl_data_records[0].is_none());
+    }
+
+    #[test]
+    fn section_bottom_tolerance_materializes_into_hwp_page_margin() {
+        let mut section_def = SectionDef {
+            page_def: crate::model::page::PageDef {
+                margin_bottom: 4252,
+                pagination_bottom_tolerance: 1600,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut report = AdapterReport::new();
+        adapt_section_def(&mut section_def, &mut report);
+
+        assert_eq!(section_def.page_def.margin_bottom, 2652);
+        assert_eq!(section_def.page_def.pagination_bottom_tolerance, 0);
+        assert_eq!(report.page_bottom_tolerance_materialized, 1);
+
+        let mut second = AdapterReport::new();
+        adapt_section_def(&mut section_def, &mut second);
+        assert_eq!(section_def.page_def.margin_bottom, 2652);
+        assert_eq!(second.page_bottom_tolerance_materialized, 0);
     }
 
     #[test]

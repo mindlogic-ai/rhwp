@@ -135,6 +135,13 @@ pub struct ActiveFieldInfo {
 }
 
 impl DocumentCore {
+    pub(crate) fn invalidate_section_source(&mut self, section_idx: usize) {
+        if let Some(section) = self.document.sections.get_mut(section_idx) {
+            section.raw_stream = None;
+            section.hwpx_section_xml = None;
+        }
+    }
+
     /// 총 페이지 수를 반환한다.
     pub fn page_count(&self) -> u32 {
         self.pagination

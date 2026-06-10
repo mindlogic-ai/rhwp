@@ -227,7 +227,7 @@ fn make_ctrl_record(ctrl_id: u32, level: u16, ctrl_data: &[u8]) -> Record {
 
 fn serialize_section_def(sd: &SectionDef, level: u16, records: &mut Vec<Record>) {
     let mut w = ByteWriter::new();
-    w.write_u32(sd.flags).unwrap();
+    w.write_u32(section_def_flags(sd)).unwrap();
     w.write_i16(sd.column_spacing).unwrap();
     w.write_u16(0).unwrap(); // vertical_align
     w.write_u16(0).unwrap(); // horizontal_align
@@ -317,6 +317,30 @@ fn serialize_section_def(sd: &SectionDef, level: u16, records: &mut Vec<Record>)
         for master_page in sd.master_pages.iter().filter(|mp| !mp.is_extension) {
             serialize_master_page(master_page, level + 1, records);
         }
+    }
+}
+
+fn section_def_flags(sd: &SectionDef) -> u32 {
+    let mut flags = sd.flags;
+
+    set_flag(&mut flags, 0x0001, sd.hide_header);
+    set_flag(&mut flags, 0x0002, sd.hide_footer);
+    set_flag(&mut flags, 0x0004, sd.hide_master_page);
+    set_flag(&mut flags, 0x0008, sd.hide_border);
+    set_flag(&mut flags, 0x0010, sd.hide_fill);
+    set_flag(&mut flags, 0x0008_0000, sd.hide_empty_line);
+
+    flags &= !(0x03 << 20);
+    flags |= ((sd.page_num_type as u32) & 0x03) << 20;
+
+    flags
+}
+
+fn set_flag(flags: &mut u32, bit: u32, enabled: bool) {
+    if enabled {
+        *flags |= bit;
+    } else {
+        *flags &= !bit;
     }
 }
 
@@ -455,13 +479,15 @@ fn serialize_column_def(cd: &ColumnDef, level: u16, records: &mut Vec<Record>) {
 fn serialize_table(table: &Table, level: u16, records: &mut Vec<Record>) {
     // CTRL_HEADER: raw_ctrl_data는 CommonObjAttr 전체 (attr 포함)
     // Task 271에서 파싱 변경: ctrl_data 전체 = CommonObjAttr
+    let ctrl_data;
     records.push(make_ctrl_record(
         tags::CTRL_TABLE,
         level,
         if !table.raw_ctrl_data.is_empty() {
             &table.raw_ctrl_data
         } else {
-            &[]
+            ctrl_data = serialize_common_obj_attr(&table.common);
+            &ctrl_data
         },
     ));
 

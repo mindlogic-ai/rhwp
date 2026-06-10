@@ -36,8 +36,7 @@ fn load_sample(name: &str) -> HwpDocument {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/integration/samples")
         .join(name);
-    let bytes = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     HwpDocument::from_bytes(&bytes).expect("parse")
 }
 
@@ -56,8 +55,8 @@ fn gifted_application_renders_full_form() {
     // SVG renders text as one glyph per <text> element so we de-space.
     let dense = page_text.replace(' ', "");
     for sentinel in &[
-        "학교명",       // top row
-        "지원동기",     // mid row
+        "학교명",         // top row
+        "지원동기",       // mid row
         "강원특별자치도", // bottom-row sentinel — would be dropped on bug
     ] {
         let needle = sentinel.replace(' ', "");
@@ -102,7 +101,11 @@ fn small_04_trailing_blank_stays_on_page1() {
     // terminal-empty-paragraph absorb fix the page count must be 1 and the
     // last body sentence ("다섯째") must be on page 1.
     let doc = load_sample("small_04_trailing_blank.hwpx");
-    assert_eq!(doc.page_count(), 1, "doc must paginate to 1 page (no trailing blank page)");
+    assert_eq!(
+        doc.page_count(),
+        1,
+        "doc must paginate to 1 page (no trailing blank page)"
+    );
 
     let svg = doc.render_page_svg_native(0).expect("render page 1");
     let page_text = svg_text(&svg);

@@ -1094,6 +1094,8 @@ mod tests {
             },
             paragraphs: vec![Paragraph::default()],
             raw_stream: None,
+            hwpx_section_xml: None,
+            hwpx_sec_pr_xml: None,
         };
         doc.sections.push(section);
         let mut core = DocumentCore::new_empty();

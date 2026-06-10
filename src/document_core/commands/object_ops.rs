@@ -845,6 +845,7 @@ impl DocumentCore {
                 };
                 self.document.doc_info.border_fills.push(new_bf);
                 self.document.doc_info.raw_stream = None;
+                self.document.doc_info.raw_stream_dirty = true;
                 self.document.doc_info.border_fills.len() as u16 // 1-based
             }
         };
@@ -947,6 +948,7 @@ impl DocumentCore {
             cells,
             cell_grid: Vec::new(),
             page_break: TablePageBreak::None,
+            hwpx_page_break: None,
             repeat_header: false,
             caption: None,
             common: crate::model::shape::CommonObjAttr {
@@ -1206,6 +1208,7 @@ impl DocumentCore {
                 };
                 self.document.doc_info.border_fills.push(new_bf);
                 self.document.doc_info.raw_stream = None;
+                self.document.doc_info.raw_stream_dirty = true;
                 self.document.doc_info.border_fills.len() as u16
             }
         };
@@ -1296,6 +1299,7 @@ impl DocumentCore {
             cells,
             cell_grid: Vec::new(),
             page_break: TablePageBreak::RowBreak,
+            hwpx_page_break: None,
             repeat_header: false,
             caption: None,
             common: crate::model::shape::CommonObjAttr {
@@ -1448,6 +1452,7 @@ impl DocumentCore {
             extension: Some(extension.to_string()),
         });
         self.document.doc_info.raw_stream = None; // DocInfo 재직렬화
+        self.document.doc_info.raw_stream_dirty = true;
 
         // --- 3. Picture 컨트롤 생성 ---
         // CommonObjAttr: treat_as_char, vert_rel_to=Para, horz_rel_to=Column,
@@ -4858,6 +4863,8 @@ mod resize_clamp_tests {
             },
             paragraphs: vec![Paragraph::default()],
             raw_stream: None,
+            hwpx_section_xml: None,
+            hwpx_sec_pr_xml: None,
         });
         let mut core = DocumentCore::new_empty();
         // set_document이 composed/styles/pagination 벡터를 일관되게 초기화한다.

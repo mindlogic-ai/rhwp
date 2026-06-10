@@ -63,6 +63,8 @@ fn test_serialize_hwp_cfb_streams() {
                 ..Default::default()
             }],
             raw_stream: None,
+            hwpx_section_xml: None,
+            hwpx_sec_pr_xml: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
@@ -200,6 +202,8 @@ fn test_full_roundtrip_uncompressed() {
                 ..Default::default()
             }],
             raw_stream: None,
+            hwpx_section_xml: None,
+            hwpx_sec_pr_xml: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
@@ -277,6 +281,8 @@ fn test_full_roundtrip_compressed() {
                 ..Default::default()
             }],
             raw_stream: None,
+            hwpx_section_xml: None,
+            hwpx_sec_pr_xml: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
@@ -1663,6 +1669,8 @@ fn test_ole_storage_size_prefix_restored() {
                 ..Default::default()
             }],
             raw_stream: None,
+            hwpx_section_xml: None,
+            hwpx_sec_pr_xml: None,
         }],
         preview: None,
         bin_data_content: vec![BinDataContent {

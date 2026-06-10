@@ -57,6 +57,42 @@ fn test_roundtrip_section_def() {
     assert_eq!(parsed.section_def.page_def.height, 84188);
 }
 
+#[test]
+fn test_roundtrip_section_def_preserves_hide_empty_line() {
+    let sd = SectionDef {
+        hide_empty_line: true,
+        ..Default::default()
+    };
+
+    let para = Paragraph {
+        char_count: 3,
+        text: "A".to_string(),
+        char_offsets: vec![8],
+        char_shapes: vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 0,
+        }],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        controls: vec![Control::SectionDef(Box::new(sd))],
+        ..Default::default()
+    };
+
+    let section = Section {
+        paragraphs: vec![para],
+        raw_stream: None,
+        ..Default::default()
+    };
+
+    let bytes = serialize_section(&section);
+    let parsed = parse_body_text_section(&bytes).unwrap();
+
+    assert!(parsed.section_def.hide_empty_line);
+    assert_eq!(parsed.section_def.flags & 0x0008_0000, 0x0008_0000);
+}
+
 /// ColumnDef 라운드트립
 #[test]
 fn test_roundtrip_column_def() {
@@ -174,6 +210,90 @@ fn test_roundtrip_table() {
         assert_eq!(t.cells[0].width, 10000);
         assert_eq!(t.cells[0].paragraphs[0].text, "test");
     }
+}
+
+#[test]
+fn test_hwpx_origin_table_serializes_common_header() {
+    let cell = Cell {
+        col: 0,
+        row: 0,
+        col_span: 1,
+        row_span: 1,
+        width: 10000,
+        height: 5000,
+        border_fill_id: 1,
+        paragraphs: vec![Paragraph::new_empty()],
+        ..Default::default()
+    };
+
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        cell_spacing: 0,
+        row_sizes: vec![1],
+        border_fill_id: 1,
+        common: crate::model::shape::CommonObjAttr {
+            attr: 0,
+            treat_as_char: true,
+            flow_with_text: true,
+            text_wrap: crate::model::shape::TextWrap::TopAndBottom,
+            width: 12345,
+            height: 6789,
+            vertical_offset: 111,
+            horizontal_offset: 222,
+            z_order: 3,
+            margin: crate::model::Padding {
+                left: 10,
+                right: 20,
+                top: 30,
+                bottom: 40,
+            },
+            instance_id: 77,
+            prevent_page_break: 1,
+            ..Default::default()
+        },
+        raw_ctrl_data: Vec::new(),
+        cells: vec![cell],
+        ..Default::default()
+    };
+
+    let para = Paragraph {
+        char_count: 2,
+        controls: vec![Control::Table(Box::new(table))],
+        ..Default::default()
+    };
+
+    let section = Section {
+        paragraphs: vec![para],
+        raw_stream: None,
+        ..Default::default()
+    };
+
+    let bytes = serialize_section(&section);
+    let parsed = parse_body_text_section(&bytes).unwrap();
+    let parsed_table = parsed.paragraphs[0]
+        .controls
+        .iter()
+        .find_map(|c| match c {
+            Control::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("table should roundtrip");
+
+    assert!(parsed_table.common.treat_as_char);
+    assert!(parsed_table.common.flow_with_text);
+    assert_eq!(
+        parsed_table.common.text_wrap,
+        crate::model::shape::TextWrap::TopAndBottom
+    );
+    assert_eq!(parsed_table.common.width, 12345);
+    assert_eq!(parsed_table.common.height, 6789);
+    assert_eq!(parsed_table.common.vertical_offset, 111);
+    assert_eq!(parsed_table.common.horizontal_offset, 222);
+    assert_eq!(parsed_table.outer_margin_left, 10);
+    assert_eq!(parsed_table.outer_margin_right, 20);
+    assert_eq!(parsed_table.outer_margin_top, 30);
+    assert_eq!(parsed_table.outer_margin_bottom, 40);
 }
 
 /// AutoNumber 라운드트립

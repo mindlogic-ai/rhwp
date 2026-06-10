@@ -31,7 +31,7 @@ use crate::model::image::{ImageEffect, Picture};
 use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo};
 
 use super::context::SerializeContext;
-use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
+use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs, xml_escape};
 use super::SerializeError;
 
 /// `<hp:pic>` 직렬화 진입점.
@@ -87,6 +87,7 @@ pub fn write_picture<W: Write>(
     write_sz(w, &pic.common)?;
     write_pos(w, &pic.common)?;
     write_out_margin(w, &pic.common)?;
+    write_shape_comment(w, &pic.common)?;
 
     end_tag(w, "hp:pic")?;
     Ok(())
@@ -240,6 +241,24 @@ fn write_effects<W: Write>(w: &mut Writer<W>) -> Result<(), SerializeError> {
     Ok(())
 }
 
+fn write_shape_comment<W: Write>(
+    w: &mut Writer<W>,
+    c: &CommonObjAttr,
+) -> Result<(), SerializeError> {
+    if c.description.is_empty() {
+        return Ok(());
+    }
+    w.get_mut()
+        .write_all(
+            format!(
+                "<hp:shapeComment>{}</hp:shapeComment>",
+                xml_escape(&c.description)
+            )
+            .as_bytes(),
+        )
+        .map_err(|e| SerializeError::XmlError(e.to_string()))
+}
+
 fn write_sz<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), SerializeError> {
     let width = c.width.to_string();
     let height = c.height.to_string();
@@ -258,6 +277,8 @@ fn write_sz<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), Serial
 
 fn write_pos<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), SerializeError> {
     let treat = bool01(c.treat_as_char);
+    let flow = bool01(c.flow_with_text);
+    let overlap = bool01(c.allow_overlap);
     let vert_offset = c.vertical_offset.to_string();
     let horz_offset = c.horizontal_offset.to_string();
     empty_tag(
@@ -266,8 +287,8 @@ fn write_pos<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), Seria
         &[
             ("treatAsChar", treat),
             ("affectLSpacing", "0"),
-            ("flowWithText", "1"),
-            ("allowOverlap", "0"),
+            ("flowWithText", flow),
+            ("allowOverlap", overlap),
             ("holdAnchorAndSO", "0"),
             ("vertRelTo", vert_rel_to_str(c.vert_rel_to)),
             ("horzRelTo", horz_rel_to_str(c.horz_rel_to)),
@@ -472,6 +493,34 @@ mod tests {
         assert!(xml.contains("<hc:pt1 "));
         assert!(xml.contains("<hc:pt2 "));
         assert!(xml.contains("<hc:pt3 "));
+    }
+
+    #[test]
+    fn pic_pos_preserves_flow_and_overlap_flags() {
+        let doc = make_doc_with_bin(1, "png");
+        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut pic = make_picture(1);
+        pic.common.flow_with_text = false;
+        pic.common.allow_overlap = true;
+
+        let xml = serialize(&pic, &ctx);
+
+        assert!(xml.contains(r#"flowWithText="0""#), "{}", xml);
+        assert!(xml.contains(r#"allowOverlap="1""#), "{}", xml);
+    }
+
+    #[test]
+    fn shape_comment_emits_description() {
+        let doc = make_doc_with_bin(1, "png");
+        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut pic = make_picture(1);
+        pic.common.description = "그림입니다.\nA < B & C".to_string();
+        let xml = serialize(&pic, &ctx);
+        assert!(
+            xml.contains("<hp:shapeComment>그림입니다.\nA &lt; B &amp; C</hp:shapeComment>"),
+            "shapeComment must preserve escaped description: {}",
+            xml
+        );
     }
 
     #[test]

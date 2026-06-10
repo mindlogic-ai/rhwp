@@ -2872,6 +2872,8 @@ pub fn parse_hwp3(data: &[u8]) -> Result<Document, Hwp3Error> {
         section_def,
         paragraphs,
         raw_stream: None,
+        hwpx_section_xml: None,
+        hwpx_sec_pr_xml: None,
     };
     doc.sections.push(section);
 

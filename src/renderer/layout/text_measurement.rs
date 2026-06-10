@@ -64,6 +64,17 @@ fn style_params(style: &TextStyle) -> (f64, f64, f64) {
     (font_size, ratio, tab_w)
 }
 
+fn fallback_metric_width(font_family: &str, c: char, font_size: f64) -> f64 {
+    let scale = crate::renderer::style_resolver::fallback_font_advance_scale(font_family);
+    if is_cjk_char(c) || is_fullwidth_symbol(c) {
+        font_size * scale
+    } else if is_narrow_punctuation(c) {
+        font_size * 0.3 * scale
+    } else {
+        font_size * 0.5 * scale
+    }
+}
+
 /// inline_tabs ext[2] 에서 탭 종류를 추출.
 ///
 /// HWP `tab_extended` 포맷 (PR #292 / Task #290 실증):
@@ -320,14 +331,14 @@ impl TextMeasurer for EmbeddedTextMeasurer {
             ) {
                 w
             } else if cluster_len[i] > 1 || is_cjk_char(c) || is_fullwidth_symbol(c) {
-                font_size
+                fallback_metric_width(&style.font_family, c, font_size)
             } else if is_narrow_punctuation(c) {
                 // Task #257: 콤마·중점 등은 실제 글리프 폭이 반각보다 뚜렷이
                 // 좁음. 폴백 경로에서 font_size * 0.5 를 쓰면 PDF 대비 뒤
                 // 글자가 2~3px 우측으로 밀림. 0.3 으로 분기.
-                font_size * 0.3
+                fallback_metric_width(&style.font_family, c, font_size)
             } else {
-                font_size * 0.5
+                fallback_metric_width(&style.font_family, c, font_size)
             };
             // Task #352: 3+ 연속 dash 시퀀스(빈칸/leader) 는 좁은 폭으로 재산출.
             // HY신명조 등 한글 폰트 메트릭의 ASCII '-' 폭(0.83 em) 부풀림 회피.
@@ -533,12 +544,12 @@ impl TextMeasurer for EmbeddedTextMeasurer {
             ) {
                 w
             } else if cluster_len[i] > 1 || is_cjk_char(c) || is_fullwidth_symbol(c) {
-                font_size
+                fallback_metric_width(&style.font_family, c, font_size)
             } else if is_narrow_punctuation(c) {
                 // Task #257: 콤마·중점 등 narrow glyph 폴백 폭 (0.5 → 0.3).
-                font_size * 0.3
+                fallback_metric_width(&style.font_family, c, font_size)
             } else {
-                font_size * 0.5
+                fallback_metric_width(&style.font_family, c, font_size)
             };
             // Task #352: 3+ 연속 dash leader 좁은 base 0.3 em + 라인 슬랙
             // 분배(extra_dash_advance) 로 PDF elastic leader 모방.
@@ -947,7 +958,7 @@ mod wasm_internals {
         // 적용되지 못한 미등록 폰트 케이스 (예: 휴먼명조 U+2027) 에서 JS Canvas
         // 측정값 (~0.5 em) 이 그대로 들어가지 않도록 동일 폴백 적용.
         if super::is_narrow_punctuation(c) {
-            return font_size * 0.3;
+            return super::fallback_metric_width(font_family, c, font_size);
         }
 
         // [Task #977] 미등록 폰트 폴백을 native EmbeddedTextMeasurer 와 동기화한다.
@@ -958,9 +969,9 @@ mod wasm_internals {
         // 휴리스틱(공백·일반 0.5em, CJK·fullwidth em, narrow_punct 0.3em)으로 폰트 무관
         // 통일한다. PR #1026 의 narrow_punct 분기는 위에서 이미 처리(보존).
         if super::is_cjk_char(c) || super::is_fullwidth_symbol(c) {
-            return font_size;
+            return super::fallback_metric_width(font_family, c, font_size);
         }
-        font_size * 0.5
+        super::fallback_metric_width(font_family, c, font_size)
     }
 
     /// 한글 '가' 대리 측정값 (HWP 단위, 정수)
@@ -984,8 +995,10 @@ mod wasm_internals {
         {
             return (w * 75.0).round() as i32;
         }
-        // native EmbeddedTextMeasurer 동기화: 미등록 폰트의 한글(CJK)은 font_size (1.0 em).
-        (font_size * 75.0).round() as i32
+        // native EmbeddedTextMeasurer 동기화: 일반 미등록 폰트의 한글(CJK)은
+        // font_size (1.0em), known missing-font classes may carry their own
+        // fallback advance scale.
+        (super::fallback_metric_width(font_family, '\u{AC00}', font_size) * 75.0).round() as i32
     }
 }
 
@@ -1670,12 +1683,12 @@ pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f6
         {
             w
         } else if cluster_len[i] > 1 || is_cjk_char(c) || is_fullwidth_symbol(c) {
-            font_size
+            fallback_metric_width(&style.font_family, c, font_size)
         } else if is_narrow_punctuation(c) {
             // Task #257: 콤마·중점 등 narrow glyph 폴백 폭 (0.5 → 0.3).
-            font_size * 0.3
+            fallback_metric_width(&style.font_family, c, font_size)
         } else {
-            font_size * 0.5
+            fallback_metric_width(&style.font_family, c, font_size)
         };
         // Task #352: 3+ 연속 dash leader 좁은 base 0.3 em + 라인 슬랙 분배.
         let is_leader = is_dash_leader_run(&chars, i);
@@ -2374,6 +2387,28 @@ mod tests {
             "CJK '가' advance should remain font_size ({:.2}), got {:.2}",
             style.font_size,
             k_advance
+        );
+    }
+
+    #[test]
+    fn test_gyeonggi_missing_font_uses_narrower_fallback_advance() {
+        let m = EmbeddedTextMeasurer;
+        let style = TextStyle {
+            font_family: "경기천년바탕 Bold".to_string(),
+            font_size: 20.0,
+            ratio: 1.0,
+            ..Default::default()
+        };
+        let positions = m.compute_char_positions("가A", &style);
+        assert!(
+            (positions[1] - 17.6).abs() < 0.1,
+            "Gyeonggi CJK fallback advance should be 0.88em, got {:.2}",
+            positions[1]
+        );
+        assert!(
+            ((positions[2] - positions[1]) - 8.8).abs() < 0.1,
+            "Gyeonggi Latin fallback advance should be 0.44em, got {:.2}",
+            positions[2] - positions[1]
         );
     }
 

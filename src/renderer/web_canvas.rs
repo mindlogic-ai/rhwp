@@ -1924,6 +1924,7 @@ impl Renderer for WebCanvasRenderer {
         } else {
             (base_font_size, y)
         };
+        let font_size = style.visual_font_size(font_size);
 
         let font_family = if style.font_family.is_empty() {
             "sans-serif".to_string()

@@ -42,6 +42,11 @@ pub struct Paragraph {
     pub raw_header_extra: Vec<u8>,
     /// 원본에 PARA_TEXT 레코드가 존재했는지 (라운드트립 보존용)
     pub has_para_text: bool,
+    /// Original top-level HWPX `<hp:p>...</hp:p>` bytes.
+    ///
+    /// HWPX export can preserve untouched paragraphs inside an edited section
+    /// while regenerating only paragraphs whose IR changed.
+    pub hwpx_para_xml: Option<Vec<u8>>,
     /// TAB 확장 데이터 (라운드트립 보존용)
     /// 각 탭 문자의 7 code unit (탭 너비, 종류 등) — text 내 '\t' 순서와 1:1 대응
     pub tab_extended: Vec<[u16; 7]>,
@@ -310,6 +315,7 @@ impl Paragraph {
 
         // 1. 텍스트 삽입
         self.text.insert_str(byte_offset, new_text);
+        self.hwpx_para_xml = None;
 
         // 2. char_offsets 재구축
         // 삽입 지점 이후의 기존 오프셋을 시프트
@@ -413,6 +419,7 @@ impl Paragraph {
 
         // 1. 텍스트 삭제
         self.text.drain(byte_start..byte_end);
+        self.hwpx_para_xml = None;
 
         // 2. char_offsets: 삭제 범위 제거 + 이후 엔트리 시프트
         let mut updated_offsets =
@@ -505,6 +512,7 @@ impl Paragraph {
         let byte_offset: usize = text_chars[..split_pos].iter().map(|c| c.len_utf8()).sum();
         let new_text = self.text[byte_offset..].to_string();
         self.text.truncate(byte_offset);
+        self.hwpx_para_xml = None;
 
         // 2. char_offsets 분할
         let new_char_offsets: Vec<u32> = self.char_offsets[split_pos..]
@@ -651,6 +659,7 @@ impl Paragraph {
             char_count_msb: false,
             raw_header_extra: self.raw_header_extra.clone(),
             has_para_text: new_has_para_text,
+            hwpx_para_xml: None,
             tab_extended: Vec::new(),
             numbering_restart: None,
         }
@@ -678,6 +687,7 @@ impl Paragraph {
 
         // 1. 텍스트 결합
         self.text.push_str(&other.text);
+        self.hwpx_para_xml = None;
 
         // 2. char_offsets 결합 (other의 오프셋에 utf16_end 추가)
         for &off in &other.char_offsets {

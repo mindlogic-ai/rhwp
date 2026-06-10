@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::control::Control;
 use crate::model::document::Document;
+use crate::model::table::Table;
 use crate::serializer::SerializeError;
 
 /// 양방향 ID 풀 — 등록된 ID와 참조된 ID를 추적한다.
@@ -119,18 +120,13 @@ impl SerializeContext {
         }
 
         // 인라인 컨트롤(표/그림 등)의 borderFillIDRef를 사전 등록하여
-        // assert_all_refs_resolved 검증 시 누락 방지.
+        // assert_all_refs_resolved 검증 시 누락 방지. HWPX wild docs can carry
+        // nested tables inside table cells, so this scan must be recursive.
         for sec in &doc.sections {
             for para in &sec.paragraphs {
                 for ctrl in &para.controls {
                     if let Control::Table(tbl) = ctrl {
-                        ctx.border_fill_ids.register(tbl.border_fill_id);
-                        for zone in &tbl.zones {
-                            ctx.border_fill_ids.register(zone.border_fill_id);
-                        }
-                        for cell in &tbl.cells {
-                            ctx.border_fill_ids.register(cell.border_fill_id);
-                        }
+                        ctx.register_table_border_fills(tbl);
                     }
                 }
             }
@@ -158,6 +154,23 @@ impl SerializeContext {
         }
 
         ctx
+    }
+
+    fn register_table_border_fills(&mut self, tbl: &Table) {
+        self.border_fill_ids.register(tbl.border_fill_id);
+        for zone in &tbl.zones {
+            self.border_fill_ids.register(zone.border_fill_id);
+        }
+        for cell in &tbl.cells {
+            self.border_fill_ids.register(cell.border_fill_id);
+            for para in &cell.paragraphs {
+                for ctrl in &para.controls {
+                    if let Control::Table(nested) = ctrl {
+                        self.register_table_border_fills(nested);
+                    }
+                }
+            }
+        }
     }
 
     /// manifest·content.hpf 출력용 엔트리 목록 (삽입 순서 보존을 위해 `bin_data_id` 정렬).

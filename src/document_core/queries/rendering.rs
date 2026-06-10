@@ -3190,14 +3190,10 @@ fn compute_hwp_used_height(
     //
     // If we encounter an item we can't measure (PartialTable that spans,
     // unrecognized shape), we return None rather than guess a wrong value.
-    fn item_extent_hu(
-        item: &PageItem,
-        paragraphs: &[Paragraph],
-    ) -> ItemExtent {
+    fn item_extent_hu(item: &PageItem, paragraphs: &[Paragraph]) -> ItemExtent {
         use crate::model::shape::TextWrap;
-        let consumes_flow = |wrap: &TextWrap, tac: bool| {
-            tac || matches!(wrap, TextWrap::TopAndBottom)
-        };
+        let consumes_flow =
+            |wrap: &TextWrap, tac: bool| tac || matches!(wrap, TextWrap::TopAndBottom);
         match item {
             PageItem::FullParagraph { para_index } => {
                 let p = match paragraphs.get(*para_index) {
@@ -3435,10 +3431,12 @@ fn compute_hwp_used_height(
                     }
                 }
                 current_region_has_item = true;
-                if !floating_anchor && matches!(
-                    item,
-                    PageItem::FullParagraph { .. } | PageItem::PartialParagraph { .. }
-                ) {
+                if !floating_anchor
+                    && matches!(
+                        item,
+                        PageItem::FullParagraph { .. } | PageItem::PartialParagraph { .. }
+                    )
+                {
                     current_region_has_paragraph = true;
                 }
                 any_flow_item = true;

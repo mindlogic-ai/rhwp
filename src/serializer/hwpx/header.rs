@@ -29,6 +29,12 @@ use super::SerializeError;
 
 /// `header.xml` 바이트 생성. Stage 1 진입점.
 pub fn write_header(doc: &Document, ctx: &SerializeContext) -> Result<Vec<u8>, SerializeError> {
+    if !doc.doc_info.raw_stream_dirty {
+        if let Some(raw) = &doc.doc_info.hwpx_header_xml {
+            return Ok(raw.clone());
+        }
+    }
+
     let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
     write_xml_decl(&mut w)?;
 
@@ -934,6 +940,31 @@ mod tests {
         let xml = std::str::from_utf8(&bytes).unwrap();
         assert!(xml.contains("<hh:head"));
         assert!(xml.contains("</hh:head>"));
+    }
+
+    #[test]
+    fn write_header_preserves_clean_hwpx_source_xml() {
+        let mut doc = Document::default();
+        doc.doc_info.hwpx_header_xml = Some(b"<hh:head original=\"1\"/>".to_vec());
+
+        let ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_header(&doc, &ctx).expect("write_header");
+
+        assert_eq!(bytes, b"<hh:head original=\"1\"/>");
+    }
+
+    #[test]
+    fn write_header_regenerates_when_docinfo_dirty() {
+        let mut doc = Document::default();
+        doc.doc_info.hwpx_header_xml = Some(b"<hh:head original=\"1\"/>".to_vec());
+        doc.doc_info.raw_stream_dirty = true;
+
+        let ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_header(&doc, &ctx).expect("write_header");
+        let xml = std::str::from_utf8(&bytes).unwrap();
+
+        assert!(xml.contains("<hh:head"));
+        assert!(!xml.contains(r#"original="1""#));
     }
 
     #[test]
