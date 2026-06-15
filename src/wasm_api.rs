@@ -3894,7 +3894,9 @@ impl HwpDocument {
     /// HWP 출처는 어댑터가 no-op 이므로 기존 동작과 동일.
     #[wasm_bindgen(js_name = exportHwp)]
     pub fn export_hwp(&mut self) -> Result<Vec<u8>, JsValue> {
-        self.export_hwp_with_adapter().map_err(|e| e.into())
+        self.serialize_hwp_with_verify()
+            .map(|v| v.bytes)
+            .map_err(|e| e.into())
     }
 
     /// Document IR을 HWPX(ZIP+XML)로 직렬화하여 반환한다.
@@ -3911,6 +3913,7 @@ impl HwpDocument {
     ///   "bytesLen": 678912,
     ///   "pageCountBefore": 9,
     ///   "pageCountAfter": 9,
+    ///   "textPreserved": true,
     ///   "recovered": true
     /// }
     /// ```
@@ -3920,9 +3923,42 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = exportHwpVerify)]
     pub fn export_hwp_verify(&mut self) -> Result<String, JsValue> {
         let v = self.serialize_hwp_with_verify().map_err(JsValue::from)?;
+        let invalid_pages = v
+            .invalid_pages_after
+            .iter()
+            .map(|page| page.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let text_diff_index = v
+            .text_diff_index
+            .map(|idx| idx.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        let recovery_error = v
+            .recovery_error
+            .as_ref()
+            .map(|err| format!("\"{}\"", json_escape(err)))
+            .unwrap_or_else(|| "null".to_string());
         Ok(format!(
-            "{{\"bytesLen\":{},\"pageCountBefore\":{},\"pageCountAfter\":{},\"recovered\":{}}}",
-            v.bytes_len, v.page_count_before, v.page_count_after, v.recovered
+            "{{\"bytesLen\":{},\"pageCountBefore\":{},\"pageCountAfter\":{},\"pageCountDelta\":{},\"invalidPagesAfter\":[{}],\"invalidPageCountAfter\":{},\"textPreserved\":{},\"textLenBefore\":{},\"textLenAfter\":{},\"textHashBefore\":{},\"textHashAfter\":{},\"textDiffIndex\":{},\"textBeforeExcerpt\":\"{}\",\"textAfterExcerpt\":\"{}\",\"sourceFormat\":\"{}\",\"recoveryAttempted\":{},\"recoveryError\":{},\"recoveredViaHwpxRoundtrip\":{},\"recovered\":{}}}",
+            v.bytes_len,
+            v.page_count_before,
+            v.page_count_after,
+            i64::from(v.page_count_after) - i64::from(v.page_count_before),
+            invalid_pages,
+            v.invalid_pages_after.len(),
+            v.text_preserved,
+            v.text_len_before,
+            v.text_len_after,
+            v.text_hash_before,
+            v.text_hash_after,
+            text_diff_index,
+            json_escape(&v.text_before_excerpt),
+            json_escape(&v.text_after_excerpt),
+            json_escape(&v.source_format),
+            v.recovery_attempted,
+            recovery_error,
+            v.recovered_via_hwpx_roundtrip,
+            v.recovered
         ))
     }
 

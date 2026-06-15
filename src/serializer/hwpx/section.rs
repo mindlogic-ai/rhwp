@@ -24,6 +24,7 @@ use quick_xml::Writer;
 use crate::model::control::{Control, Equation};
 use crate::model::document::{Document, Section};
 use crate::model::footnote::{Endnote, Footnote};
+use crate::model::header_footer::{Footer, Header, HeaderFooterApply};
 use crate::model::paragraph::{ColumnBreakType, LineSeg, Paragraph};
 use crate::model::shape::{
     CommonObjAttr, HorzAlign, HorzRelTo, ShapeObject, TextWrap, VertAlign, VertRelTo,
@@ -68,7 +69,10 @@ pub fn write_section(
     let mut vert_cursor: u32 = 0;
 
     let first_para = section.paragraphs.first();
-    let mut out = if let Some(raw) = first_para.and_then(|p| p.hwpx_para_xml.as_ref()) {
+    let reusable_first_raw = first_para
+        .filter(|p| !paragraph_has_dirty_table(p))
+        .and_then(|p| p.hwpx_para_xml.as_ref());
+    let mut out = if let Some(raw) = reusable_first_raw {
         if let Some(p) = first_para {
             vert_cursor = next_vert_cursor_from_ir(&p.line_segs, vert_cursor);
         }
@@ -106,11 +110,13 @@ pub fn write_section(
     if section.paragraphs.len() > 1 {
         let mut extra = String::new();
         for (idx, p) in section.paragraphs.iter().enumerate().skip(1) {
-            if let Some(raw) = &p.hwpx_para_xml {
-                if raw_para_linesegs_match_ir(raw, &p.line_segs) {
-                    extra.push_str(&String::from_utf8_lossy(raw));
-                    vert_cursor = next_vert_cursor_from_ir(&p.line_segs, vert_cursor);
-                    continue;
+            if !paragraph_has_dirty_table(p) {
+                if let Some(raw) = &p.hwpx_para_xml {
+                    if raw_para_linesegs_match_ir(raw, &p.line_segs) {
+                        extra.push_str(&String::from_utf8_lossy(raw));
+                        vert_cursor = next_vert_cursor_from_ir(&p.line_segs, vert_cursor);
+                        continue;
+                    }
                 }
             }
             let (t, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
@@ -131,6 +137,24 @@ pub fn write_section(
     }
 
     Ok(out.into_bytes())
+}
+
+fn paragraph_has_dirty_table(p: &Paragraph) -> bool {
+    p.controls.iter().any(control_has_dirty_table)
+}
+
+fn control_has_dirty_table(control: &Control) -> bool {
+    match control {
+        Control::Table(table) => {
+            table.dirty
+                || table.cells.iter().any(|cell| {
+                    cell.paragraphs
+                        .iter()
+                        .any(|para| para.controls.iter().any(control_has_dirty_table))
+                })
+        }
+        _ => false,
+    }
 }
 
 /// IR의 Paragraph를 기반으로 `<hp:p>` 시작 태그를 생성.
@@ -265,10 +289,12 @@ fn attr_str<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&tail[..end])
 }
 
-/// 문단 첫 run 의 charPrIDRef. IR의 `char_shapes[0].char_shape_id` 사용.
+/// 문단 첫 run 의 charPrIDRef.
 /// 비어있으면 0 (기본 글자모양) 반환.
 fn first_run_char_shape_id(p: &Paragraph) -> u32 {
-    p.char_shapes.first().map(|r| r.char_shape_id).unwrap_or(0)
+    p.char_shape_id_at(0)
+        .or_else(|| p.char_shapes.first().map(|r| r.char_shape_id))
+        .unwrap_or(0)
 }
 
 /// Paragraph 하나를 (`<hp:t>` XML, lineseg XML, 다음 vert_cursor)로 변환.
@@ -526,6 +552,8 @@ fn is_hwpx_inline_slot(control: &Control) -> bool {
             | Control::Ruby(_)
             | Control::Equation(_)
             | Control::Form(_)
+            | Control::Header(_)
+            | Control::Footer(_)
             | Control::Footnote(_)
             | Control::Endnote(_)
     )
@@ -563,6 +591,12 @@ fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeC
         }
         Control::Endnote(note) => {
             out.push_str(&render_endnote(note, ctx));
+        }
+        Control::Header(header) => {
+            out.push_str(&render_header(header, ctx));
+        }
+        Control::Footer(footer) => {
+            out.push_str(&render_footer(footer, ctx));
         }
         _ => {}
     }
@@ -684,6 +718,49 @@ fn render_footnote(note: &Footnote, ctx: &mut SerializeContext) -> String {
 
 fn render_endnote(note: &Endnote, ctx: &mut SerializeContext) -> String {
     render_note_sublist("endNote", note.number, &note.paragraphs, ctx)
+}
+
+fn header_footer_apply_to_hwpx(apply_to: HeaderFooterApply) -> &'static str {
+    match apply_to {
+        HeaderFooterApply::Both => "BOTH",
+        HeaderFooterApply::Even => "EVEN",
+        HeaderFooterApply::Odd => "ODD",
+    }
+}
+
+fn render_header_footer_sublist(
+    tag: &str,
+    apply_to: HeaderFooterApply,
+    paragraphs: &[Paragraph],
+    ctx: &mut SerializeContext,
+) -> String {
+    let mut out = format!(
+        r#"<hp:ctrl><hp:{tag} applyPageType="{apply}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"#,
+        tag = tag,
+        apply = header_footer_apply_to_hwpx(apply_to),
+    );
+    let mut vert_cursor: u32 = 0;
+    for (idx, p) in paragraphs.iter().enumerate() {
+        let (t, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
+        vert_cursor = advance;
+        let cs = first_run_char_shape_id(p);
+        out.push_str(&render_hp_p_open(p, idx as u32));
+        out.push_str(&format!(r#"<hp:run charPrIDRef="{}">"#, cs));
+        out.push_str(&t);
+        out.push_str(r#"</hp:run><hp:linesegarray>"#);
+        out.push_str(&linesegs);
+        out.push_str(r#"</hp:linesegarray></hp:p>"#);
+    }
+    out.push_str(&format!("</hp:subList></hp:{tag}></hp:ctrl>", tag = tag));
+    out
+}
+
+fn render_header(header: &Header, ctx: &mut SerializeContext) -> String {
+    render_header_footer_sublist("header", header.apply_to, &header.paragraphs, ctx)
+}
+
+fn render_footer(footer: &Footer, ctx: &mut SerializeContext) -> String {
+    render_header_footer_sublist("footer", footer.apply_to, &footer.paragraphs, ctx)
 }
 
 fn render_equation(eq: &Equation) -> String {

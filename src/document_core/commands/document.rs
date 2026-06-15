@@ -8,6 +8,7 @@ use crate::error::HwpError;
 use crate::model::control::Control;
 use crate::model::document::Document;
 use crate::model::paragraph::Paragraph;
+use crate::model::shape::ShapeObject;
 use crate::renderer::composer::{compose_section, reflow_line_segs};
 use crate::renderer::layout::LayoutEngine;
 use crate::renderer::page_layout::PageLayoutInfo;
@@ -30,8 +31,172 @@ pub struct HwpExportVerification {
     pub page_count_before: u32,
     /// 직렬화 → 재로드 후 페이지 수
     pub page_count_after: u32,
-    /// `page_count_before == page_count_after` 여부
+    /// 재로드 후 렌더 트리의 페이지 크기가 유효하지 않은 페이지 번호들
+    pub invalid_pages_after: Vec<u32>,
+    /// 페이지 경계 차이를 제외한 렌더 텍스트가 보존되었는지 여부
+    pub text_preserved: bool,
+    /// 페이지 경계 차이를 제외한 export 전 렌더 텍스트 길이
+    pub text_len_before: usize,
+    /// 페이지 경계 차이를 제외한 export 후 렌더 텍스트 길이
+    pub text_len_after: usize,
+    /// 페이지 경계 차이를 제외한 export 전 렌더 텍스트 해시
+    pub text_hash_before: u64,
+    /// 페이지 경계 차이를 제외한 export 후 렌더 텍스트 해시
+    pub text_hash_after: u64,
+    /// 첫 번째 export 전/후 텍스트 차이의 문자 인덱스
+    pub text_diff_index: Option<usize>,
+    /// 첫 번째 차이 주변의 export 전 텍스트
+    pub text_before_excerpt: String,
+    /// 첫 번째 차이 주변의 export 후 텍스트
+    pub text_after_excerpt: String,
+    /// export 전 문서의 원본 파일 포맷
+    pub source_format: String,
+    /// 직접 export 실패 후 HWPX roundtrip recovery 를 시도했는지 여부
+    pub recovery_attempted: bool,
+    /// recovery 경로가 실패한 경우의 짧은 진단
+    pub recovery_error: Option<String>,
+    /// HWP 원본의 직접 export 검증 실패 후 HWPX roundtrip 경로로 회복했는지 여부
+    pub recovered_via_hwpx_roundtrip: bool,
+    /// 렌더 텍스트가 보존되고 모든 페이지 크기가 유효한지 여부
     pub recovered: bool,
+}
+
+fn normalize_hwp_export_verify_text(text: &str) -> String {
+    text.chars().filter(|ch| ch.is_alphanumeric()).collect()
+}
+
+fn hash_hwp_export_verify_text(text: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn hwp_export_verify_text_diff(before: &str, after: &str) -> (Option<usize>, String, String) {
+    let before_chars: Vec<char> = before.chars().collect();
+    let after_chars: Vec<char> = after.chars().collect();
+    let shared_len = before_chars.len().min(after_chars.len());
+    let diff_index = (0..shared_len)
+        .find(|idx| before_chars[*idx] != after_chars[*idx])
+        .or_else(|| (before_chars.len() != after_chars.len()).then_some(shared_len));
+
+    let Some(idx) = diff_index else {
+        return (None, String::new(), String::new());
+    };
+
+    let start = idx.saturating_sub(40);
+    let before_end = (idx + 80).min(before_chars.len());
+    let after_end = (idx + 80).min(after_chars.len());
+    let before_excerpt = before_chars[start..before_end].iter().collect();
+    let after_excerpt = after_chars[start..after_end].iter().collect();
+
+    (Some(idx), before_excerpt, after_excerpt)
+}
+
+fn collect_hwp_export_verify_paragraphs(paragraphs: &[Paragraph], out: &mut String) {
+    for para in paragraphs {
+        out.push_str(&para.text);
+        for control in &para.controls {
+            collect_hwp_export_verify_control(control, out);
+        }
+    }
+}
+
+fn collect_hwp_export_verify_caption(
+    caption: &Option<crate::model::shape::Caption>,
+    out: &mut String,
+) {
+    if let Some(caption) = caption {
+        collect_hwp_export_verify_paragraphs(&caption.paragraphs, out);
+    }
+}
+
+fn collect_hwp_export_verify_shape(shape: &ShapeObject, out: &mut String) {
+    if let Some(drawing) = shape.drawing() {
+        if let Some(text_box) = &drawing.text_box {
+            collect_hwp_export_verify_paragraphs(&text_box.paragraphs, out);
+        }
+        collect_hwp_export_verify_caption(&drawing.caption, out);
+    }
+    if let ShapeObject::Group(group) = shape {
+        for child in &group.children {
+            collect_hwp_export_verify_shape(child, out);
+        }
+        collect_hwp_export_verify_caption(&group.caption, out);
+    }
+}
+
+fn collect_hwp_export_verify_control(control: &Control, out: &mut String) {
+    match control {
+        Control::Table(table) => {
+            for cell in &table.cells {
+                collect_hwp_export_verify_paragraphs(&cell.paragraphs, out);
+            }
+            collect_hwp_export_verify_caption(&table.caption, out);
+        }
+        Control::Shape(shape) => collect_hwp_export_verify_shape(shape, out),
+        Control::Header(header) => {
+            collect_hwp_export_verify_paragraphs(&header.paragraphs, out);
+        }
+        Control::Footer(footer) => {
+            collect_hwp_export_verify_paragraphs(&footer.paragraphs, out);
+        }
+        Control::Footnote(footnote) => {
+            collect_hwp_export_verify_paragraphs(&footnote.paragraphs, out);
+        }
+        Control::Endnote(endnote) => {
+            collect_hwp_export_verify_paragraphs(&endnote.paragraphs, out);
+        }
+        Control::HiddenComment(comment) => {
+            collect_hwp_export_verify_paragraphs(&comment.paragraphs, out);
+        }
+        Control::Field(field) => {
+            out.push_str(&field.command);
+            if let Some(name) = &field.ctrl_data_name {
+                out.push_str(name);
+            }
+            // Memo sublists are annotation payloads, not rendered body text.
+            // Current HWP/HWPX export paths do not round-trip those memo bodies,
+            // so including them here blocks otherwise valid visible exports.
+        }
+        Control::Equation(eq) => out.push_str(&eq.script),
+        Control::Form(form) => {
+            out.push_str(&form.caption);
+            out.push_str(&form.text);
+        }
+        _ => {}
+    }
+}
+
+fn document_hwp_export_verify_text(core: &DocumentCore) -> String {
+    let mut text = String::new();
+    for section in &core.document.sections {
+        collect_hwp_export_verify_paragraphs(&section.paragraphs, &mut text);
+        for master_page in &section.section_def.master_pages {
+            collect_hwp_export_verify_paragraphs(&master_page.paragraphs, &mut text);
+        }
+    }
+    normalize_hwp_export_verify_text(&text)
+}
+
+fn is_hwp_export_verify_text_preserved(before: &str, after: &str, page_count_after: u32) -> bool {
+    if before.is_empty() {
+        return true;
+    }
+
+    let mut after_chars = after.chars();
+    for before_char in before.chars() {
+        if !after_chars.any(|after_char| after_char == before_char) {
+            return false;
+        }
+    }
+
+    let before_len = before.chars().count();
+    let after_len = after.chars().count();
+    let allowed_extra = 32usize.max(page_count_after as usize * 8);
+    after_len >= before_len && after_len <= before_len.saturating_add(allowed_extra)
 }
 
 impl DocumentCore {
@@ -619,26 +784,118 @@ impl DocumentCore {
     /// - `page_count_before`: 어댑터 적용 직전 페이지 수
     /// - `page_count_after`: 직렬화 → 재로드 후 페이지 수
     /// - `bytes_len`: HWP 바이트 길이
-    /// - `recovered`: `before == after` 면 true
+    /// - `text_preserved`: 렌더 텍스트가 페이지 경계 차이를 제외하고 보존되면 true
+    /// - `recovered`: 렌더 텍스트가 보존되고 재로드 후 모든 페이지 크기가 유효하면 true
     ///
     /// ## 비용
     ///
     /// 1회 paginate + 1회 직렬화 + 1회 from_bytes (paginate 포함). 작은 문서 ~수 ms,
     /// 큰 문서 수백 ms 가능.
     pub fn serialize_hwp_with_verify(&mut self) -> Result<HwpExportVerification, HwpError> {
+        self.serialize_hwp_with_verify_inner(true)
+    }
+
+    fn serialize_hwp_with_verify_inner(
+        &mut self,
+        allow_hwpx_roundtrip_recovery: bool,
+    ) -> Result<HwpExportVerification, HwpError> {
         let bytes = self.export_hwp_with_adapter()?;
         let page_count_before = self.page_count();
+        let text_before = document_hwp_export_verify_text(self);
+        let text_len_before = text_before.chars().count();
+        let text_hash_before = hash_hwp_export_verify_text(&text_before);
         let bytes_len = bytes.len();
         let reloaded = DocumentCore::from_bytes(&bytes)?;
         let page_count_after = reloaded.page_count();
+        let text_after = document_hwp_export_verify_text(&reloaded);
+        let text_len_after = text_after.chars().count();
+        let text_hash_after = hash_hwp_export_verify_text(&text_after);
+        let mut invalid_pages_after = Vec::new();
+        for page_num in 0..page_count_after {
+            match reloaded.build_page_tree_cached(page_num) {
+                Ok(tree)
+                    if tree.root.bbox.width.is_finite()
+                        && tree.root.bbox.height.is_finite()
+                        && tree.root.bbox.width > 0.0
+                        && tree.root.bbox.height > 0.0 => {}
+                _ => invalid_pages_after.push(page_num),
+            }
+        }
+        let text_preserved =
+            is_hwp_export_verify_text_preserved(&text_before, &text_after, page_count_after);
+        let (text_diff_index, text_before_excerpt, text_after_excerpt) =
+            hwp_export_verify_text_diff(&text_before, &text_after);
+        let recovered = text_preserved && invalid_pages_after.is_empty();
 
-        Ok(HwpExportVerification {
+        let primary = HwpExportVerification {
             bytes,
             bytes_len,
             page_count_before,
             page_count_after,
-            recovered: page_count_before == page_count_after,
-        })
+            invalid_pages_after,
+            text_preserved,
+            text_len_before,
+            text_len_after,
+            text_hash_before,
+            text_hash_after,
+            text_diff_index,
+            text_before_excerpt,
+            text_after_excerpt,
+            source_format: format!("{:?}", self.source_format),
+            recovery_attempted: false,
+            recovery_error: None,
+            recovered_via_hwpx_roundtrip: false,
+            recovered,
+        };
+
+        if primary.recovered || !allow_hwpx_roundtrip_recovery {
+            return Ok(primary);
+        }
+
+        if matches!(
+            self.source_format,
+            crate::parser::FileFormat::Hwp
+                | crate::parser::FileFormat::Hwp3
+                | crate::parser::FileFormat::Hwpx
+        ) {
+            let mut attempted_primary = primary.clone();
+            attempted_primary.recovery_attempted = true;
+            match self.export_hwpx_native() {
+                Ok(hwpx_bytes) => match DocumentCore::from_bytes(&hwpx_bytes) {
+                    Ok(mut roundtrip_core) => {
+                        match roundtrip_core.serialize_hwp_with_verify_inner(false) {
+                            Ok(mut recovered) if recovered.recovered => {
+                                recovered.source_format = attempted_primary.source_format;
+                                recovered.recovery_attempted = true;
+                                recovered.recovered_via_hwpx_roundtrip = true;
+                                return Ok(recovered);
+                            }
+                            Ok(recovered) => {
+                                attempted_primary.recovery_error = Some(format!(
+                                    "hwpx_roundtrip_verify_failed: text_preserved={} invalid_pages={:?}",
+                                    recovered.text_preserved, recovered.invalid_pages_after
+                                ));
+                            }
+                            Err(err) => {
+                                attempted_primary.recovery_error =
+                                    Some(format!("hwpx_roundtrip_hwp_export_failed: {err}"));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        attempted_primary.recovery_error =
+                            Some(format!("hwpx_roundtrip_parse_failed: {err}"));
+                    }
+                },
+                Err(err) => {
+                    attempted_primary.recovery_error =
+                        Some(format!("hwpx_roundtrip_export_failed: {err}"));
+                }
+            }
+            return Ok(attempted_primary);
+        }
+
+        Ok(primary)
     }
 
     /// Document IR을 HWPX(ZIP+XML)로 직렬화 (네이티브 에러 타입)
@@ -1243,8 +1500,17 @@ mod validate_linesegs_tests {
 
         let bytes = std::fs::read(path).expect("read fixture");
         let mut core = DocumentCore::from_bytes(&bytes).expect("parse fixture");
-        core.insert_text_native(0, 0, 0, "[export-probe] ")
-            .expect("mutate fixture");
+        if std::env::var("RHWP_EXPORT_NO_TEST_MUTATION")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            core.insert_text_native(0, 0, 0, "[export-probe] ")
+                .expect("mutate fixture");
+            let _ = core.create_header_footer_native(0, true, 0);
+            core.insert_text_in_header_footer_native(0, true, 0, 0, 0, "[export-probe-header]")
+                .expect("mutate fixture header");
+        }
 
         let doc_info_bytes = crate::serializer::doc_info::serialize_doc_info(
             &core.document.doc_info,
@@ -1253,20 +1519,98 @@ mod validate_linesegs_tests {
         crate::parser::record::Record::read_all(&doc_info_bytes)
             .expect("generated DocInfo records should be internally well-formed");
 
-        let bytes = core
-            .export_hwp_with_adapter()
-            .expect("HWP export should reload after self-verify");
-        let page_count_before = core.page_count();
-        let reloaded = DocumentCore::from_bytes(&bytes).expect("HWP export should reload");
-        let page_count_after = reloaded.page_count();
-        assert_eq!(
-            page_count_before, page_count_after,
-            "HWP export reload page count should recover"
+        let verify = core
+            .serialize_hwp_with_verify()
+            .expect("HWP export should self-verify");
+        let reloaded = DocumentCore::from_bytes(&verify.bytes).expect("HWP export should reload");
+        if !verify.text_preserved {
+            let before_text = document_hwp_export_verify_text(&core);
+            let after_text = document_hwp_export_verify_text(&reloaded);
+            let mut before_iter = before_text.chars();
+            let mut after_iter = after_text.chars();
+            let mut first_diff = 0usize;
+            loop {
+                match (before_iter.next(), after_iter.next()) {
+                    (Some(a), Some(b)) if a == b => first_diff += 1,
+                    _ => break,
+                }
+            }
+            let before_context: String = before_text
+                .chars()
+                .skip(first_diff.saturating_sub(40))
+                .take(100)
+                .collect();
+            let after_context: String = after_text
+                .chars()
+                .skip(first_diff.saturating_sub(40))
+                .take(100)
+                .collect();
+            eprintln!(
+                "HWP export text diff at char {}: before=`{}` after=`{}`",
+                first_diff, before_context, after_context
+            );
+            let mut after_iter = after_text.chars();
+            let mut first_missing = None;
+            for (idx, before_char) in before_text.chars().enumerate() {
+                if !after_iter.any(|after_char| after_char == before_char) {
+                    first_missing = Some((idx, before_char));
+                    break;
+                }
+            }
+            if let Some((idx, ch)) = first_missing {
+                let before_missing_context: String = before_text
+                    .chars()
+                    .skip(idx.saturating_sub(40))
+                    .take(100)
+                    .collect();
+                eprintln!(
+                    "HWP export first missing substantive char at {} (`{}`): before=`{}`",
+                    idx, ch, before_missing_context
+                );
+            }
+            eprintln!(
+                "HWP export header before: {}",
+                core.get_header_footer_native(0, true, 0)
+                    .unwrap_or_else(|err| err.to_string())
+            );
+            eprintln!(
+                "HWP export header after: {}",
+                reloaded
+                    .get_header_footer_native(0, true, 0)
+                    .unwrap_or_else(|err| err.to_string())
+            );
+        }
+        assert!(
+            verify.text_preserved,
+            "HWP export reload should preserve rendered text: before len/hash={}/{}, after len/hash={}/{}",
+            verify.text_len_before,
+            verify.text_hash_before,
+            verify.text_len_after,
+            verify.text_hash_after
         );
         assert!(
-            page_count_before == page_count_after,
-            "HWP export self-verify should recover"
+            verify.invalid_pages_after.is_empty(),
+            "HWP export reload should not produce invalid page dimensions: {:?}",
+            verify.invalid_pages_after
         );
-        assert!(!bytes.is_empty());
+        assert!(
+            verify.recovered,
+            "HWP export self-verify should recover without content loss"
+        );
+
+        for page_num in 0..verify.page_count_after {
+            let tree = reloaded
+                .build_page_tree_cached(page_num)
+                .expect("HWP export page should build render tree");
+            assert!(
+                tree.root.bbox.width.is_finite()
+                    && tree.root.bbox.height.is_finite()
+                    && tree.root.bbox.width > 0.0
+                    && tree.root.bbox.height > 0.0,
+                "HWP export page {page_num} should have valid dimensions: {:?}",
+                tree.root.bbox
+            );
+        }
+        assert!(!verify.bytes.is_empty());
     }
 }

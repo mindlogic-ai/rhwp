@@ -299,6 +299,7 @@ impl DocumentCore {
 
         // raw 스트림 무효화, 재페이지네이션 (셀 편집 → composed 불변, section dirty만 설정)
         self.invalidate_section_source(section_idx);
+        self.invalidate_paragraph_source(section_idx, parent_para_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -350,6 +351,7 @@ impl DocumentCore {
 
         // raw 스트림 무효화, 재페이지네이션 (셀 편집 → composed 불변)
         self.invalidate_section_source(section_idx);
+        self.invalidate_paragraph_source(section_idx, parent_para_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -2693,6 +2695,7 @@ impl DocumentCore {
 
         // 리플로우 (최외곽 표 기준 — 중첩 표 셀 폭은 별도 계산이 필요하나 우선 section dirty로 처리)
         self.invalidate_section_source(section_idx);
+        self.invalidate_paragraph_source(section_idx, parent_para_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -2724,6 +2727,7 @@ impl DocumentCore {
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
         self.invalidate_section_source(section_idx);
+        self.invalidate_paragraph_source(section_idx, parent_para_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 

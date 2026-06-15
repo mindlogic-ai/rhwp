@@ -65,6 +65,20 @@ impl DocumentCore {
         None
     }
 
+    fn invalidate_header_footer_source(
+        &mut self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+    ) {
+        self.invalidate_section_source(section_idx);
+        if let Some((para_idx, _)) =
+            self.find_header_footer_control(section_idx, is_header, apply_from_u8(apply_to))
+        {
+            self.invalidate_paragraph_source(section_idx, para_idx);
+        }
+    }
+
     /// 머리말/꼬리말 조회 — JSON 반환
     ///
     /// 존재하면: `{"ok":true,"exists":true,"applyTo":0,"paraCount":N,"text":"..."}`
@@ -160,15 +174,37 @@ impl DocumentCore {
             }))
         };
 
-        // 구역의 첫 번째 문단에 컨트롤 추가 (SectionDef 컨트롤이 있는 곳)
+        // 구역의 첫 번째 문단에 컨트롤 추가 (SectionDef 컨트롤이 있는 곳).
+        // Header/footer is section-level state. Keep section/page controls first,
+        // but anchor the new header/footer before body object controls such as
+        // tables so HWP export/reload does not delay activation until after a
+        // tall first-page object.
         let section = &mut self.document.sections[section_idx];
         if section.paragraphs.is_empty() {
             return Err(HwpError::RenderError("구역에 문단이 없습니다".to_string()));
         }
-        section.paragraphs[0].controls.push(ctrl);
+        let first_para = &mut section.paragraphs[0];
+        let insert_idx = first_para
+            .controls
+            .iter()
+            .position(|existing| {
+                !matches!(
+                    existing,
+                    Control::SectionDef(_)
+                        | Control::ColumnDef(_)
+                        | Control::PageNumberPos(_)
+                        | Control::NewNumber(_)
+                        | Control::PageHide(_)
+                )
+            })
+            .unwrap_or(first_para.controls.len());
+        first_para.controls.insert(insert_idx, ctrl);
+        first_para
+            .ctrl_data_records
+            .insert(insert_idx.min(first_para.ctrl_data_records.len()), None);
         // 컨트롤 1개 = UTF-16 8 code units → char_count 갱신
-        section.paragraphs[0].char_count += 8;
-        section.raw_stream = None;
+        first_para.char_count += 8;
+        self.invalidate_header_footer_source(section_idx, is_header, apply_to);
 
         // 재페이지네이션 (머리말/꼬리말이 추가되면 페이지 레이아웃에 영향)
         self.mark_section_dirty(section_idx);
@@ -278,8 +314,8 @@ impl DocumentCore {
         // 리플로우 (머리말/꼬리말 영역 폭 기반)
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
 
-        // raw 스트림 무효화, 재페이지네이션
-        self.document.sections[section_idx].raw_stream = None;
+        // raw/HWPX source 무효화, 재페이지네이션
+        self.invalidate_header_footer_source(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -320,8 +356,8 @@ impl DocumentCore {
         // 리플로우
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
 
-        // raw 스트림 무효화, 재페이지네이션
-        self.document.sections[section_idx].raw_stream = None;
+        // raw/HWPX source 무효화, 재페이지네이션
+        self.invalidate_header_footer_source(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -394,7 +430,7 @@ impl DocumentCore {
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, new_para_idx);
 
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_header_footer_source(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -460,7 +496,7 @@ impl DocumentCore {
         let prev_idx = hf_para_idx - 1;
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, prev_idx);
 
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_header_footer_source(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -550,7 +586,8 @@ impl DocumentCore {
             self.document.sections[section_idx].paragraphs[pi]
                 .char_count
                 .saturating_sub(8);
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_section_source(section_idx);
+        self.invalidate_paragraph_source(section_idx, pi);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -848,7 +885,7 @@ impl DocumentCore {
             self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
         }
 
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_header_footer_source(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
         self.event_log.push(DocumentEvent::ParaFormatChanged {
             section: section_idx,
@@ -885,7 +922,7 @@ impl DocumentCore {
 
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
 
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_header_footer_source(section_idx, is_header, apply_to);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
 
@@ -1062,7 +1099,7 @@ impl DocumentCore {
 
         // 10) 리플로우 + 스타일 재해소 + 재페이지네이션
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, 0);
-        self.document.sections[section_idx].raw_stream = None;
+        self.invalidate_header_footer_source(section_idx, is_header, apply_to);
         self.rebuild_section(section_idx);
 
         Ok("{\"ok\":true}".to_string())

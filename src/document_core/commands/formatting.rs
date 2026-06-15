@@ -944,7 +944,8 @@ impl DocumentCore {
             );
         }
 
-        self.document.sections[sec_idx].raw_stream = None;
+        self.invalidate_section_source(sec_idx);
+        self.invalidate_paragraph_source(sec_idx, para_idx);
         self.rebuild_section(sec_idx);
         self.event_log.push(DocumentEvent::CharFormatChanged {
             section: sec_idx,
@@ -1025,16 +1026,18 @@ impl DocumentCore {
             let available_width = (col_width - margin_left - margin_right).max(1.0);
             cell_para.line_segs.clear();
             reflow_line_segs(cell_para, available_width, &styles, dpi);
-
-            // 표 dirty 마킹 — 셀 높이 재계산 필요
-            if let Control::Table(ref mut t) =
-                self.document.sections[sec_idx].paragraphs[parent_para_idx].controls[control_idx]
-            {
-                t.dirty = true;
-            }
         }
 
-        self.document.sections[sec_idx].raw_stream = None;
+        // 표 dirty 마킹 — 셀 문단 XML은 parent paragraph raw XML에 포함되므로
+        // 크기 변경이 아니어도 HWPX export가 stale raw paragraph를 재사용하면 안 된다.
+        if let Control::Table(ref mut t) =
+            self.document.sections[sec_idx].paragraphs[parent_para_idx].controls[control_idx]
+        {
+            t.dirty = true;
+        }
+
+        self.invalidate_section_source(sec_idx);
+        self.invalidate_paragraph_source(sec_idx, parent_para_idx);
         self.rebuild_section(sec_idx);
         self.event_log.push(DocumentEvent::CharFormatChanged {
             section: sec_idx,

@@ -68,7 +68,28 @@ pub fn parse_hwpx_section(xml: &str) -> Result<Section, HwpxError> {
         buf.clear();
     }
 
+    materialize_default_page_def_if_missing(&mut section.section_def);
+
     Ok(section)
+}
+
+fn materialize_default_page_def_if_missing(section_def: &mut SectionDef) {
+    if section_def.page_def.width > 0 && section_def.page_def.height > 0 {
+        return;
+    }
+
+    section_def.page_def.width = 59528;
+    section_def.page_def.height = 84188;
+    section_def.page_def.margin_left = 8504;
+    section_def.page_def.margin_right = 8504;
+    section_def.page_def.margin_top = 5669;
+    section_def.page_def.margin_bottom = 4252;
+    section_def.page_def.margin_header = 4252;
+    section_def.page_def.margin_footer = 4252;
+    section_def.page_def.margin_gutter = 0;
+    section_def.page_def.attr = 0;
+    section_def.page_def.landscape = false;
+    section_def.page_def.pagination_bottom_tolerance = 0;
 }
 
 fn extract_top_level_paragraph_xml(xml: &str) -> Vec<Vec<u8>> {
@@ -5183,6 +5204,24 @@ mod tests {
             .and_then(|raw| std::str::from_utf8(raw).ok())
             .unwrap()
             .contains(r#"id="top2""#));
+    }
+
+    #[test]
+    fn parse_section_without_sec_pr_uses_valid_a4_page_def() {
+        let xml = r#"<hs:sec xmlns:hs="s" xmlns:hp="p">
+  <hs:subList>
+    <hp:p paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t>A</hp:t></hp:run></hp:p>
+  </hs:subList>
+</hs:sec>"#;
+
+        let section = parse_hwpx_section(xml).unwrap();
+
+        assert_eq!(section.section_def.page_def.width, 59528);
+        assert_eq!(section.section_def.page_def.height, 84188);
+        assert_eq!(section.section_def.page_def.margin_left, 8504);
+        assert_eq!(section.section_def.page_def.margin_right, 8504);
+        assert_eq!(section.section_def.page_def.margin_top, 5669);
+        assert_eq!(section.section_def.page_def.margin_bottom, 4252);
     }
 
     #[test]

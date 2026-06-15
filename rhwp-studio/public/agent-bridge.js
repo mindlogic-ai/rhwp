@@ -86,6 +86,32 @@
       } catch {}
       return row * (colCount || 1) + col;
     }
+    function cellPathJson(ctrl, cellIdx, cellPara = 0) {
+      return JSON.stringify([
+        { controlIndex: ctrl, cellIndex: cellIdx, cellParaIndex: cellPara },
+      ]);
+    }
+    function getCellTextCompat(doc, sec, para, ctrl, cellIdx, cellPara, start, count) {
+      const pathJson = cellPathJson(ctrl, cellIdx, cellPara);
+      if (typeof doc.getTextInCellByPath === 'function') {
+        return doc.getTextInCellByPath(sec, para, pathJson, start, count);
+      }
+      return doc.getTextInCell(sec, para, ctrl, cellIdx, cellPara, start, count);
+    }
+    function deleteCellTextCompat(doc, sec, para, ctrl, cellIdx, cellPara, start, count) {
+      const pathJson = cellPathJson(ctrl, cellIdx, cellPara);
+      if (typeof doc.deleteTextInCellByPath === 'function') {
+        return doc.deleteTextInCellByPath(sec, para, pathJson, start, count);
+      }
+      return doc.deleteTextInCell(sec, para, ctrl, cellIdx, cellPara, start, count);
+    }
+    function insertCellTextCompat(doc, sec, para, ctrl, cellIdx, cellPara, start, text) {
+      const pathJson = cellPathJson(ctrl, cellIdx, cellPara);
+      if (typeof doc.insertTextInCellByPath === 'function') {
+        return doc.insertTextInCellByPath(sec, para, pathJson, start, text);
+      }
+      return doc.insertTextInCell(sec, para, ctrl, cellIdx, cellPara, start, text);
+    }
     function refresh() {
       cleanSinceLoad = false;
       originalHwpxBytes = null;
@@ -614,6 +640,11 @@
         try { return safeParse(getDoc().getHeaderFooterList(params.sec || 0, true, 0)); }
         catch (e) { return { ok: false, error: e.message }; }
       },
+      async getHeaderFooter(params) {
+        const { sec = 0, is_header = true, apply_to = 0 } = params;
+        try { return safeParse(getDoc().getHeaderFooter(sec, is_header, apply_to)); }
+        catch (e) { return { ok: false, error: e.message }; }
+      },
 
       // viewPage — render one page to an offscreen canvas and return it as a
       // PNG so the agent can SEE what the doc looks like. Used for visual
@@ -911,7 +942,7 @@
         const { query, replacement, props, case_sensitive = false } = params;
         const doc = getDoc();
         const r1 = safeParse(doc.replaceAll(query, replacement, !!case_sensitive));
-        const replaced = r1.replaced ?? 0;
+        const replaced = r1.replaced ?? r1.count ?? 0;
         if (!r1.ok || replaced === 0 || !props) {
           refresh();
           return { ok: !!r1.ok, replaced, styled: 0 };
@@ -919,7 +950,7 @@
         // Restyle every freshly-written occurrence. Re-searching on the
         // replacement string is the simplest way to locate the just-written
         // ranges across both body paragraphs and table cells.
-        const styleResult = await this.applyTextStyleToMatches({
+        const styleResult = await handlers.applyTextStyleToMatches({
           query: replacement,
           props,
           case_sensitive: true,
@@ -1152,9 +1183,9 @@
         doc.beginBatch();
         try {
           let existingLen = 0;
-          try { existingLen = (doc.getTextInCell(sec, para, ctrl, cellIdx, 0, 0, 9999) || '').length; } catch {}
-          if (existingLen > 0) doc.deleteTextInCell(sec, para, ctrl, cellIdx, 0, 0, existingLen);
-          doc.insertTextInCell(sec, para, ctrl, cellIdx, 0, 0, text);
+          try { existingLen = (getCellTextCompat(doc, sec, para, ctrl, cellIdx, 0, 0, 9999) || '').length; } catch {}
+          if (existingLen > 0) deleteCellTextCompat(doc, sec, para, ctrl, cellIdx, 0, 0, existingLen);
+          insertCellTextCompat(doc, sec, para, ctrl, cellIdx, 0, 0, text);
           doc.endBatch();
           refresh();
           return { ok: true };
@@ -1201,25 +1232,45 @@
       },
       async insertTableRow(params) {
         const { sec, para, ctrl } = pathToCoords(params.path);
-        const r = safeParse(getDoc().insertTableRow(sec, para, ctrl, params.after_row, true));
+        let r;
+        try {
+          r = safeParse(getDoc().insertTableRow(sec, para, ctrl, params.after_row, true));
+        } catch (e) {
+          return { ok: false, error: e?.message || String(e) };
+        }
         refresh();
         return r;
       },
       async insertTableColumn(params) {
         const { sec, para, ctrl } = pathToCoords(params.path);
-        const r = safeParse(getDoc().insertTableColumn(sec, para, ctrl, params.after_col, true));
+        let r;
+        try {
+          r = safeParse(getDoc().insertTableColumn(sec, para, ctrl, params.after_col, true));
+        } catch (e) {
+          return { ok: false, error: e?.message || String(e) };
+        }
         refresh();
         return r;
       },
       async deleteTableRow(params) {
         const { sec, para, ctrl } = pathToCoords(params.path);
-        const r = safeParse(getDoc().deleteTableRow(sec, para, ctrl, params.row));
+        let r;
+        try {
+          r = safeParse(getDoc().deleteTableRow(sec, para, ctrl, params.row));
+        } catch (e) {
+          return { ok: false, error: e?.message || String(e) };
+        }
         refresh();
         return r;
       },
       async deleteTableColumn(params) {
         const { sec, para, ctrl } = pathToCoords(params.path);
-        const r = safeParse(getDoc().deleteTableColumn(sec, para, ctrl, params.col));
+        let r;
+        try {
+          r = safeParse(getDoc().deleteTableColumn(sec, para, ctrl, params.col));
+        } catch (e) {
+          return { ok: false, error: e?.message || String(e) };
+        }
         refresh();
         return r;
       },
@@ -1433,7 +1484,11 @@
           }
         }
         const hwpVerifyFailed = fmt === 'hwp' && hwpVerify
-          && (hwpVerify.ok === false || hwpVerify.recovered === false);
+          && (
+            hwpVerify.ok === false
+            || hwpVerify.recovered === false
+            || (hwpVerify.invalidPageCountAfter || 0) > 0
+          );
         if (hwpVerifyFailed && params.allow_unverified !== true) {
           throw new Error(`HWP export self-verify failed: ${JSON.stringify(hwpVerify)}`);
         }

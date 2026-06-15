@@ -1341,33 +1341,32 @@ impl LayoutEngine {
                     let seg_w0 = p.line_segs.first().map(|s| s.segment_width).unwrap_or(0);
                     p.controls.iter().any(|c| {
                         matches!(c, Control::Table(t)
-                            if t.common.treat_as_char
-                                && matches!(
-                                    t.common.text_wrap,
-                                    crate::model::shape::TextWrap::TopAndBottom
-                                )
-                                && !crate::renderer::height_measurer::is_tac_table_inline(
-                                    t, seg_w0, &p.text, &p.controls,
-                                ))
+                        if t.common.treat_as_char
+                            && matches!(
+                                t.common.text_wrap,
+                                crate::model::shape::TextWrap::TopAndBottom
+                            )
+                            && !crate::renderer::height_measurer::is_tac_table_inline(
+                                t, seg_w0, &p.text, &p.controls,
+                            ))
                     })
                 })
                 .unwrap_or(false);
-            let (line_height, baseline) = if (has_tac_shape || has_block_tac_table)
-                && raw_lh > max_fs * 1.5
-            {
-                // Shape 높이가 line_height에 포함 → 폰트 기반 line_height 사용
-                let font_lh = max_fs * 1.2; // 폰트 크기의 120%
-                let font_bl = max_fs * 0.85;
-                (font_lh, ensure_min_baseline(font_bl, max_fs))
-            } else {
-                (
-                    line_height,
-                    ensure_min_baseline(
-                        hwpunit_to_px(comp_line.baseline_distance, self.dpi),
-                        max_fs,
-                    ),
-                )
-            };
+            let (line_height, baseline) =
+                if (has_tac_shape || has_block_tac_table) && raw_lh > max_fs * 1.5 {
+                    // Shape 높이가 line_height에 포함 → 폰트 기반 line_height 사용
+                    let font_lh = max_fs * 1.2; // 폰트 크기의 120%
+                    let font_bl = max_fs * 0.85;
+                    (font_lh, ensure_min_baseline(font_bl, max_fs))
+                } else {
+                    (
+                        line_height,
+                        ensure_min_baseline(
+                            hwpunit_to_px(comp_line.baseline_distance, self.dpi),
+                            max_fs,
+                        ),
+                    )
+                };
 
             // 들여쓰기/내어쓰기: 문단 여백은 무조건 적용
             // - 보통(ind=0): 모든 줄 margin_left
@@ -3306,100 +3305,101 @@ impl LayoutEngine {
                         .collect();
                     if let (Some(p), Some(bdc)) = (para, bin_data_content) {
                         if !row_pics.is_empty() {
-                        // TAC 이미지 전체 폭 계산 후 문단 정렬 적용 (이 행 기준)
-                        let total_tac_width: f64 = row_pics.iter().map(|(w, _)| w).sum();
-                        let align_offset = match alignment {
-                            Alignment::Center | Alignment::Distribute => {
-                                (available_width - total_tac_width).max(0.0) / 2.0
-                            }
-                            Alignment::Right => (available_width - total_tac_width).max(0.0),
-                            _ => 0.0, // Left, Justify
-                        };
-                        let mut img_x = effective_col_x + effective_margin_left + align_offset;
-                        for &(tac_w, tac_ci) in &row_pics {
-                            if let Some(ctrl) = p.controls.get(tac_ci) {
-                                // [Issue #476] 빈 문단 + 인라인 Shape: inline_pos 등록 후 shape_layout 이 그리도록 위임.
-                                // 등록하지 않으면 layout_shape 가 inline_pos=None 으로 받아 fallback 위치에 그리거나,
-                                // #476 의 fallback 차단 분기로 박스가 누락된다.
-                                if let Control::Shape(shape) = ctrl {
-                                    let common = shape.common();
-                                    let shape_h = hwpunit_to_px(common.height as i32, self.dpi);
-                                    let shape_y = (y + baseline - shape_h).max(y);
-                                    tree.set_inline_shape_position(
-                                        section_index,
-                                        para_index,
-                                        tac_ci,
-                                        cell_ctx.as_ref(),
-                                        img_x,
-                                        shape_y,
-                                    );
-                                    img_x += tac_w;
-                                    continue;
+                            // TAC 이미지 전체 폭 계산 후 문단 정렬 적용 (이 행 기준)
+                            let total_tac_width: f64 = row_pics.iter().map(|(w, _)| w).sum();
+                            let align_offset = match alignment {
+                                Alignment::Center | Alignment::Distribute => {
+                                    (available_width - total_tac_width).max(0.0) / 2.0
                                 }
-                                if let Control::Picture(pic) = ctrl {
-                                    let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
-                                    let img_y = (y + baseline - pic_h).max(y);
-                                    let bin_data_id = pic.image_attr.bin_data_id;
-                                    let image_data =
-                                        find_bin_data(bdc, bin_data_id).map(|c| c.data.clone());
-                                    let crop = {
-                                        let c = &pic.crop;
-                                        if c.right > c.left
-                                            && c.bottom > c.top
-                                            && (c.left != 0
-                                                || c.top != 0
-                                                || c.right != 0
-                                                || c.bottom != 0)
+                                Alignment::Right => (available_width - total_tac_width).max(0.0),
+                                _ => 0.0, // Left, Justify
+                            };
+                            let mut img_x = effective_col_x + effective_margin_left + align_offset;
+                            for &(tac_w, tac_ci) in &row_pics {
+                                if let Some(ctrl) = p.controls.get(tac_ci) {
+                                    // [Issue #476] 빈 문단 + 인라인 Shape: inline_pos 등록 후 shape_layout 이 그리도록 위임.
+                                    // 등록하지 않으면 layout_shape 가 inline_pos=None 으로 받아 fallback 위치에 그리거나,
+                                    // #476 의 fallback 차단 분기로 박스가 누락된다.
+                                    if let Control::Shape(shape) = ctrl {
+                                        let common = shape.common();
+                                        let shape_h = hwpunit_to_px(common.height as i32, self.dpi);
+                                        let shape_y = (y + baseline - shape_h).max(y);
+                                        tree.set_inline_shape_position(
+                                            section_index,
+                                            para_index,
+                                            tac_ci,
+                                            cell_ctx.as_ref(),
+                                            img_x,
+                                            shape_y,
+                                        );
+                                        img_x += tac_w;
+                                        continue;
+                                    }
+                                    if let Control::Picture(pic) = ctrl {
+                                        let pic_h =
+                                            hwpunit_to_px(pic.common.height as i32, self.dpi);
+                                        let img_y = (y + baseline - pic_h).max(y);
+                                        let bin_data_id = pic.image_attr.bin_data_id;
+                                        let image_data =
+                                            find_bin_data(bdc, bin_data_id).map(|c| c.data.clone());
+                                        let crop = {
+                                            let c = &pic.crop;
+                                            if c.right > c.left
+                                                && c.bottom > c.top
+                                                && (c.left != 0
+                                                    || c.top != 0
+                                                    || c.right != 0
+                                                    || c.bottom != 0)
+                                            {
+                                                Some((c.left, c.top, c.right, c.bottom))
+                                            } else {
+                                                None
+                                            }
+                                        };
+                                        let original_size_hu = if pic.shape_attr.original_width > 0
+                                            && pic.shape_attr.original_height > 0
                                         {
-                                            Some((c.left, c.top, c.right, c.bottom))
+                                            Some((
+                                                pic.shape_attr.original_width,
+                                                pic.shape_attr.original_height,
+                                            ))
                                         } else {
                                             None
-                                        }
-                                    };
-                                    let original_size_hu = if pic.shape_attr.original_width > 0
-                                        && pic.shape_attr.original_height > 0
-                                    {
-                                        Some((
-                                            pic.shape_attr.original_width,
-                                            pic.shape_attr.original_height,
-                                        ))
-                                    } else {
-                                        None
-                                    };
-                                    let img_id = tree.next_id();
-                                    let img_node = RenderNode::new(
-                                        img_id,
-                                        RenderNodeType::Image(ImageNode {
-                                            section_index: Some(section_index),
-                                            para_index: Some(para_index),
-                                            control_index: Some(tac_ci),
-                                            crop,
-                                            original_size_hu,
-                                            effect: pic.image_attr.effect,
-                                            brightness: pic.image_attr.brightness,
-                                            contrast: pic.image_attr.contrast,
-                                            text_wrap: Some(pic.common.text_wrap),
-                                            transform: extract_shape_transform(&pic.shape_attr),
-                                            ..ImageNode::new(bin_data_id, image_data)
-                                        }),
-                                        BoundingBox::new(img_x, img_y, tac_w, pic_h),
-                                    );
-                                    line_node.children.push(img_node);
-                                    // [Task #418/#376] layout_shape_item 의 Task #347 분기 (빈 문단 +
-                                    // TAC Picture 직접 emit) 와 이중 렌더링되지 않도록 인라인 위치를
-                                    // 등록한다. layout_shape_item 은 등록된 경우 push 를 스킵한다.
-                                    tree.set_inline_shape_position(
-                                        section_index,
-                                        para_index,
-                                        tac_ci,
-                                        cell_ctx.as_ref(),
-                                        img_x,
-                                        img_y,
-                                    );
-                                    img_x += tac_w;
+                                        };
+                                        let img_id = tree.next_id();
+                                        let img_node = RenderNode::new(
+                                            img_id,
+                                            RenderNodeType::Image(ImageNode {
+                                                section_index: Some(section_index),
+                                                para_index: Some(para_index),
+                                                control_index: Some(tac_ci),
+                                                crop,
+                                                original_size_hu,
+                                                effect: pic.image_attr.effect,
+                                                brightness: pic.image_attr.brightness,
+                                                contrast: pic.image_attr.contrast,
+                                                text_wrap: Some(pic.common.text_wrap),
+                                                transform: extract_shape_transform(&pic.shape_attr),
+                                                ..ImageNode::new(bin_data_id, image_data)
+                                            }),
+                                            BoundingBox::new(img_x, img_y, tac_w, pic_h),
+                                        );
+                                        line_node.children.push(img_node);
+                                        // [Task #418/#376] layout_shape_item 의 Task #347 분기 (빈 문단 +
+                                        // TAC Picture 직접 emit) 와 이중 렌더링되지 않도록 인라인 위치를
+                                        // 등록한다. layout_shape_item 은 등록된 경우 push 를 스킵한다.
+                                        tree.set_inline_shape_position(
+                                            section_index,
+                                            para_index,
+                                            tac_ci,
+                                            cell_ctx.as_ref(),
+                                            img_x,
+                                            img_y,
+                                        );
+                                        img_x += tac_w;
+                                    }
                                 }
                             }
-                        }
                         } // [Mindlogic] /if !row_pics.is_empty()
                     }
                 }
@@ -4483,14 +4483,22 @@ mod pua_mapping_tests {
 
     #[test]
     fn saved_cell_line_width_only_applies_to_trusted_narrow_cell_lines() {
-        assert!(should_use_saved_cell_line_width(true, true, 6_821, 0, 7_210));
+        assert!(should_use_saved_cell_line_width(
+            true, true, 6_821, 0, 7_210
+        ));
         assert!(should_use_saved_cell_line_width(
             true, true, 3_397, 39_123, 42_520
         ));
 
-        assert!(!should_use_saved_cell_line_width(false, true, 6_821, 0, 7_210));
-        assert!(!should_use_saved_cell_line_width(true, false, 6_821, 0, 7_210));
-        assert!(!should_use_saved_cell_line_width(true, true, 7_100, 0, 7_210));
+        assert!(!should_use_saved_cell_line_width(
+            false, true, 6_821, 0, 7_210
+        ));
+        assert!(!should_use_saved_cell_line_width(
+            true, false, 6_821, 0, 7_210
+        ));
+        assert!(!should_use_saved_cell_line_width(
+            true, true, 7_100, 0, 7_210
+        ));
         assert!(!should_use_saved_cell_line_width(true, true, 0, 0, 7_210));
     }
 

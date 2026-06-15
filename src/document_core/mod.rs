@@ -142,6 +142,17 @@ impl DocumentCore {
         }
     }
 
+    pub(crate) fn invalidate_paragraph_source(&mut self, section_idx: usize, para_idx: usize) {
+        if let Some(para) = self
+            .document
+            .sections
+            .get_mut(section_idx)
+            .and_then(|section| section.paragraphs.get_mut(para_idx))
+        {
+            para.hwpx_para_xml = None;
+        }
+    }
+
     /// 총 페이지 수를 반환한다.
     pub fn page_count(&self) -> u32 {
         self.pagination

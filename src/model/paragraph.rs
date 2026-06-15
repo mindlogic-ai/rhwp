@@ -377,7 +377,7 @@ impl Paragraph {
         }
 
         // 6. char_count 갱신
-        self.char_count += new_chars.len() as u32;
+        self.char_count += utf16_delta;
     }
 
     /// char_offset 위치에서 count개의 문자를 삭제한다.
@@ -781,7 +781,11 @@ impl Paragraph {
                 .map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 })
                 .unwrap_or(1)
         } else {
-            0
+            self.text
+                .chars()
+                .take(char_offset)
+                .map(Self::char_utf16_len)
+                .sum()
         };
 
         // utf16_pos 이하인 가장 큰 start_pos를 가진 CharShapeRef 찾기
@@ -941,21 +945,38 @@ impl Paragraph {
         end_char_offset: usize,
         new_char_shape_id: u32,
     ) {
-        if start_char_offset >= end_char_offset || self.char_offsets.is_empty() {
+        if start_char_offset >= end_char_offset {
             return;
         }
 
+        let fallback_offsets: Vec<u32>;
+        let char_offsets = if self.char_offsets.is_empty() {
+            let mut pos = 0u32;
+            fallback_offsets = self
+                .text
+                .chars()
+                .map(|c| {
+                    let current = pos;
+                    pos += Self::char_utf16_len(c);
+                    current
+                })
+                .collect();
+            &fallback_offsets
+        } else {
+            &self.char_offsets
+        };
+
         // char offset → UTF-16 위치 변환
-        let utf16_start = if start_char_offset < self.char_offsets.len() {
-            self.char_offsets[start_char_offset]
+        let utf16_start = if start_char_offset < char_offsets.len() {
+            char_offsets[start_char_offset]
         } else {
             return;
         };
-        let utf16_end = if end_char_offset < self.char_offsets.len() {
-            self.char_offsets[end_char_offset]
-        } else if !self.char_offsets.is_empty() {
-            let last = *self.char_offsets.last().unwrap();
-            let last_char = self.text.chars().nth(self.char_offsets.len() - 1);
+        let utf16_end = if end_char_offset < char_offsets.len() {
+            char_offsets[end_char_offset]
+        } else if !char_offsets.is_empty() {
+            let last = *char_offsets.last().unwrap();
+            let last_char = self.text.chars().nth(char_offsets.len() - 1);
             last + last_char
                 .map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 })
                 .unwrap_or(1)
@@ -965,6 +986,13 @@ impl Paragraph {
 
         if utf16_start >= utf16_end {
             return;
+        }
+
+        if self.char_shapes.is_empty() {
+            self.char_shapes.push(CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            });
         }
 
         // 문단 내 텍스트가 차지하는 UTF-16 영역의 끝 위치 (복원 범위 제한용)

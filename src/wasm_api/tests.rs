@@ -276,11 +276,17 @@ fn create_doc_with_table() -> HwpDocument {
     use crate::model::control::Control;
     use crate::model::document::SectionDef;
     use crate::model::page::PageDef;
+    use crate::model::style::{BorderFill, CharShape, ParaShape, Style, TabDef};
     use crate::model::table::{Cell, Table};
     use crate::model::Padding;
 
     let mut doc = HwpDocument::create_empty();
     let mut document = Document::default();
+    document.doc_info.border_fills.push(BorderFill::default());
+    document.doc_info.char_shapes.push(CharShape::default());
+    document.doc_info.para_shapes.push(ParaShape::default());
+    document.doc_info.styles.push(Style::default());
+    document.doc_info.tab_defs.push(TabDef::default());
 
     let page_def = PageDef {
         width: 59528,
@@ -427,6 +433,126 @@ fn test_insert_text_in_cell() {
     } else {
         panic!("표 컨트롤을 찾을 수 없음");
     }
+}
+
+#[test]
+fn test_insert_text_in_cell_invalidates_parent_hwpx_paragraph_xml() {
+    let mut doc = create_doc_with_table();
+    doc.document.sections[0].raw_stream = Some(vec![1, 2, 3]);
+    doc.document.sections[0].hwpx_section_xml = Some(b"<hs:sec/>".to_vec());
+    doc.document.sections[0].paragraphs[0].hwpx_para_xml =
+        Some(b"<hp:p><hp:t>stale table paragraph</hp:t></hp:p>".to_vec());
+
+    doc.insert_text_in_cell_native(0, 0, 0, 0, 0, 1, "추가")
+        .unwrap();
+
+    assert!(doc.document.sections[0].raw_stream.is_none());
+    assert!(doc.document.sections[0].hwpx_section_xml.is_none());
+    assert!(doc.document.sections[0].paragraphs[0]
+        .hwpx_para_xml
+        .is_none());
+
+    let hwpx = doc.export_hwpx_native().unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(hwpx)).unwrap();
+    let mut section_xml = String::new();
+    use std::io::Read;
+    archive
+        .by_name("Contents/section0.xml")
+        .unwrap()
+        .read_to_string(&mut section_xml)
+        .unwrap();
+    assert!(section_xml.contains("셀추가A"));
+    assert!(section_xml.contains("<hp:tbl"));
+}
+
+#[test]
+fn test_header_footer_edit_invalidates_host_hwpx_paragraph_xml() {
+    let mut doc = create_doc_with_table();
+    doc.document.sections[0].raw_stream = Some(vec![1, 2, 3]);
+    doc.document.sections[0].hwpx_section_xml = Some(b"<hs:sec/>".to_vec());
+    doc.document.sections[0].paragraphs[0].hwpx_para_xml =
+        Some(b"<hp:p><hp:t>stale header host</hp:t></hp:p>".to_vec());
+
+    doc.create_header_footer_native(0, true, 0).unwrap();
+    doc.insert_text_in_header_footer_native(0, true, 0, 0, 0, "E2E header")
+        .unwrap();
+
+    assert!(doc.document.sections[0].raw_stream.is_none());
+    assert!(doc.document.sections[0].hwpx_section_xml.is_none());
+    assert!(doc.document.sections[0].paragraphs[0]
+        .hwpx_para_xml
+        .is_none());
+
+    let hwpx = doc.export_hwpx_native().unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(hwpx)).unwrap();
+    let mut section_xml = String::new();
+    use std::io::Read;
+    archive
+        .by_name("Contents/section0.xml")
+        .unwrap()
+        .read_to_string(&mut section_xml)
+        .unwrap();
+    assert!(section_xml.contains("E2E header"));
+    assert!(section_xml.contains("<hp:header"));
+}
+
+#[test]
+fn test_apply_char_format_invalidates_hwpx_paragraph_xml() {
+    let mut doc = HwpDocument::create_empty();
+    doc.create_blank_document_native().unwrap();
+    doc.insert_paragraph_native(0, 0).unwrap();
+    doc.insert_text_native(0, 1, 0, "styled export").unwrap();
+
+    doc.document.sections[0].raw_stream = Some(vec![1, 2, 3]);
+    doc.document.sections[0].hwpx_section_xml = Some(b"<hs:sec/>".to_vec());
+    doc.document.sections[0].paragraphs[1].hwpx_para_xml = Some(
+        br#"<hp:p id="stale"><hp:run charPrIDRef="0"><hp:t>stale unstyled paragraph</hp:t></hp:run></hp:p>"#.to_vec(),
+    );
+
+    doc.apply_char_format_native(
+        0,
+        1,
+        0,
+        "styled export".chars().count(),
+        r##"{"textColor":"#C00000","shadeColor":"#DDEBFF"}"##,
+    )
+    .unwrap();
+
+    assert!(doc.document.sections[0].raw_stream.is_none());
+    assert!(doc.document.sections[0].hwpx_section_xml.is_none());
+    assert!(doc.document.sections[0].paragraphs[1]
+        .hwpx_para_xml
+        .is_none());
+    let styled_char_shape_id = doc.document.sections[0].paragraphs[1]
+        .char_shape_id_at(0)
+        .unwrap_or(0);
+    assert_ne!(styled_char_shape_id, 0);
+
+    let hwpx = doc.export_hwpx_native().unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(hwpx)).unwrap();
+    let mut section_xml = String::new();
+    let mut header_xml = String::new();
+    use std::io::Read;
+    archive
+        .by_name("Contents/section0.xml")
+        .unwrap()
+        .read_to_string(&mut section_xml)
+        .unwrap();
+    archive
+        .by_name("Contents/header.xml")
+        .unwrap()
+        .read_to_string(&mut header_xml)
+        .unwrap();
+
+    assert!(section_xml.contains("styled export"));
+    assert!(!section_xml.contains("stale unstyled paragraph"));
+    assert!(!section_xml.contains(r#"<hp:run charPrIDRef="0"><hp:t>styled export"#));
+    assert!(section_xml.contains(&format!(
+        r#"<hp:run charPrIDRef="{}"><hp:t>styled export"#,
+        styled_char_shape_id
+    )));
+    assert!(header_xml.contains(r##"textColor="#C00000""##));
+    assert!(header_xml.contains(r##"shadeColor="#DDEBFF""##));
 }
 
 #[test]

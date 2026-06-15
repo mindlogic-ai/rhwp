@@ -93,9 +93,11 @@ const FONT_LIST: FontEntry[] = [
   { name: 'Hancom Gothic', file: 'fonts/Hancom Gothic Regular.ttf', format: 'truetype' },
   { name: '한컴 고딕 Bold', file: 'fonts/Hancom Gothic Bold.ttf', format: 'truetype' },
   { name: 'HY수평선M', file: 'fonts/HYSUPM.TTF', format: 'truetype' },
-  { name: 'HY수평선B', file: 'fonts/HYSUPB.TTF', format: 'truetype' },
-  { name: 'HY울릉도M', file: 'fonts/HYWULM.TTF', format: 'truetype' },
-  { name: 'HY울릉도B', file: 'fonts/HYWULB.TTF', format: 'truetype' },
+  // HYSUPB.TTF has an invalid cmap glyph reference that Chromium rejects; use a bundled Korean bold fallback.
+  { name: 'HY수평선B', file: 'fonts/NotoSansKR-Bold.woff2' },
+  // HYWUL*.TTF has an invalid cmap glyph reference that Chromium rejects; use a bundled Korean fallback.
+  { name: 'HY울릉도M', file: 'fonts/NotoSansKR-Regular.woff2' },
+  { name: 'HY울릉도B', file: 'fonts/NotoSansKR-Bold.woff2' },
   { name: 'HY태백B', file: 'fonts/HYTBRB.TTF', format: 'truetype' },
   { name: 'HY동녘M', file: 'fonts/HYDNKM.TTF', format: 'truetype' },
   { name: 'HY동녘B', file: 'fonts/HYDNKB.TTF', format: 'truetype' },

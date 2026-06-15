@@ -101,6 +101,8 @@ pub struct AdapterReport {
     pub para_shape_head_bits_materialized: u32,
     /// HWPX/HWP3-origin renderer-only bottom tolerance 를 HWP5 PAGE_DEF margin 으로 materialize한 횟수
     pub page_bottom_tolerance_materialized: u32,
+    /// HWPX minimal section without secPr gets a valid HWP5 PAGE_DEF before HWP serialization
+    pub page_def_defaults_materialized: u32,
 }
 
 impl AdapterReport {
@@ -148,7 +150,8 @@ impl AdapterReport {
                 + self.master_page_autonum_placeholder_removed
                 + self.master_page_line_rendering_size_ratio_materialized
                 + self.para_shape_head_bits_materialized
-                + self.page_bottom_tolerance_materialized)
+                + self.page_bottom_tolerance_materialized
+                + self.page_def_defaults_materialized)
                 > 0
     }
 }
@@ -733,6 +736,7 @@ fn materialize_para_header_tail(para: &mut Paragraph, report: &mut AdapterReport
 }
 
 fn adapt_section_def(section_def: &mut SectionDef, report: &mut AdapterReport) {
+    materialize_page_def_defaults(section_def, report);
     materialize_page_bottom_tolerance(section_def, report);
     materialize_single_master_page_flags(section_def, report);
     materialize_multi_master_page_flags(section_def, report);
@@ -745,6 +749,26 @@ fn adapt_section_def(section_def: &mut SectionDef, report: &mut AdapterReport) {
             ParagraphContext::MasterPage,
         );
     }
+}
+
+fn materialize_page_def_defaults(section_def: &mut SectionDef, report: &mut AdapterReport) {
+    if section_def.page_def.width > 0 && section_def.page_def.height > 0 {
+        return;
+    }
+
+    section_def.page_def.width = 59528;
+    section_def.page_def.height = 84188;
+    section_def.page_def.margin_left = 8504;
+    section_def.page_def.margin_right = 8504;
+    section_def.page_def.margin_top = 5669;
+    section_def.page_def.margin_bottom = 4252;
+    section_def.page_def.margin_header = 4252;
+    section_def.page_def.margin_footer = 4252;
+    section_def.page_def.margin_gutter = 0;
+    section_def.page_def.attr = 0;
+    section_def.page_def.landscape = false;
+    section_def.page_def.pagination_bottom_tolerance = 0;
+    report.page_def_defaults_materialized += 1;
 }
 
 fn materialize_page_bottom_tolerance(section_def: &mut SectionDef, report: &mut AdapterReport) {
@@ -1734,6 +1758,8 @@ mod tests {
     fn section_bottom_tolerance_materializes_into_hwp_page_margin() {
         let mut section_def = SectionDef {
             page_def: crate::model::page::PageDef {
+                width: 59528,
+                height: 84188,
                 margin_bottom: 4252,
                 pagination_bottom_tolerance: 1600,
                 ..Default::default()
@@ -1752,6 +1778,26 @@ mod tests {
         adapt_section_def(&mut section_def, &mut second);
         assert_eq!(section_def.page_def.margin_bottom, 2652);
         assert_eq!(second.page_bottom_tolerance_materialized, 0);
+    }
+
+    #[test]
+    fn missing_section_page_def_materializes_a4_defaults_for_hwp_export() {
+        let mut section_def = SectionDef::default();
+
+        let mut report = AdapterReport::new();
+        adapt_section_def(&mut section_def, &mut report);
+
+        assert_eq!(section_def.page_def.width, 59528);
+        assert_eq!(section_def.page_def.height, 84188);
+        assert_eq!(section_def.page_def.margin_left, 8504);
+        assert_eq!(section_def.page_def.margin_right, 8504);
+        assert_eq!(section_def.page_def.margin_top, 5669);
+        assert_eq!(section_def.page_def.margin_bottom, 4252);
+        assert_eq!(report.page_def_defaults_materialized, 1);
+
+        let mut second = AdapterReport::new();
+        adapt_section_def(&mut section_def, &mut second);
+        assert_eq!(second.page_def_defaults_materialized, 0);
     }
 
     #[test]
