@@ -4000,13 +4000,21 @@ impl LayoutEngine {
                     let ncs = hwpunit_to_px(nt.cell_spacing as i32, self.dpi);
                     let om_top = hwpunit_to_px(nt.outer_margin_top as i32, self.dpi);
                     let om_bot = hwpunit_to_px(nt.outer_margin_bottom as i32, self.dpi);
+                    let para_top = p
+                        .line_segs
+                        .first()
+                        .map(|s| hwpunit_to_px(s.vertical_pos, self.dpi))
+                        .unwrap_or(0.0)
+                        .max(0.0);
+                    let current_content_h: f64 = units.iter().map(|u| u.height).sum();
+                    let para_gap = (para_top - current_content_h).max(0.0);
                     for (ri, rh) in rhs.iter().enumerate() {
                         let mut uh = *rh;
                         if ri + 1 < nrow {
                             uh += ncs;
                         }
                         if ri == 0 {
-                            uh += om_top + spacing_before;
+                            uh += para_gap + om_top + spacing_before;
                         }
                         if ri + 1 == nrow {
                             uh += om_bot + spacing_after;
@@ -4031,7 +4039,15 @@ impl LayoutEngine {
                     .iter()
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
-                            self.calc_nested_table_height_for_flow(t, styles)
+                            let para_top = p
+                                .line_segs
+                                .first()
+                                .map(|s| hwpunit_to_px(s.vertical_pos, self.dpi))
+                                .unwrap_or(0.0)
+                                .max(0.0);
+                            let current_content_h: f64 = units.iter().map(|u| u.height).sum();
+                            let para_gap = (para_top - current_content_h).max(0.0);
+                            para_gap + self.calc_nested_table_height_for_flow(t, styles)
                         } else {
                             0.0
                         }
@@ -5068,6 +5084,68 @@ mod row_cut_tests {
         assert!(
             h >= natural,
             "row should use at least picture extent plus cell vertical padding: got {h:.1}, expected >= {natural:.1}"
+        );
+    }
+
+    #[test]
+    fn row_cut_height_includes_saved_nested_table_vpos() {
+        let engine = LayoutEngine::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let nested = table(vec![
+            Cell {
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 10_000,
+                height: 10_000,
+                paragraphs: vec![text_para(1, 0)],
+                ..Default::default()
+            },
+            Cell {
+                row: 1,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 10_000,
+                height: 10_000,
+                paragraphs: vec![text_para(1, 0)],
+                ..Default::default()
+            },
+        ]);
+        let nested_para = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 60_000,
+                line_height: 1_200,
+                line_spacing: 0,
+                ..Default::default()
+            }],
+            controls: vec![Control::Table(Box::new(nested))],
+            ..Default::default()
+        };
+        let mut outer = table(vec![
+            cell(0, 0, vec![text_para(1, 0)]),
+            Cell {
+                row: 1,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 12_000,
+                height: 1_000,
+                paragraphs: vec![nested_para],
+                ..Default::default()
+            },
+        ]);
+        outer.common.treat_as_char = false;
+        outer.common.text_wrap = TextWrap::TopAndBottom;
+        outer.page_break = TablePageBreak::RowBreak;
+
+        let h = engine.row_cut_content_height(&outer, 1, &[], &[], &styles);
+        let expected_floor =
+            crate::renderer::hwpunit_to_px(60_000 + 20_000, crate::renderer::DEFAULT_DPI);
+        assert!(
+            h >= expected_floor,
+            "row cut height must include host paragraph vpos before nested table: got {h:.1}, expected >= {expected_floor:.1}"
         );
     }
 

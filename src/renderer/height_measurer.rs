@@ -1499,17 +1499,28 @@ impl HeightMeasurer {
                 let nested_h: f64 = cell
                     .paragraphs
                     .iter()
-                    .flat_map(|p| p.controls.iter())
-                    .filter_map(|c| {
-                        if let Control::Table(t) = c {
-                            Some(t.as_ref())
-                        } else {
-                            None
-                        }
-                    })
-                    .map(|t| {
-                        self.measure_table_impl(t, 0, 0, styles, depth + 1)
-                            .total_height
+                    .map(|p| {
+                        let para_top = p
+                            .line_segs
+                            .first()
+                            .map(|s| hwpunit_to_px(s.vertical_pos, self.dpi))
+                            .unwrap_or(0.0);
+                        p.controls
+                            .iter()
+                            .filter_map(|c| {
+                                if let Control::Table(t) = c {
+                                    Some(t.as_ref())
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(|t| {
+                                para_top
+                                    + self
+                                        .measure_table_impl(t, 0, 0, styles, depth + 1)
+                                        .total_height
+                            })
+                            .fold(0.0_f64, f64::max)
                     })
                     .sum();
                 mc.total_content_height = nested_h.max(mc.total_content_height);
@@ -2393,6 +2404,124 @@ mod tests {
         assert!(
             measured.total_height > hwpunit_to_px(table.common.height as i32, DEFAULT_DPI) * 1.5,
             "stale picture cells must not be shrunk back to declared table height"
+        );
+    }
+
+    #[test]
+    fn nested_table_after_saved_cell_vpos_extends_outer_row_height() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::TablePageBreak;
+
+        let measurer = HeightMeasurer::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let nested = Table {
+            row_count: 2,
+            col_count: 1,
+            page_break: TablePageBreak::RowBreak,
+            cells: vec![
+                Cell {
+                    row: 0,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    height: 10_000,
+                    width: 20_000,
+                    paragraphs: vec![Paragraph {
+                        line_segs: vec![LineSeg {
+                            line_height: 1_000,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Cell {
+                    row: 1,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    height: 10_000,
+                    width: 20_000,
+                    paragraphs: vec![Paragraph {
+                        line_segs: vec![LineSeg {
+                            line_height: 1_000,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let outer = Table {
+            row_count: 2,
+            col_count: 1,
+            page_break: TablePageBreak::RowBreak,
+            cells: vec![
+                Cell {
+                    row: 0,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    height: 2_000,
+                    width: 30_000,
+                    paragraphs: vec![Paragraph {
+                        line_segs: vec![LineSeg {
+                            line_height: 1_000,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Cell {
+                    row: 1,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    height: 2_000,
+                    width: 30_000,
+                    paragraphs: vec![Paragraph {
+                        line_segs: vec![LineSeg {
+                            vertical_pos: 60_000,
+                            line_height: 1_200,
+                            line_spacing: 360,
+                            ..Default::default()
+                        }],
+                        controls: vec![Control::Table(Box::new(nested))],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            common: crate::model::shape::CommonObjAttr {
+                treat_as_char: false,
+                text_wrap: TextWrap::TopAndBottom,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let measured = measurer.measure_table(&outer, 0, 0, &styles);
+        let expected_min = hwpunit_to_px(80_000, DEFAULT_DPI);
+        assert!(
+            measured.row_heights[1] >= expected_min,
+            "outer row must include nested table after saved vpos, got {:.1}px < {:.1}px",
+            measured.row_heights[1],
+            expected_min
+        );
+        let nested_cell = measured
+            .cells
+            .iter()
+            .find(|cell| cell.row == 1 && cell.has_nested_table)
+            .expect("nested table cell should be measured");
+        assert!(
+            nested_cell.total_content_height >= expected_min,
+            "cell split metadata must also include saved nested vpos, got {:.1}px < {:.1}px",
+            nested_cell.total_content_height,
+            expected_min
         );
     }
 

@@ -140,7 +140,7 @@ fn should_ignore_cached_cell_vpos_breaks(
     use crate::model::shape::TextWrap;
     use crate::model::table::HwpxTablePageBreak;
 
-    !table.common.treat_as_char
+    let legacy_repeated_header_case = !table.common.treat_as_char
         && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
         && matches!(table.hwpx_page_break, Some(HwpxTablePageBreak::Cell))
         && table.repeat_header
@@ -148,7 +148,19 @@ fn should_ignore_cached_cell_vpos_breaks(
         && !mt.has_header_cells
         && row_count >= 4
         && table.col_count >= 2
-        && mt.row_heights.iter().copied().fold(0.0, f64::max) > 1000.0
+        && mt.row_heights.iter().copied().fold(0.0, f64::max) > 1000.0;
+    let giant_single_cell_break_case = !table.common.treat_as_char
+        && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+        && matches!(table.hwpx_page_break, Some(HwpxTablePageBreak::Cell))
+        && row_count == 1
+        && table.col_count <= 3
+        && table
+            .cells
+            .iter()
+            .any(|cell| cell.row == 0 && cell.row_span == 1 && cell.paragraphs.len() >= 20)
+        && mt.row_heights.first().copied().unwrap_or(0.0) > 3000.0;
+
+    legacy_repeated_header_case || giant_single_cell_break_case
 }
 
 fn should_defer_title_table_with_following_large_cell_table(
@@ -403,6 +415,35 @@ fn empty_host_square_picture_reserve_px(
     let margin_bottom = hwpunit_to_px(common.margin.bottom as i32, dpi).max(0.0);
     let reserve = vertical_offset + height + margin_bottom;
     (reserve > 0.0).then_some(reserve)
+}
+
+fn float_pushdown_group_top_px(vertical_offset_hu: i32, dpi: f64) -> f64 {
+    hwpunit_to_px(vertical_offset_hu, dpi).max(0.0)
+}
+
+fn should_defer_tiny_rowbreak_header_fragment(
+    mt: &MeasuredTable,
+    cut_row_h: &[f64],
+    cs: f64,
+    row_count: usize,
+    remaining_on_page: f64,
+    first_frag_overhead: f64,
+    base_available: f64,
+) -> bool {
+    if !mt.has_header_cells || row_count <= 1 {
+        return false;
+    }
+
+    let first_h = cut_row_h.first().copied().unwrap_or(0.0);
+    let second_h = cut_row_h.get(1).copied().unwrap_or(0.0);
+    let first_two_h = first_h + cs + second_h;
+    let whole_h = cut_row_h.iter().sum::<f64>()
+        + cs * row_count.saturating_sub(1) as f64
+        + first_frag_overhead;
+    let fresh_available = (base_available - first_frag_overhead).max(0.0);
+    let only_header_fits = remaining_on_page >= first_h && remaining_on_page + 4.0 < first_two_h;
+    let tiny_first_row = first_h <= 32.0;
+    tiny_first_row && only_header_fits && whole_h <= fresh_available + 4.0
 }
 
 fn para_has_visible_flow_content(para: &Paragraph) -> bool {
@@ -683,6 +724,86 @@ fn should_defer_late_single_line_before_following_body_group(
     remaining_after_current < next_line_fit_height + 1.0
 }
 
+fn should_defer_heading_after_bottom_block_table(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+    visible_text: bool,
+    forced_page_break_line: Option<usize>,
+) -> bool {
+    if forced_page_break_line.is_some()
+        || st.col_count != 1
+        || !visible_text
+        || !para.controls.is_empty()
+        || fmt.line_heights.len() != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.90
+        || st.current_height + fmt.total_height > available + 0.5
+    {
+        return false;
+    }
+
+    let follows_bottom_block_table = st
+        .current_items
+        .last()
+        .and_then(|item| match item {
+            PageItem::Table {
+                para_index,
+                control_index,
+            } => Some((*para_index, *control_index)),
+            _ => None,
+        })
+        .and_then(|(prev_para_idx, prev_ctrl_idx)| {
+            paragraphs
+                .get(prev_para_idx)
+                .and_then(|p| p.controls.get(prev_ctrl_idx))
+        })
+        .is_some_and(|ctrl| {
+            if let Control::Table(table) = ctrl {
+                !table.common.treat_as_char
+                    && matches!(
+                        table.common.text_wrap,
+                        crate::model::shape::TextWrap::TopAndBottom
+                    )
+            } else {
+                false
+            }
+        });
+    if !follows_bottom_block_table {
+        return false;
+    }
+
+    let Some(next) = paragraphs.get(para_idx + 1) else {
+        return false;
+    };
+    if !para_has_visible_text(next)
+        || !next.controls.is_empty()
+        || !matches!(
+            next.column_type,
+            ColumnBreakType::None | ColumnBreakType::MultiColumn
+        )
+    {
+        return false;
+    }
+
+    let needed_body_lines = next.line_segs.len().clamp(1, 2);
+    let next_group_height: f64 = next
+        .line_segs
+        .iter()
+        .take(needed_body_lines)
+        .map(|seg| hwpunit_to_px(seg.line_height + seg.line_spacing, DEFAULT_DPI))
+        .sum();
+    if next_group_height <= 0.0 {
+        return false;
+    }
+
+    let remaining_after_heading = available - (st.current_height + fmt.total_height);
+    remaining_after_heading < next_group_height + 1.0
+}
+
 fn should_defer_late_heading_before_list_and_wide_cell_tac(
     st: &TypesetState,
     para: &Paragraph,
@@ -858,6 +979,128 @@ fn should_defer_late_visible_group_before_explicit_blank_break(
     st.current_height + group_height > available + 0.5 || remaining_after_group <= available * 0.03
 }
 
+fn saved_vpos_multiline_tail_fits_before_top_reset(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+    visible_text: bool,
+) -> Option<f64> {
+    if st.col_count != 1
+        || !visible_text
+        || !para.controls.is_empty()
+        || para.line_segs.len() < 2
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.70
+        || st.current_height + fmt.total_height <= available
+        || st.current_height + fmt.total_height > available + 16.0
+    {
+        return None;
+    }
+
+    let saved_top = para
+        .line_segs
+        .first()
+        .map(|seg| hwpunit_to_px(seg.vertical_pos, DEFAULT_DPI))?;
+    let saved_bottom = para.line_segs.last().map(|seg| {
+        hwpunit_to_px(
+            seg.vertical_pos
+                .saturating_add(seg.line_height)
+                .saturating_add(seg.line_spacing),
+            DEFAULT_DPI,
+        )
+    })?;
+    if saved_top < available * 0.65
+        || saved_top > st.current_height + 1.0
+        || saved_bottom > available + 0.5
+    {
+        return None;
+    }
+
+    for next_idx in para_idx + 1..=(para_idx + 3).min(paragraphs.len().saturating_sub(1)) {
+        let Some(next) = paragraphs.get(next_idx) else {
+            break;
+        };
+        if !para_has_visible_text(next) && next.controls.is_empty() {
+            continue;
+        }
+        if para_has_visible_text(next)
+            && next.controls.is_empty()
+            && next
+                .line_segs
+                .first()
+                .is_some_and(|seg| seg.vertical_pos == 0)
+        {
+            return Some(saved_bottom);
+        }
+        break;
+    }
+
+    None
+}
+
+fn saved_vpos_single_line_tail_fits_before_blank_top_reset(
+    st: &TypesetState,
+    para: &Paragraph,
+    fmt: &FormattedParagraph,
+    paragraphs: &[Paragraph],
+    para_idx: usize,
+    available: f64,
+    visible_text: bool,
+) -> Option<f64> {
+    if st.col_count != 1
+        || !visible_text
+        || !para.controls.is_empty()
+        || para.line_segs.len() != 1
+        || st.current_items.is_empty()
+        || st.current_height < available * 0.70
+        || st.current_height + fmt.height_for_fit <= available
+        || st.current_height + fmt.height_for_fit > available + 24.0
+    {
+        return None;
+    }
+
+    let mut saw_top_reset = false;
+    for next_idx in para_idx + 1..=(para_idx + 4).min(paragraphs.len().saturating_sub(1)) {
+        let Some(next) = paragraphs.get(next_idx) else {
+            break;
+        };
+        if !para_has_visible_text(next) && next.controls.is_empty() {
+            continue;
+        }
+        if para_has_visible_text(next)
+            && next.controls.is_empty()
+            && next
+                .line_segs
+                .first()
+                .is_some_and(|seg| seg.vertical_pos >= 0 && seg.vertical_pos <= 2_000)
+        {
+            saw_top_reset = true;
+        }
+        break;
+    }
+    if !saw_top_reset {
+        return None;
+    }
+
+    let seg = para.line_segs.first()?;
+    let saved_top = hwpunit_to_px(seg.vertical_pos, DEFAULT_DPI);
+    let saved_bottom = hwpunit_to_px(
+        seg.vertical_pos
+            .saturating_add(seg.line_height)
+            .saturating_add(seg.line_spacing),
+        DEFAULT_DPI,
+    );
+
+    if saved_top < available * 0.75 || saved_bottom > available + 0.5 {
+        return None;
+    }
+
+    Some(saved_bottom)
+}
+
 fn should_move_late_tail_before_explicit_page_break(
     st: &TypesetState,
     para: &Paragraph,
@@ -869,6 +1112,7 @@ fn should_move_late_tail_before_explicit_page_break(
 ) -> bool {
     const MAX_TAIL_REMAINDER_PX: f64 = 16.0;
     const MAX_TITLE_TABLE_TAIL_REMAINDER_PX: f64 = 60.0;
+    const MAX_SAVED_LINE_TAIL_OVERFLOW_PX: f64 = 8.0;
 
     let Some(next_para) = paragraphs.get(para_idx + 1) else {
         return false;
@@ -878,6 +1122,19 @@ fn should_move_late_tail_before_explicit_page_break(
         ColumnBreakType::Page | ColumnBreakType::Section
     );
     if !next_forces_page {
+        return false;
+    }
+    if saved_vpos_single_line_tail_fits_before_blank_top_reset(
+        st,
+        para,
+        fmt,
+        paragraphs,
+        para_idx,
+        st.layout.body_area.height,
+        visible_text,
+    )
+    .is_some()
+    {
         return false;
     }
     let body_height = st.layout.body_area.height;
@@ -975,7 +1232,7 @@ fn should_move_late_tail_before_explicit_page_break(
             && !st.current_items.is_empty()
             && st.current_height > body_height * 0.90
             && st.current_height + fmt.height_for_fit <= body_height + 12.0
-            && saved_remaining < -0.5;
+            && saved_remaining < -MAX_SAVED_LINE_TAIL_OVERFLOW_PX;
     }
     let next_is_explicit_title_table = next_para.controls.iter().any(|control| {
         if let Control::Table(table) = control {
@@ -1016,6 +1273,14 @@ fn should_move_late_tail_before_explicit_page_break(
 
     let after_tail = st.current_height + fmt.height_for_fit;
     let remaining_after_tail = body_height - after_tail;
+    let tail_remainder_matches_break = if next_is_explicit_title_table {
+        remaining_after_tail >= MAX_TAIL_REMAINDER_PX
+            && remaining_after_tail.min(saved_remaining) <= max_remainder
+    } else {
+        remaining_after_tail <= max_remainder
+            || (saved_remaining <= max_remainder
+                && remaining_after_tail <= max_remainder + MAX_SAVED_LINE_TAIL_OVERFLOW_PX / 2.0)
+    };
     st.col_count == 1
         && visible_text
         && para.controls.is_empty()
@@ -1025,10 +1290,10 @@ fn should_move_late_tail_before_explicit_page_break(
         && !(page_has_tac_topbottom_table(&st.current_items, paragraphs)
             && next_is_explicit_full_page_tac_table)
         && st.current_height > body_height * min_current_ratio
-        && after_tail <= body_height + 0.5
-        && remaining_after_tail >= -0.5
-        && saved_remaining >= -0.5
-        && remaining_after_tail.min(saved_remaining) <= max_remainder
+        && after_tail <= body_height + MAX_SAVED_LINE_TAIL_OVERFLOW_PX
+        && remaining_after_tail >= -MAX_SAVED_LINE_TAIL_OVERFLOW_PX
+        && saved_remaining >= -MAX_SAVED_LINE_TAIL_OVERFLOW_PX
+        && tail_remainder_matches_break
 }
 
 fn should_allow_missing_lineseg_tail_before_explicit_page_break(
@@ -1503,7 +1768,7 @@ fn should_defer_late_heading_spacer_cell_tac_before_break_title(
         || table.col_count < 2
         || table.col_count > 4
         || table_height < available * 0.35
-        || table_height > available * 0.55
+        || table_height > available * 0.43
         || para.controls.len() != 1
     {
         return false;
@@ -1605,6 +1870,7 @@ fn has_following_medium_cell_tac_group(
 
 fn should_insert_blank_page_before_explicit_top_reset(
     st: &TypesetState,
+    styles: &ResolvedStyleSet,
     para: &Paragraph,
     paragraphs: &[Paragraph],
     para_idx: usize,
@@ -1619,6 +1885,14 @@ fn should_insert_blank_page_before_explicit_top_reset(
             ColumnBreakType::Page | ColumnBreakType::Section
         )
         || !has_following_medium_cell_tac_group(para, paragraphs, para_idx, available)
+    {
+        return false;
+    }
+
+    if styles
+        .para_styles
+        .get(para.para_shape_id as usize)
+        .is_some_and(|style| style.indent < 0.0)
     {
         return false;
     }
@@ -1650,6 +1924,9 @@ fn should_defer_small_cell_tac_after_large_table_spacers_before_break(
     table_height: f64,
     available: f64,
 ) -> bool {
+    const MIN_LARGE_TABLE_VISIBLE_REMAINDER_PX: f64 = 32.0;
+    const MIN_CONTACT_VISIBLE_REMAINDER_PX: f64 = 24.0;
+
     if st.col_count != 1
         || st.current_items.len() < 5
         || !table.common.treat_as_char
@@ -1749,7 +2026,11 @@ fn should_defer_small_cell_tac_after_large_table_spacers_before_break(
                 )
             })
     });
-    if has_prior_large_cell_tac_table && trailing_blank_count >= 4 {
+    let remaining_after_table = available - (st.current_height + table_height);
+    if has_prior_large_cell_tac_table
+        && trailing_blank_count >= 4
+        && remaining_after_table >= MIN_LARGE_TABLE_VISIBLE_REMAINDER_PX
+    {
         return true;
     }
 
@@ -1772,6 +2053,7 @@ fn should_defer_small_cell_tac_after_large_table_spacers_before_break(
         && table.col_count == 3
         && st.current_height >= available * 0.82
         && st.current_height + table_height <= available + 0.5
+        && remaining_after_table >= MIN_CONTACT_VISIBLE_REMAINDER_PX
 }
 
 fn should_defer_wide_contact_tac_after_long_blank_tail_before_title_table(
@@ -1784,6 +2066,8 @@ fn should_defer_wide_contact_tac_after_long_blank_tail_before_title_table(
     available: f64,
     dpi: f64,
 ) -> bool {
+    const MIN_VISIBLE_REMAINDER_PX: f64 = 8.0;
+
     if st.col_count != 1
         || st.current_items.len() < 10
         || !table.common.treat_as_char
@@ -1888,10 +2172,138 @@ fn should_defer_wide_contact_tac_after_long_blank_tail_before_title_table(
             }),
         _ => None,
     });
+    let authored_late_table = para
+        .line_segs
+        .first()
+        .is_some_and(|seg| hwpunit_to_px(seg.vertical_pos, dpi) >= available * 0.88);
+    let remaining_after_table = available - (st.current_height + table_height);
 
     last_blank_bottom.is_some_and(|bottom| bottom >= available * 0.88)
         && st.current_height >= available * 0.86
         && st.current_height + table_height <= available + 0.5
+        && (remaining_after_table >= MIN_VISIBLE_REMAINDER_PX || authored_late_table)
+}
+
+fn saved_vpos_fit_after_partial_table(
+    st: &TypesetState,
+    paragraphs: &[Paragraph],
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    table_height: f64,
+    available: f64,
+    dpi: f64,
+) -> Option<f64> {
+    let last_flow_item = st.current_items.iter().rev().find(|item| {
+        !matches!(
+            item,
+            PageItem::FullParagraph { para_index }
+                if paragraphs.get(*para_index).is_some_and(|p| {
+                    !para_has_visible_text(p) && p.controls.is_empty()
+                })
+        )
+    });
+    if st.col_count != 1
+        || !matches!(last_flow_item, Some(PageItem::PartialTable { .. }))
+        || !table.common.treat_as_char
+        || !matches!(
+            table.common.text_wrap,
+            crate::model::shape::TextWrap::TopAndBottom
+        )
+        || table.row_count != 1
+        || table.col_count != 1
+        || table_height < available * 0.40
+        || table_height > available * 0.80
+    {
+        return None;
+    }
+
+    let saved_top = para
+        .line_segs
+        .first()
+        .map(|seg| hwpunit_to_px(seg.vertical_pos, dpi))?;
+    let fit_tol = available * 0.01;
+    if saved_top >= 0.0
+        && saved_top < st.current_height
+        && saved_top + table_height <= available + fit_tol
+        && st.current_height + table_height > available + fit_tol
+    {
+        Some(saved_top)
+    } else {
+        None
+    }
+}
+
+fn tac_table_pre_text_end_line(
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    fmt: &FormattedParagraph,
+    vertical_offset: u32,
+    dpi: f64,
+) -> usize {
+    let total_lines = fmt.line_heights.len();
+    if vertical_offset > 0 && !para.text.is_empty() {
+        total_lines
+    } else if table.common.treat_as_char
+        && total_lines > 1
+        && para.text.chars().any(|c| c.is_alphanumeric())
+    {
+        // 전폭 TAC 표가 자동 줄바꿈으로 자기 줄(line index N)에 놓인 경우(\n 없음):
+        // 한컴은 LINE_SEG 순서대로 line0=텍스트 → lineN=표 로 렌더한다.
+        let om_top = hwpunit_to_px(table.outer_margin_top as i32, dpi);
+        let om_bot = hwpunit_to_px(table.outer_margin_bottom as i32, dpi);
+        let tbl_line_h = hwpunit_to_px(table.common.height as i32, dpi) + om_top + om_bot;
+        para.line_segs
+            .iter()
+            .enumerate()
+            .find(|(_, ls)| (hwpunit_to_px(ls.line_height, dpi) - tbl_line_h).abs() < 1.0)
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+fn pre_reset_tac_host_text_belongs_before_table_page(
+    st: &TypesetState,
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    pre_table_end_line: usize,
+    available: f64,
+    dpi: f64,
+) -> bool {
+    if st.col_count != 1
+        || pre_table_end_line == 0
+        || !table.common.treat_as_char
+        || !matches!(
+            table.common.text_wrap,
+            crate::model::shape::TextWrap::TopAndBottom
+        )
+    {
+        return false;
+    }
+
+    let Some(reset_seg) = para.line_segs.get(pre_table_end_line) else {
+        return false;
+    };
+    if reset_seg.vertical_pos != 0 {
+        return false;
+    }
+
+    let Some(prev_seg) = para.line_segs.get(pre_table_end_line - 1) else {
+        return false;
+    };
+    let prev_top = hwpunit_to_px(prev_seg.vertical_pos, dpi);
+    let prev_bottom = hwpunit_to_px(
+        prev_seg
+            .vertical_pos
+            .saturating_add(prev_seg.line_height)
+            .saturating_add(prev_seg.line_spacing),
+        dpi,
+    );
+
+    prev_seg.vertical_pos > 0
+        && prev_top >= available * 0.35
+        && prev_bottom <= available + available * 0.01
 }
 
 fn visual_control_order_for_positive_offset_table_title(para: &Paragraph) -> Vec<usize> {
@@ -3031,6 +3443,7 @@ impl TypesetEngine {
             let insert_blank_page_before_explicit_top_reset =
                 should_insert_blank_page_before_explicit_top_reset(
                     &st,
+                    styles,
                     para,
                     paragraphs,
                     para_idx,
@@ -3199,43 +3612,62 @@ impl TypesetEngine {
                             || hwpx_near_top_heading_reset
                     };
                     if trigger {
-                        // [Task #724] wrap_around active 시 강제 종료 — anchor cs=0
-                        // (HWP5 변환본 caption-style) 한정. 일반 wrap_around (anchor cs>0)
-                        // 는 기존 동작 (Task #362 vpos-reset 무시) 유지.
-                        if st.wrap_around_cs == 0 {
-                            st.wrap_around_cs = -1;
-                            st.wrap_around_sw = -1;
-                            st.wrap_around_any_seg = false;
-                        }
-                        if st.wrap_around_cs < 0 {
-                            // === [Mindlogic patch — near-empty vpos-reset guard (med_03 48→47)] ===
-                            // A vpos-reset normally encodes Hancom's intended page break. But when
-                            // the current page holds only a small orphaned tail (a few lines that
-                            // overflowed off the prior page by a sub-line amount), forcing the break
-                            // here manufactures a near-empty page Hancom never produces — Hancom fit
-                            // that tail on the prior page, so its new region begins a fresh full
-                            // page. In that single-column near-empty case, let the new region flow
-                            // onto the current page (re-anchoring the vpos cursor) instead.
-                            // Orphan spillover signature, three structural conditions:
-                            //   (a) near_empty   — the current page holds only a small tail;
-                            //   (b) prior_full   — the *prior* page was nearly full, so this tail
-                            //                       overflowed off a full page (a genuine spillover),
-                            //                       not an intentionally short page (cover/section)
-                            //                       that Hancom keeps separate;
-                            //   (c) reset para has visible text — the new region begins with real
-                            //       content. When the reset paragraph is an empty spacer (med_02
-                            //       pi=63), Hancom places it at the top of a fresh page (a real
-                            //       break), so we must NOT merge. (a)+(b) overlap between orphans
-                            //       and med_02's legit breaks; (c) is what tells them apart.
-                            let avail = st.available_height();
-                            let near_empty = st.col_count == 1
-                                && st.current_height > 0.0
-                                && st.current_height < avail * 0.2;
-                            let prior_full = st.prev_flushed_used_height >= avail * 0.85;
-                            if near_empty && prior_full && para_has_visible_text(para) {
-                                st.reset_vpos_cursor();
-                            } else {
-                                st.advance_column_or_new_page();
+                        let page_relative_scan_after_title = st.col_count == 1
+                            && self.is_page_relative_full_page_scan_para(para, &st.layout)
+                            && !st
+                                .current_items
+                                .iter()
+                                .any(|item| self.is_page_relative_scan_item(paragraphs, item))
+                            && st.current_items.iter().any(|item| {
+                                matches!(
+                                    item,
+                                    PageItem::FullParagraph { para_index }
+                                        if paragraphs
+                                            .get(*para_index)
+                                            .is_some_and(para_has_visible_text)
+                                )
+                            });
+                        if page_relative_scan_after_title {
+                            st.reset_vpos_cursor();
+                        } else {
+                            // [Task #724] wrap_around active 시 강제 종료 — anchor cs=0
+                            // (HWP5 변환본 caption-style) 한정. 일반 wrap_around (anchor cs>0)
+                            // 는 기존 동작 (Task #362 vpos-reset 무시) 유지.
+                            if st.wrap_around_cs == 0 {
+                                st.wrap_around_cs = -1;
+                                st.wrap_around_sw = -1;
+                                st.wrap_around_any_seg = false;
+                            }
+                            if st.wrap_around_cs < 0 {
+                                // === [Mindlogic patch — near-empty vpos-reset guard (med_03 48→47)] ===
+                                // A vpos-reset normally encodes Hancom's intended page break. But when
+                                // the current page holds only a small orphaned tail (a few lines that
+                                // overflowed off the prior page by a sub-line amount), forcing the break
+                                // here manufactures a near-empty page Hancom never produces — Hancom fit
+                                // that tail on the prior page, so its new region begins a fresh full
+                                // page. In that single-column near-empty case, let the new region flow
+                                // onto the current page (re-anchoring the vpos cursor) instead.
+                                // Orphan spillover signature, three structural conditions:
+                                //   (a) near_empty   — the current page holds only a small tail;
+                                //   (b) prior_full   — the *prior* page was nearly full, so this tail
+                                //                       overflowed off a full page (a genuine spillover),
+                                //                       not an intentionally short page (cover/section)
+                                //                       that Hancom keeps separate;
+                                //   (c) reset para has visible text — the new region begins with real
+                                //       content. When the reset paragraph is an empty spacer (med_02
+                                //       pi=63), Hancom places it at the top of a fresh page (a real
+                                //       break), so we must NOT merge. (a)+(b) overlap between orphans
+                                //       and med_02's legit breaks; (c) is what tells them apart.
+                                let avail = st.available_height();
+                                let near_empty = st.col_count == 1
+                                    && st.current_height > 0.0
+                                    && st.current_height < avail * 0.2;
+                                let prior_full = st.prev_flushed_used_height >= avail * 0.85;
+                                if near_empty && prior_full && para_has_visible_text(para) {
+                                    st.reset_vpos_cursor();
+                                } else {
+                                    st.advance_column_or_new_page();
+                                }
                             }
                         }
                     }
@@ -4453,7 +4885,12 @@ impl TypesetEngine {
                                     // vertical spans overlap render side-by-side; only the
                                     // tallest pushes flow. Add the incremental max for the
                                     // overlapping group instead of summing every object.
-                                    let top = hwpunit_to_px(voff, self.dpi);
+                                    // Negative Para-relative image offsets are used for
+                                    // side-by-side peers that visually share the host row.
+                                    // For flow reservation, they must not open a separate
+                                    // pre-host vertical band; clamp the grouping top so the
+                                    // peers dedupe as one row.
+                                    let top = float_pushdown_group_top_px(voff, self.dpi);
                                     let bottom = top + obj_h;
                                     if let Some(slot) = pushdown_groups
                                         .iter_mut()
@@ -4670,6 +5107,7 @@ impl TypesetEngine {
         st.ensure_page();
         self.rewrite_embedded_scan_title_runs(&mut st.pages, paragraphs);
         self.rewrite_evidence_title_split_table_orphans(&mut st.pages, paragraphs);
+        Self::drop_trailing_blank_only_pages(&mut st.pages, paragraphs);
 
         // 페이지 번호 + 머리말/꼬리말 할당
         Self::finalize_pages(
@@ -5093,10 +5531,11 @@ impl TypesetEngine {
         const LAYOUT_DRIFT_SAFETY_PX: f64 = 4.0;
         let prev_is_partial_table =
             matches!(st.current_items.last(), Some(PageItem::PartialTable { .. }));
+        let skip_layout_drift_safety = st.skip_safety_margin_once || prev_is_partial_table;
         let safety = if st.skip_safety_margin_once {
             st.skip_safety_margin_once = false;
             0.0
-        } else if prev_is_partial_table {
+        } else if skip_layout_drift_safety {
             0.0
         } else {
             LAYOUT_DRIFT_SAFETY_PX
@@ -5375,6 +5814,18 @@ impl TypesetEngine {
         ) {
             st.advance_column_or_new_page();
         }
+        if should_defer_heading_after_bottom_block_table(
+            st,
+            para,
+            fmt,
+            paragraphs,
+            para_idx,
+            available,
+            visible_text,
+            forced_page_break_line,
+        ) {
+            st.advance_column_or_new_page();
+        }
         if should_defer_late_heading_before_list_and_wide_cell_tac(
             st,
             para,
@@ -5468,6 +5919,48 @@ impl TypesetEngine {
                 st.prev_body_bottom_vpos = Some(v);
             }
             return;
+        }
+
+        if forced_page_break_line.is_none() {
+            if let Some(saved_bottom) = saved_vpos_multiline_tail_fits_before_top_reset(
+                st,
+                para,
+                fmt,
+                paragraphs,
+                para_idx,
+                available,
+                visible_text,
+            ) {
+                st.current_items.push(PageItem::FullParagraph {
+                    para_index: para_idx,
+                });
+                st.current_height = st.current_height.max(saved_bottom);
+                if let Some(v) = body_bottom_vpos {
+                    st.prev_body_bottom_vpos = Some(v);
+                }
+                return;
+            }
+        }
+
+        if forced_page_break_line.is_none() {
+            if let Some(saved_bottom) = saved_vpos_single_line_tail_fits_before_blank_top_reset(
+                st,
+                para,
+                fmt,
+                paragraphs,
+                para_idx,
+                available,
+                visible_text,
+            ) {
+                st.current_items.push(PageItem::FullParagraph {
+                    para_index: para_idx,
+                });
+                st.current_height = st.current_height.max(saved_bottom);
+                if let Some(v) = body_bottom_vpos {
+                    st.prev_body_bottom_vpos = Some(v);
+                }
+                return;
+            }
         }
 
         if forced_page_break_line.is_none()
@@ -5569,7 +6062,12 @@ impl TypesetEngine {
         }
 
         // Task #332 Stage 4a: partial split 시에도 동일 마진 적용
-        let base_available = (st.base_available_height() - LAYOUT_DRIFT_SAFETY_PX).max(0.0);
+        let line_layout_drift_safety = if skip_layout_drift_safety {
+            0.0
+        } else {
+            LAYOUT_DRIFT_SAFETY_PX
+        };
+        let base_available = (st.base_available_height() - line_layout_drift_safety).max(0.0);
 
         // 남은 공간이 없거나 첫 줄도 못 넣으면 먼저 다음 단/페이지로
         let first_line_h = fmt.line_heights[0];
@@ -5646,7 +6144,7 @@ impl TypesetEngine {
                 0.0
             };
             // Task #332 Stage 4b: partial split 의 줄 단위 fit 검사에도 layout drift 마진 적용
-            let avail_for_lines = (page_avail - sp_b - LAYOUT_DRIFT_SAFETY_PX).max(0.0);
+            let avail_for_lines = (page_avail - sp_b - line_layout_drift_safety).max(0.0);
 
             // 현재 페이지에 들어갈 줄 범위 결정
             let mut cumulative = 0.0;
@@ -5819,16 +6317,23 @@ impl TypesetEngine {
                 let prev_is_table = st.current_items.last().map_or(false, |item| {
                     matches!(item, PageItem::Table { .. } | PageItem::PartialTable { .. })
                 });
-                let overflow_threshold = if prev_is_table {
-                    let trailing_ls = fmt
-                        .line_spacings
-                        .get(end_line.saturating_sub(1))
-                        .copied()
-                        .unwrap_or(0.0);
-                    cumulative - trailing_ls
-                } else {
-                    cumulative
-                };
+                let before_explicit_break = paragraphs.get(para_idx + 1).is_some_and(|next| {
+                    matches!(
+                        next.column_type,
+                        ColumnBreakType::Page | ColumnBreakType::Section
+                    )
+                });
+                let overflow_threshold =
+                    if prev_is_table || before_explicit_break || skip_layout_drift_safety {
+                        let trailing_ls = fmt
+                            .line_spacings
+                            .get(end_line.saturating_sub(1))
+                            .copied()
+                            .unwrap_or(0.0);
+                        cumulative - trailing_ls
+                    } else {
+                        cumulative
+                    };
                 if overflow_threshold > avail_for_lines && !st.current_items.is_empty() {
                     st.advance_column_or_new_page();
                     continue;
@@ -6114,10 +6619,71 @@ impl TypesetEngine {
         // that must flush; wc58 7→6 regression). 1.84<4<5.01 → clean split on
         // overflow magnitude. Structural, not content-keyed.
         let flush_tol = 4.0_f64; // == LAYOUT_DRIFT_SAFETY_PX
+        let saved_vpos_allows_tac_after_partial = if has_tac && tac_count == 1 {
+            para.controls.iter().find_map(|control| match control {
+                Control::Table(table) if table.attr & 0x01 != 0 => {
+                    saved_vpos_fit_after_partial_table(
+                        st,
+                        paragraphs,
+                        para,
+                        table,
+                        flush_height,
+                        st.available_height(),
+                        self.dpi,
+                    )
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
+        let saved_vpos_allows_tac_bottom_fit = if has_tac && tac_count == 1 {
+            para.controls
+                .iter()
+                .enumerate()
+                .find_map(|(ctrl_idx, control)| match control {
+                    Control::Table(table)
+                        if table.attr & 0x01 != 0
+                            && table.common.treat_as_char
+                            && matches!(
+                                table.common.text_wrap,
+                                crate::model::shape::TextWrap::TopAndBottom
+                            ) =>
+                    {
+                        let compact_height = hwpunit_to_px(table.common.height as i32, self.dpi)
+                            + hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
+                            + hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
+                        let tac_idx = para
+                            .controls
+                            .iter()
+                            .take(ctrl_idx)
+                            .filter(|c| matches!(c, Control::Table(t) if t.attr & 0x01 != 0))
+                            .count();
+                        para.line_segs
+                            .get(tac_idx)
+                            .map(|seg| hwpunit_to_px(seg.vertical_pos, self.dpi))
+                            .filter(|saved_top| {
+                                compact_height > 0.0
+                                    && compact_height <= st.available_height() * 0.18
+                                    && *saved_top >= st.available_height() * 0.65
+                                    && *saved_top < st.current_height
+                                    && *saved_top + compact_height
+                                        <= st.available_height() + flush_tol
+                                    && st.current_height + flush_height
+                                        > st.available_height() + flush_tol
+                            })
+                    }
+                    _ => None,
+                })
+        } else {
+            None
+        };
         if st.current_height + flush_height > st.available_height() + flush_tol
             && !st.current_items.is_empty()
             && has_tac
             && tac_count <= 1
+            && saved_vpos_allows_tac_after_partial.is_none()
+            && saved_vpos_allows_tac_bottom_fit.is_none()
         {
             st.advance_column_or_new_page();
         }
@@ -6182,7 +6748,6 @@ impl TypesetEngine {
                         composed,
                         is_column_top,
                     );
-
                     let mt = measured_tables
                         .iter()
                         .find(|mt| mt.para_index == para_idx && mt.control_index == ctrl_idx);
@@ -6465,7 +7030,7 @@ impl TypesetEngine {
         paragraphs: &[Paragraph],
     ) {
         // 다중 TAC 표: LINE_SEG 기반 개별 높이 계산
-        let table_height = if tac_count > 1 {
+        let mut table_height = if tac_count > 1 {
             let tac_idx = para
                 .controls
                 .iter()
@@ -6501,7 +7066,34 @@ impl TypesetEngine {
         // overflow (<1% of page) before advancing — same philosophy as the
         // region-tail / last-row orphan guards in table_layout.rs.
         let fit_tol = available * 0.01;
-        if tac_count == 1
+        let pre_table_end_line = tac_table_pre_text_end_line(
+            para,
+            table,
+            fmt,
+            Self::get_table_vertical_offset(table),
+            self.dpi,
+        );
+        if pre_reset_tac_host_text_belongs_before_table_page(
+            st,
+            para,
+            table,
+            pre_table_end_line,
+            available,
+            self.dpi,
+        ) && !st.current_items.is_empty()
+        {
+            let pre_height = fmt.line_advances_sum(0..pre_table_end_line);
+            if st.current_height + pre_height <= available + fit_tol {
+                st.current_items.push(PageItem::PartialParagraph {
+                    para_index: para_idx,
+                    start_line: 0,
+                    end_line: pre_table_end_line,
+                });
+                st.current_height += pre_height;
+                st.advance_column_or_new_page();
+            }
+        }
+        let defer_title_following_large = tac_count == 1
             && should_defer_title_table_with_following_large_cell_table(
                 st,
                 paragraphs,
@@ -6511,11 +7103,8 @@ impl TypesetEngine {
                 table_height,
                 available,
                 self.dpi,
-            )
-        {
-            st.advance_column_or_new_page();
-        }
-        if tac_count == 1
+            );
+        let defer_large_after_spacer = tac_count == 1
             && should_defer_large_cell_tac_after_table_break_spacer(
                 st,
                 paragraphs,
@@ -6523,11 +7112,8 @@ impl TypesetEngine {
                 para,
                 table,
                 table_height,
-            )
-        {
-            st.advance_column_or_new_page();
-        }
-        if tac_count == 1
+            );
+        let defer_late_heading_followed = tac_count == 1
             && should_defer_late_heading_followed_by_table_break_tac(
                 st,
                 paragraphs,
@@ -6535,11 +7121,8 @@ impl TypesetEngine {
                 para,
                 table,
                 table_height,
-            )
-        {
-            st.advance_column_or_new_page();
-        }
-        if tac_count == 1
+            );
+        let defer_after_tail_lead = tac_count == 1
             && should_defer_large_cell_tac_after_page_tail_lead_in(
                 st,
                 paragraphs,
@@ -6548,11 +7131,8 @@ impl TypesetEngine {
                 table,
                 table_height,
                 available,
-            )
-        {
-            st.advance_column_or_new_page();
-        }
-        if tac_count == 1
+            );
+        let defer_spacer_before_break_title = tac_count == 1
             && should_defer_late_heading_spacer_cell_tac_before_break_title(
                 st,
                 paragraphs,
@@ -6561,11 +7141,8 @@ impl TypesetEngine {
                 table,
                 table_height,
                 available,
-            )
-        {
-            st.advance_column_or_new_page();
-        }
-        if tac_count == 1
+            );
+        let defer_small_after_spacers = tac_count == 1
             && should_defer_small_cell_tac_after_large_table_spacers_before_break(
                 st,
                 paragraphs,
@@ -6574,11 +7151,8 @@ impl TypesetEngine {
                 table,
                 table_height,
                 available,
-            )
-        {
-            st.advance_column_or_new_page();
-        }
-        if tac_count == 1
+            );
+        let defer_wide_contact = tac_count == 1
             && should_defer_wide_contact_tac_after_long_blank_tail_before_title_table(
                 st,
                 paragraphs,
@@ -6588,9 +7162,71 @@ impl TypesetEngine {
                 table_height,
                 available,
                 self.dpi,
-            )
-        {
+            );
+        if defer_title_following_large {
             st.advance_column_or_new_page();
+        }
+        if defer_large_after_spacer {
+            st.advance_column_or_new_page();
+        }
+        if defer_late_heading_followed {
+            st.advance_column_or_new_page();
+        }
+        if defer_after_tail_lead {
+            st.advance_column_or_new_page();
+        }
+        if defer_spacer_before_break_title {
+            st.advance_column_or_new_page();
+        }
+        if defer_small_after_spacers {
+            st.advance_column_or_new_page();
+        }
+        if defer_wide_contact {
+            st.advance_column_or_new_page();
+        }
+        let tac_saved_bottom_fit = if tac_count == 1
+            && table.common.treat_as_char
+            && matches!(
+                table.common.text_wrap,
+                crate::model::shape::TextWrap::TopAndBottom
+            ) {
+            let compact_height = hwpunit_to_px(table.common.height as i32, self.dpi)
+                + hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
+                + hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
+            let tac_idx = para
+                .controls
+                .iter()
+                .take(ctrl_idx)
+                .filter(|c| matches!(c, Control::Table(t) if t.attr & 0x01 != 0))
+                .count();
+            para.line_segs
+                .get(tac_idx)
+                .map(|seg| (hwpunit_to_px(seg.vertical_pos, self.dpi), compact_height))
+                .filter(|(saved_top, compact_height)| {
+                    *compact_height > 0.0
+                        && *compact_height <= available * 0.18
+                        && *saved_top >= available * 0.65
+                        && *saved_top < st.current_height
+                        && *saved_top + *compact_height <= available + fit_tol
+                        && st.current_height + table_height > available + fit_tol
+                })
+        } else {
+            None
+        };
+        if let Some((saved_top, compact_height)) = tac_saved_bottom_fit {
+            st.current_height = saved_top;
+            table_height = compact_height;
+        }
+        if let Some(saved_top) = saved_vpos_fit_after_partial_table(
+            st,
+            paragraphs,
+            para,
+            table,
+            table_height,
+            available,
+            self.dpi,
+        ) {
+            st.current_height = saved_top;
         }
         if st.current_height + table_height > available + fit_tol && !st.current_items.is_empty() {
             st.advance_column_or_new_page();
@@ -6612,31 +7248,8 @@ impl TypesetEngine {
     ) {
         let vertical_offset = Self::get_table_vertical_offset(table);
         let total_lines = fmt.line_heights.len();
-        let pre_table_end_line = if vertical_offset > 0 && !para.text.is_empty() {
-            total_lines
-        } else if table.common.treat_as_char
-            && total_lines > 1
-            && para.text.chars().any(|c| c.is_alphanumeric())
-        {
-            // 전폭 TAC 표가 자동 줄바꿈으로 자기 줄(line index N)에 놓인 경우(\n 없음):
-            // 한컴은 LINE_SEG 순서대로 line0=텍스트 → lineN=표 로 렌더한다.
-            // control_text_positions() 는 char_offsets 가 비면 무용하므로, 표 줄의 높이
-            // (표 본체 + outer margin top/bottom)와 일치하는 LINE_SEG 인덱스로 판정한다.
-            // PUA 필러/공백만 있는 문단(예: 복학원서.hwp pi=16 — 한컴이 표 폭만큼 필러로
-            // 줄바꿈시킨 케이스)은 is_alphanumeric() 가 false 라 제외 → compute_tac_leading
-            // 경로 유지. (Task #853, Task #842 결함 #2 의 PUA 필러 판정과 정합)
-            let om_top = hwpunit_to_px(table.outer_margin_top as i32, self.dpi);
-            let om_bot = hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
-            let tbl_line_h = hwpunit_to_px(table.common.height as i32, self.dpi) + om_top + om_bot;
-            para.line_segs
-                .iter()
-                .enumerate()
-                .find(|(_, ls)| (hwpunit_to_px(ls.line_height, self.dpi) - tbl_line_h).abs() < 1.0)
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let pre_table_end_line =
+            tac_table_pre_text_end_line(para, table, fmt, vertical_offset, self.dpi);
 
         // [Task #439] Square wrap (어울림) 표 식별.
         // 어울림 표는 호스트 문단 텍스트와 같은 수직 영역에 배치되므로
@@ -6654,17 +7267,27 @@ impl TypesetEngine {
             .iter()
             .take(ctrl_idx)
             .any(|c| matches!(c, Control::Table(_)));
-        let pre_height: f64 = if pre_table_end_line > 0 && is_first_table {
-            let h = fmt.line_advances_sum(0..pre_table_end_line);
-            st.current_items.push(PageItem::PartialParagraph {
-                para_index: para_idx,
-                start_line: 0,
-                end_line: pre_table_end_line,
-            });
-            h
-        } else {
-            0.0
-        };
+        let suppress_pre_reset_host_text = st.current_items.is_empty()
+            && pre_reset_tac_host_text_belongs_before_table_page(
+                st,
+                para,
+                table,
+                pre_table_end_line,
+                st.available_height(),
+                self.dpi,
+            );
+        let pre_height: f64 =
+            if pre_table_end_line > 0 && is_first_table && !suppress_pre_reset_host_text {
+                let h = fmt.line_advances_sum(0..pre_table_end_line);
+                st.current_items.push(PageItem::PartialParagraph {
+                    para_index: para_idx,
+                    start_line: 0,
+                    end_line: pre_table_end_line,
+                });
+                h
+            } else {
+                0.0
+            };
 
         // 표 배치
         st.current_items.push(PageItem::Table {
@@ -6684,21 +7307,21 @@ impl TypesetEngine {
             && pre_table_end_line > 0
             && pre_table_end_line < total_lines;
 
-        let square_anchor_advance =
-            if is_wrap_around_table && table.row_count == 1 && table.col_count == 1 {
-                let body_w = st.layout.body_area.width;
-                let tbl_w_px = crate::renderer::hwpunit_to_px(table.common.width as i32, self.dpi);
-                let host_vpos = para.line_segs.first().map(|s| s.vertical_pos);
-                match (host_vpos, st.pending_next_para_first_vpos) {
-                    (Some(hv), Some(nv)) if tbl_w_px < body_w * 0.55 && nv > hv => {
-                        let delta_px = crate::renderer::hwpunit_to_px(nv - hv, self.dpi);
-                        (delta_px > 0.0).then_some(delta_px)
-                    }
-                    _ => None,
+        let square_anchor_advance = if is_wrap_around_table {
+            let body_w = st.layout.body_area.width;
+            let tbl_w_px = crate::renderer::hwpunit_to_px(table.common.width as i32, self.dpi);
+            let host_vpos = para.line_segs.first().map(|s| s.vertical_pos);
+            match (host_vpos, st.pending_next_para_first_vpos) {
+                (Some(hv), Some(nv)) if tbl_w_px < body_w * 1.05 && nv > hv => {
+                    let delta_px = crate::renderer::hwpunit_to_px(nv - hv, self.dpi);
+                    (delta_px > 0.0).then_some(delta_px)
                 }
-            } else {
-                None
-            };
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let used_square_anchor_advance = square_anchor_advance.is_some();
 
         if is_wrap_around_table && pre_height > 0.0 {
             let v_off_px = crate::renderer::hwpunit_to_px(vertical_offset as i32, self.dpi);
@@ -6770,7 +7393,9 @@ impl TypesetEngine {
                 start_line: post_table_start,
                 end_line: total_lines,
             });
-            st.current_height += post_height;
+            if !used_square_anchor_advance {
+                st.current_height += post_height;
+            }
         }
 
         // TAC 표: trailing line_spacing 복원 (Paginator place_table_fits:777-783 동일)
@@ -6798,6 +7423,8 @@ impl TypesetEngine {
         mt: Option<&MeasuredTable>,
         styles: &ResolvedStyleSet,
     ) {
+        use crate::model::shape::{TextWrap, VertRelTo};
+
         // 표 내 각주를 고려한 가용 높이 계산 (Paginator engine.rs:583-586 동일)
         let table_fn_h = ft.table_footnote_height;
         let fn_separator = if table_fn_h > 0.0 && st.is_first_footnote_on_page {
@@ -6814,9 +7441,24 @@ impl TypesetEngine {
         let available =
             (st.base_available_height() - total_footnote - fn_margin - st.current_zone_y_offset)
                 .max(0.0);
+        let para_saved_vpos_overhead = if !table.common.treat_as_char
+            && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+            && matches!(table.common.vert_rel_to, VertRelTo::Para)
+            && st.current_height < 1.0
+        {
+            para.line_segs
+                .first()
+                .map(|seg| hwpunit_to_px(seg.vertical_pos, self.dpi).max(0.0))
+                .filter(|vpos| *vpos <= st.layout.body_area.height * 0.10)
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         let host_spacing_total = ft.host_spacing.before + ft.host_spacing.after;
         let mut table_total = ft.effective_height + host_spacing_total;
+        let declared_block_total =
+            hwpunit_to_px(table.common.height as i32, self.dpi).max(0.0) + host_spacing_total;
 
         // [Task #1046 Stage 1] 표 측정 드리프트 진단: 페이지네이터 effective_height vs
         // MeasuredTable 행높이 합(+cell_spacing). RHWP_TABLE_DRIFT=1 시 출력.
@@ -6850,6 +7492,22 @@ impl TypesetEngine {
         {
             table_total = fmt.total_height;
         }
+        if !table.common.treat_as_char
+            && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+            && matches!(table.common.vert_rel_to, VertRelTo::Para)
+            && table.row_count <= 4
+            && table.col_count <= 3
+            && declared_block_total > 0.0
+            && table_total > declared_block_total + 15.0
+            && st.current_height >= available * 0.60
+            && st.current_height + table_total > available + 0.5
+            && st.current_height + declared_block_total <= available + 0.5
+            && para.line_segs.first().is_some_and(|seg| {
+                (hwpunit_to_px(seg.vertical_pos, self.dpi) - st.current_height).abs() <= 2.0
+            })
+        {
+            table_total = declared_block_total;
+        }
 
         if should_defer_late_cover_title_band_table(
             st,
@@ -6869,7 +7527,6 @@ impl TypesetEngine {
         // mismatch (= 21_언어 page 1 col 0 의 +76 px drift). 본문 좌표계와 동기화 하기
         // 위해 host paragraph 의 first_vpos 만큼 cur_h 를 미리 jump 하고 표 advance 를
         // 본문 라인 만큼으로 축소.
-        use crate::model::shape::{TextWrap, VertRelTo};
         let is_paper_topbottom_block = !table.common.treat_as_char
             && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
             && matches!(table.common.vert_rel_to, VertRelTo::Paper);
@@ -6890,7 +7547,8 @@ impl TypesetEngine {
         }
 
         // fits: 전체가 현재 페이지에 들어가는가?
-        if st.current_height + table_total <= available {
+        let fit_available = (available - para_saved_vpos_overhead).max(0.0);
+        if st.current_height + table_total <= fit_available {
             self.place_table_with_text(st, para_idx, ctrl_idx, para, table, fmt, table_total);
             return;
         }
@@ -6966,6 +7624,28 @@ impl TypesetEngine {
             })
             .collect();
         let header_row_height = cut_row_h.first().copied().unwrap_or(0.0);
+        let giant_single_row_cut_scale = if !table.common.treat_as_char
+            && matches!(
+                table.common.text_wrap,
+                crate::model::shape::TextWrap::TopAndBottom
+            )
+            && matches!(
+                table.hwpx_page_break,
+                Some(crate::model::table::HwpxTablePageBreak::Cell)
+            )
+            && row_count == 1
+            && table.col_count <= 3
+        {
+            let cut_h = cut_row_h.first().copied().unwrap_or(0.0);
+            let measured_h = mt.row_heights.first().copied().unwrap_or(0.0);
+            if measured_h > 0.0 && cut_h > measured_h * 1.15 {
+                Some((measured_h / cut_h).clamp(0.62, 1.0))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // [Task #1046 Stage 1] 분할 표 cut 행높이 vs 렌더러 MeasuredTable 행높이 비교.
         if std::env::var("RHWP_TABLE_DRIFT").is_ok() {
@@ -7001,7 +7681,7 @@ impl TypesetEngine {
                     0.0
                 }
             };
-            host_before + vert_off
+            host_before + vert_off + para_saved_vpos_overhead
         };
         let remaining_on_page =
             (table_available - st.current_height - first_frag_overhead).max(0.0);
@@ -7059,6 +7739,24 @@ impl TypesetEngine {
                 || remaining_on_page < min_content
                 || multirow_clean_defer
             {
+                st.advance_column_or_new_page();
+            }
+        }
+        if !table.common.treat_as_char
+            && mt.allows_row_break_split()
+            && !st.current_items.is_empty()
+            && row_count > 1
+            && !rowspan_touched.first().copied().unwrap_or(false)
+        {
+            if should_defer_tiny_rowbreak_header_fragment(
+                mt,
+                &cut_row_h,
+                cs,
+                row_count,
+                remaining_on_page,
+                first_frag_overhead,
+                base_available,
+            ) {
                 st.advance_column_or_new_page();
             }
         }
@@ -7165,6 +7863,20 @@ impl TypesetEngine {
             } else {
                 ft.host_spacing.before
             };
+            let saved_vpos_overhead = if !is_continuation
+                && !table.common.treat_as_char
+                && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+                && matches!(table.common.vert_rel_to, VertRelTo::Para)
+                && st.current_height < 1.0
+            {
+                para.line_segs
+                    .first()
+                    .map(|seg| hwpunit_to_px(seg.vertical_pos, self.dpi).max(0.0))
+                    .filter(|vpos| *vpos <= st.layout.body_area.height * 0.10)
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
             let vert_offset_overhead = if is_continuation {
                 0.0
             } else {
@@ -7174,24 +7886,34 @@ impl TypesetEngine {
                     && matches!(table.common.vert_rel_to, VR3::Para);
                 // HwpUnit=u32 이므로 음수 (u32 wrap) 는 i32 로 캐스트 후 확인.
                 let v_off_i32 = table.common.vertical_offset as i32;
-                if is_para_topbottom && v_off_i32 > 0 {
-                    hwpunit_to_px(v_off_i32, self.dpi)
+                let saved_vpos = if is_para_topbottom && st.current_height < 1.0 {
+                    saved_vpos_overhead
                 } else {
                     0.0
+                };
+                if is_para_topbottom && v_off_i32 > 0 {
+                    hwpunit_to_px(v_off_i32, self.dpi) + saved_vpos
+                } else {
+                    saved_vpos
                 }
+            };
+            let strict_table_available =
+                (table_available - st.layout.pagination_tolerance_px).max(0.0);
+            let split_table_available = if !is_continuation && saved_vpos_overhead > 0.5 {
+                strict_table_available
+            } else {
+                table_available
             };
             let page_avail = if is_continuation {
                 base_available
             } else {
-                (table_available
+                (split_table_available
                     - st.current_height
                     - caption_extra
                     - host_before_overhead
                     - vert_offset_overhead)
                     .max(0.0)
             };
-            let strict_table_available =
-                (table_available - st.layout.pagination_tolerance_px).max(0.0);
             let strict_page_avail = if is_continuation {
                 strict_table_available
             } else {
@@ -7449,13 +8171,15 @@ impl TypesetEngine {
                     // [Task #1022] 일반 행 r — 배치 높이는 row_cut_content_height
                     // (=cut_row_h)로, 분할 컷 산정만 advance_row_cut 으로 수행한다.
                     let row_start_cut: &[usize] = if r == cursor_row { &start_cut } else { &[] };
+                    let row_cut_scale = giant_single_row_cut_scale.unwrap_or(1.0);
                     let row_total = if row_start_cut.is_empty() {
-                        cut_row_h[r]
+                        cut_row_h[r] * row_cut_scale
                     } else {
                         // 연속분 cursor_row — 시작 컷 적용. row_cut_content_height 가
                         // 셀별 (content+pad) 행 max 를 반환(분할 행이므로 cell.height
                         // 강제 없음).
                         layout_engine.row_cut_content_height(table, r, row_start_cut, &[], styles)
+                            * row_cut_scale
                     };
                     if consumed + cs_before + row_total <= avail_for_rows {
                         // 행 전체가 예산 안에 들어감.
@@ -7502,6 +8226,7 @@ impl TypesetEngine {
                         row_total <= avail_for_rows * 0.15 || row_total >= avail_for_rows * 0.85;
                     let row_overflow = consumed + cs_before + row_total - avail_for_rows;
                     if r + 1 == row_count
+                        && saved_vpos_overhead <= 0.5
                         && ((row_fits_tightly && row_overflow <= avail_for_rows * 0.02)
                             || row_overflow <= 4.0)
                     {
@@ -7524,7 +8249,8 @@ impl TypesetEngine {
                         break;
                     }
                     let padding = mt.max_padding_for_row(r);
-                    let budget = (avail_for_rows - consumed - cs_before - padding).max(0.0);
+                    let budget =
+                        (avail_for_rows - consumed - cs_before - padding).max(0.0) / row_cut_scale;
                     let res = layout_engine.advance_row_cut_with_hard_break_policy(
                         table,
                         r,
@@ -7555,7 +8281,7 @@ impl TypesetEngine {
                             row_start_cut,
                             &res.end_cut,
                             styles,
-                        );
+                        ) * row_cut_scale;
                         let split_budget = (avail_for_rows - consumed - cs_before).max(0.0);
                         // `advance_row_cut` returns consumed text-unit height, but render
                         // advances by `row_cut_content_height` including cell padding and
@@ -7569,7 +8295,7 @@ impl TypesetEngine {
                         } else {
                             end_row = r + 1;
                             split_end_cut = res.end_cut.clone();
-                            split_end_limit = res.consumed_height;
+                            split_end_limit = res.consumed_height * row_cut_scale;
                             consumed += cs_before + split_total;
                         }
                     }
@@ -8469,6 +9195,48 @@ impl TypesetEngine {
         })
     }
 
+    fn drop_trailing_blank_only_pages(pages: &mut Vec<PageContent>, paragraphs: &[Paragraph]) {
+        while pages.len() > 1 {
+            let Some(items) = pages.last().and_then(|page| Self::first_col_items(page)) else {
+                break;
+            };
+            if items.is_empty() {
+                break;
+            }
+            let trailing_para_indices: Vec<usize> = items
+                .iter()
+                .filter_map(|item| match item {
+                    PageItem::FullParagraph { para_index } => Some(*para_index),
+                    _ => None,
+                })
+                .collect();
+            if trailing_para_indices.len() < 2
+                || trailing_para_indices.len() != items.len()
+                || trailing_para_indices
+                    .iter()
+                    .any(|para_index| paragraphs.get(*para_index).is_none())
+                || !trailing_para_indices
+                    .iter()
+                    .all(|para_index| *para_index + 1 >= paragraphs.len() - items.len() + 1)
+                || !trailing_para_indices.iter().all(|para_index| {
+                    paragraphs
+                        .get(*para_index)
+                        .and_then(|para| para.line_segs.first())
+                        .is_some_and(|line| line.vertical_pos > 60_000)
+                })
+                || !items
+                    .iter()
+                    .all(|item| Self::is_blank_control_free_paragraph_item(paragraphs, item))
+            {
+                break;
+            }
+            pages.pop();
+        }
+        for (idx, page) in pages.iter_mut().enumerate() {
+            page.page_index = idx as u32;
+        }
+    }
+
     fn same_partial_table_control(a: &PageItem, b: &PageItem) -> bool {
         matches!(
             (a, b),
@@ -8780,6 +9548,10 @@ impl TypesetEngine {
                 idx += 1;
             }
 
+            for split_idx in start + 1..idx {
+                breaks.insert(split_idx);
+            }
+
             if idx < paragraphs.len()
                 && paragraphs[start..idx].iter().any(|p| {
                     p.line_segs
@@ -8916,7 +9688,7 @@ mod tests {
     use crate::renderer::composer::ComposedParagraph;
     use crate::renderer::height_measurer::HeightMeasurer;
     use crate::renderer::pagination::Paginator;
-    use crate::renderer::style_resolver::ResolvedStyleSet;
+    use crate::renderer::style_resolver::{ResolvedParaStyle, ResolvedStyleSet};
 
     fn a4_page_def() -> PageDef {
         PageDef {
@@ -8941,6 +9713,39 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn rowbreak_tiny_first_row_defer_requires_header_cells() {
+        use crate::model::table::TablePageBreak;
+
+        let mut mt = MeasuredTable {
+            para_index: 0,
+            control_index: 0,
+            total_height: 345.0,
+            row_heights: vec![20.0, 63.0, 63.0, 188.0],
+            caption_height: 0.0,
+            cell_spacing: 0.0,
+            cumulative_heights: vec![0.0, 20.0, 83.0, 146.0, 334.0],
+            repeat_header: true,
+            has_header_cells: false,
+            cells: Vec::new(),
+            page_break: TablePageBreak::RowBreak,
+            row_block_start: vec![0, 1, 2, 3],
+            row_block_end: vec![1, 2, 3, 4],
+        };
+        let cut_rows = [20.0, 63.0, 63.0, 188.0];
+
+        assert!(
+            !should_defer_tiny_rowbreak_header_fragment(&mt, &cut_rows, 0.0, 4, 65.0, 9.0, 933.0,),
+            "repeatHeader without row-0 header cells should still use the page-bottom split"
+        );
+
+        mt.has_header_cells = true;
+        assert!(
+            should_defer_tiny_rowbreak_header_fragment(&mt, &cut_rows, 0.0, 4, 65.0, 9.0, 933.0,),
+            "actual row-0 header cells keep the orphan-header defer"
+        );
     }
 
     fn paragraph_with_hwpx_table_xml(after_text: &str) -> Paragraph {
@@ -9394,7 +10199,13 @@ mod tests {
         let breaks = engine.page_relative_scan_breaks(&paragraphs, &a4_page_def());
 
         assert!(breaks.contains(&2));
-        assert!(!breaks.contains(&1));
+        assert!(breaks.contains(&1));
+    }
+
+    #[test]
+    fn negative_para_float_pushdown_group_top_clamps_to_host_row() {
+        assert_eq!(float_pushdown_group_top_px(-8_474, DEFAULT_DPI), 0.0);
+        assert!(float_pushdown_group_top_px(1_500, DEFAULT_DPI) > 0.0);
     }
 
     #[test]
@@ -10158,6 +10969,57 @@ mod tests {
             "a one-line paragraph that barely fits before an explicit page break should move to its own tail page"
         );
 
+        let saved_overflow_units = ((body_height + 6.0) * 75.0).round() as i32;
+        let saved_overflow_tail = Paragraph {
+            text: "saved line overflows slightly".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: saved_overflow_units - 1_500,
+                line_height: 1_000,
+                line_spacing: 500,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let saved_overflow_paras = vec![saved_overflow_tail.clone(), next_break.clone()];
+        st.current_height = body_height - fmt.height_for_fit + 2.0;
+        assert!(
+            should_move_late_tail_before_explicit_page_break(
+                &st,
+                &saved_overflow_tail,
+                &fmt,
+                &saved_overflow_paras,
+                0,
+                body_height,
+                true
+            ),
+            "a one-line tail with small saved-line overflow should be kept before the authored page break"
+        );
+
+        let saved_near_bottom_tail = Paragraph {
+            text: "saved near bottom but computed room remains".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: ((body_height - 15.0) * 75.0).round() as i32 - 1_500,
+                line_height: 1_000,
+                line_spacing: 500,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let saved_near_bottom_paras = vec![saved_near_bottom_tail.clone(), next_break.clone()];
+        st.current_height = body_height - fmt.height_for_fit - 34.0;
+        assert!(
+            !should_move_late_tail_before_explicit_page_break(
+                &st,
+                &saved_near_bottom_tail,
+                &fmt,
+                &saved_near_bottom_paras,
+                0,
+                body_height,
+                true
+            ),
+            "a plain break should not manufacture a singleton tail page when computed room is still wide"
+        );
+
         st.current_height = 500.0;
         assert!(
             !should_move_late_tail_before_explicit_page_break(
@@ -10219,6 +11081,20 @@ mod tests {
                 true
             ),
             "a tail with a wider remaining strip should move before an explicit title table"
+        );
+
+        st.current_height = body_height - fmt.height_for_fit - 6.0;
+        assert!(
+            !should_move_late_tail_before_explicit_page_break(
+                &st,
+                &tail,
+                &fmt,
+                &title_break_paras,
+                0,
+                body_height,
+                true
+            ),
+            "a tail that nearly fills the page should stay before an explicit title table"
         );
 
         let mut page_tac_table = Table::default();
@@ -10310,7 +11186,7 @@ mod tests {
         let overflow_tail = Paragraph {
             text: "visible overflow note".to_string(),
             line_segs: vec![LineSeg {
-                vertical_pos: 69_000,
+                vertical_pos: 69_500,
                 line_height: 1_000,
                 line_spacing: 500,
                 ..Default::default()
@@ -10498,6 +11374,19 @@ mod tests {
             ),
             "a late heading/spacer followed by a medium CELL TAC table should defer before the next explicit title page"
         );
+
+        assert!(
+            !should_defer_late_heading_spacer_cell_tac_before_break_title(
+                &st,
+                &paragraphs,
+                2,
+                &paragraphs[2],
+                &table,
+                body_height * 0.445,
+                body_height
+            ),
+            "a larger body table that still fits should stay before the authored page break"
+        );
     }
 
     #[test]
@@ -10584,9 +11473,11 @@ mod tests {
         st.current_items
             .push(PageItem::FullParagraph { para_index: 0 });
 
+        let styles = ResolvedStyleSet::default();
         assert!(
             should_insert_blank_page_before_explicit_top_reset(
                 &st,
+                &styles,
                 &intro,
                 &paragraphs,
                 1,
@@ -10601,6 +11492,7 @@ mod tests {
         assert!(
             !should_insert_blank_page_before_explicit_top_reset(
                 &st,
+                &styles,
                 &no_break[1],
                 &no_break,
                 1,
@@ -10615,6 +11507,7 @@ mod tests {
         assert!(
             !should_insert_blank_page_before_explicit_top_reset(
                 &st,
+                &styles,
                 &no_table[1],
                 &no_table,
                 1,
@@ -10622,6 +11515,29 @@ mod tests {
                 body_height_hu,
             ),
             "the blank-page preservation requires a following medium CELL TAC table group"
+        );
+
+        let mut list_intro = paragraphs.clone();
+        list_intro[1].para_shape_id = 1;
+        let mut list_styles = ResolvedStyleSet::default();
+        list_styles.para_styles = vec![
+            ResolvedParaStyle::default(),
+            ResolvedParaStyle {
+                indent: -78.0,
+                ..Default::default()
+            },
+        ];
+        assert!(
+            !should_insert_blank_page_before_explicit_top_reset(
+                &st,
+                &list_styles,
+                &list_intro[1],
+                &list_intro,
+                1,
+                body_height,
+                body_height_hu,
+            ),
+            "hanging-indent body/list paragraphs should not manufacture an extra blank page"
         );
     }
 
@@ -10711,6 +11627,31 @@ mod tests {
                 body_height,
             ),
             "a small contact/signoff CELL TAC table after a large table spacer tail should move before the next explicit section title"
+        );
+
+        let mut fills_page_st =
+            TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        fills_page_st.current_height = body_height - body_height * 0.07 - 10.0;
+        fills_page_st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        for para_index in 1..=5 {
+            fills_page_st
+                .current_items
+                .push(PageItem::FullParagraph { para_index });
+        }
+        assert!(
+            !should_defer_small_cell_tac_after_large_table_spacers_before_break(
+                &fills_page_st,
+                &paragraphs,
+                6,
+                &contact_para,
+                &contact,
+                body_height * 0.07,
+                body_height,
+            ),
+            "a small CELL TAC table that nearly fills the page should stay before the explicit section break"
         );
 
         let mut no_break = paragraphs.clone();
@@ -10996,6 +11937,59 @@ mod tests {
             "a wide 2x3 CELL TAC contact table after a saved long blank tail should isolate before an explicit title table"
         );
 
+        let mut nearly_full_st =
+            TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        nearly_full_st.current_height = body_height - body_height * 0.10 - 5.0;
+        for para_index in 0..=10 {
+            nearly_full_st
+                .current_items
+                .push(PageItem::FullParagraph { para_index });
+        }
+        assert!(
+            !should_defer_wide_contact_tac_after_long_blank_tail_before_title_table(
+                &nearly_full_st,
+                &paragraphs,
+                11,
+                &contact_para,
+                &contact,
+                body_height * 0.10,
+                body_height,
+                DEFAULT_DPI,
+            ),
+            "a wide contact table that nearly fills the page should stay before the explicit title table"
+        );
+
+        let mut authored_late_contact_para = contact_para.clone();
+        authored_late_contact_para.line_segs = vec![LineSeg {
+            vertical_pos: 62_400,
+            line_height: 7_234,
+            line_spacing: 900,
+            ..Default::default()
+        }];
+        let mut authored_late_paragraphs = paragraphs.clone();
+        authored_late_paragraphs[11] = authored_late_contact_para.clone();
+        let mut authored_late_st =
+            TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        authored_late_st.current_height = body_height - body_height * 0.10 - 4.0;
+        for para_index in 0..=10 {
+            authored_late_st
+                .current_items
+                .push(PageItem::FullParagraph { para_index });
+        }
+        assert!(
+            should_defer_wide_contact_tac_after_long_blank_tail_before_title_table(
+                &authored_late_st,
+                &authored_late_paragraphs,
+                11,
+                &authored_late_contact_para,
+                &contact,
+                body_height * 0.10,
+                body_height,
+                DEFAULT_DPI,
+            ),
+            "an authored-late contact table after a long blank tail should isolate before an explicit title table"
+        );
+
         let mut blank_only_st =
             TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
         blank_only_st.current_height = body_height * 0.89;
@@ -11036,6 +12030,204 @@ mod tests {
                 DEFAULT_DPI,
             ),
             "the long blank-tail contact table rule is limited to explicit title-table boundaries"
+        );
+    }
+
+    #[test]
+    fn large_tac_table_after_partial_table_uses_saved_vpos_fit() {
+        use crate::model::shape::TextWrap;
+        use crate::model::table::{HwpxTablePageBreak, Table};
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height * 0.64;
+        st.current_items.push(PageItem::PartialTable {
+            para_index: 10,
+            control_index: 2,
+            start_row: 9,
+            end_row: 11,
+            is_continuation: true,
+            start_cut: Vec::new(),
+            end_cut: Vec::new(),
+            is_block_split: false,
+        });
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 11 });
+
+        let mut table = Table::default();
+        table.row_count = 1;
+        table.col_count = 1;
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.hwpx_page_break = Some(HwpxTablePageBreak::Cell);
+        let table_height = body_height * 0.70;
+        let para = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: (body_height * 0.29 * 7200.0 / DEFAULT_DPI) as i32,
+                line_height: (table_height * 7200.0 / DEFAULT_DPI) as i32,
+                line_spacing: 1_052,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph::default(),
+            Paragraph {
+                line_segs: vec![LineSeg {
+                    vertical_pos: 19_248,
+                    line_height: 700,
+                    line_spacing: 500,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ];
+
+        let saved_top = saved_vpos_fit_after_partial_table(
+            &st,
+            &paragraphs,
+            &para,
+            &table,
+            table_height,
+            body_height,
+            DEFAULT_DPI,
+        )
+        .expect("saved vpos should allow the large TAC table to stay after a partial table");
+        assert!(
+            saved_top + table_height <= body_height + body_height * 0.01,
+            "saved top plus table height should fit on the same page"
+        );
+
+        let mut two_col = TypesetState::new(layout.clone(), 2, 0, 0.0, 0.0, ColumnType::Normal);
+        two_col.current_height = body_height * 0.64;
+        two_col.current_items.push(PageItem::PartialTable {
+            para_index: 10,
+            control_index: 2,
+            start_row: 9,
+            end_row: 11,
+            is_continuation: true,
+            start_cut: Vec::new(),
+            end_cut: Vec::new(),
+            is_block_split: false,
+        });
+        two_col
+            .current_items
+            .push(PageItem::FullParagraph { para_index: 11 });
+        assert!(
+            saved_vpos_fit_after_partial_table(
+                &two_col,
+                &paragraphs,
+                &para,
+                &table,
+                table_height,
+                body_height,
+                DEFAULT_DPI,
+            )
+            .is_none(),
+            "the saved-vpos snap is limited to the same single-column partial-table flow"
+        );
+    }
+
+    #[test]
+    fn pre_reset_tac_host_text_is_not_repeated_on_table_page() {
+        use crate::model::shape::TextWrap;
+        use crate::model::table::Table;
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let table_line_hu = (body_height * 0.66 * 7200.0 / DEFAULT_DPI) as i32;
+        let mut table = Table::default();
+        table.attr = 1;
+        table.row_count = 16;
+        table.col_count = 4;
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        table.common.height = table_line_hu as u32;
+
+        let para = Paragraph {
+            text: "8. 전공능력                              ".to_string(),
+            line_segs: vec![
+                LineSeg {
+                    vertical_pos: (body_height * 0.49 * 7200.0 / DEFAULT_DPI) as i32,
+                    line_height: 1_400,
+                    line_spacing: 840,
+                    ..Default::default()
+                },
+                LineSeg {
+                    vertical_pos: 0,
+                    line_height: table_line_hu,
+                    line_spacing: 840,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let fmt = FormattedParagraph {
+            total_height: hwpunit_to_px(1_400 + 840 + table_line_hu + 840, DEFAULT_DPI),
+            line_heights: vec![
+                hwpunit_to_px(1_400, DEFAULT_DPI),
+                hwpunit_to_px(table_line_hu, DEFAULT_DPI),
+            ],
+            line_spacings: vec![
+                hwpunit_to_px(840, DEFAULT_DPI),
+                hwpunit_to_px(840, DEFAULT_DPI),
+            ],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: hwpunit_to_px(1_400 + 840 + table_line_hu, DEFAULT_DPI),
+        };
+
+        let engine = TypesetEngine::with_default_dpi();
+        let mut st = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+
+        let pre_line = tac_table_pre_text_end_line(&para, &table, &fmt, 0, DEFAULT_DPI);
+        assert_eq!(pre_line, 1);
+        assert!(
+            pre_reset_tac_host_text_belongs_before_table_page(
+                &st,
+                &para,
+                &table,
+                pre_line,
+                body_height,
+                DEFAULT_DPI,
+            ),
+            "the host text line is authored before the reset table page"
+        );
+
+        engine.place_table_with_text(&mut st, 44, 0, &para, &table, &fmt, body_height * 0.66);
+
+        assert!(
+            st.current_items
+                .iter()
+                .all(|item| !matches!(item, PageItem::PartialParagraph { para_index: 44, .. })),
+            "the pre-reset host heading must not be repeated on the table page"
+        );
+        assert!(
+            st.current_items.iter().any(|item| matches!(
+                item,
+                PageItem::Table {
+                    para_index: 44,
+                    control_index: 0
+                }
+            )),
+            "the TAC table itself still renders on the reset page"
         );
     }
 
@@ -11456,6 +12648,104 @@ mod tests {
     }
 
     #[test]
+    fn heading_after_bottom_block_table_keeps_following_body() {
+        use crate::model::control::Control;
+        use crate::model::shape::TextWrap;
+        use crate::model::table::Table;
+
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let mut table = Table::default();
+        table.common.treat_as_char = false;
+        table.common.text_wrap = TextWrap::TopAndBottom;
+        let table_para = Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+        let heading = Paragraph {
+            text: "2-2. following section".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 45_217,
+                line_height: 1_200,
+                line_spacing: 960,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = Paragraph {
+            text: "Strength and Weakness body".to_string(),
+            line_segs: vec![
+                LineSeg {
+                    vertical_pos: 47_377,
+                    line_height: 1_000,
+                    line_spacing: 800,
+                    ..Default::default()
+                },
+                LineSeg {
+                    vertical_pos: 49_177,
+                    line_height: 1_000,
+                    line_spacing: 800,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let paragraphs = vec![table_para, heading.clone(), body];
+        let fmt = FormattedParagraph {
+            total_height: 42.0,
+            line_heights: vec![18.0],
+            line_spacings: vec![14.0],
+            spacing_before: 10.0,
+            spacing_after: 0.0,
+            height_for_fit: 28.0,
+        };
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height - fmt.total_height - 34.0;
+        st.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+
+        assert!(
+            should_defer_heading_after_bottom_block_table(
+                &st,
+                &heading,
+                &fmt,
+                &paragraphs,
+                1,
+                body_height,
+                true,
+                None,
+            ),
+            "a heading after a bottom block table should move when its following body cannot fit"
+        );
+
+        let mut roomy = TypesetState::new(layout, 1, 0, 0.0, 0.0, ColumnType::Normal);
+        roomy.current_height = body_height * 0.75;
+        roomy.current_items.push(PageItem::Table {
+            para_index: 0,
+            control_index: 0,
+        });
+        assert!(
+            !should_defer_heading_after_bottom_block_table(
+                &roomy,
+                &heading,
+                &fmt,
+                &paragraphs,
+                1,
+                body_height,
+                true,
+                None,
+            ),
+            "ordinary mid-page heading/table flow keeps existing packing"
+        );
+    }
+
+    #[test]
     fn late_heading_before_list_and_wide_cell_tac_starts_next_page() {
         use crate::model::control::Control;
         use crate::model::shape::TextWrap;
@@ -11659,6 +12949,248 @@ mod tests {
                 None,
             ),
             "mid-page visible groups keep ordinary packing"
+        );
+    }
+
+    #[test]
+    fn multiline_saved_tail_can_pack_before_top_reset_heading() {
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+
+        let tail = Paragraph {
+            text: "Imbalanced nutrition: less than body requirements related to pain".to_string(),
+            line_segs: vec![
+                LineSeg {
+                    vertical_pos: 56_358,
+                    line_height: 1_100,
+                    line_spacing: 1_100,
+                    ..Default::default()
+                },
+                LineSeg {
+                    vertical_pos: 58_558,
+                    line_height: 1_100,
+                    line_spacing: 1_100,
+                    ..Default::default()
+                },
+                LineSeg {
+                    vertical_pos: 60_758,
+                    line_height: 1_100,
+                    line_spacing: 1_100,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let blank = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 62_958,
+                line_height: 1_300,
+                line_spacing: 1_300,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let top_heading = Paragraph {
+            text: "IV. heading".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 1_300,
+                line_spacing: 1_300,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![tail.clone(), blank, top_heading];
+        let fmt = FormattedParagraph {
+            total_height: 88.0,
+            line_heights: vec![29.3, 29.3, 29.4],
+            line_spacings: vec![14.7, 14.7, 14.7],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 88.0,
+        };
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height - fmt.height_for_fit + 1.0;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 99 });
+
+        assert!(
+            saved_vpos_multiline_tail_fits_before_top_reset(
+                &st,
+                &tail,
+                &fmt,
+                &paragraphs,
+                0,
+                body_height,
+                true,
+            )
+            .is_some(),
+            "saved line positions should allow a bottom-authored multiline tail before a following top reset"
+        );
+
+        let no_reset = Paragraph {
+            text: "ordinary following body".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 2_600,
+                line_height: 1_300,
+                line_spacing: 1_300,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let no_reset_paragraphs = vec![tail.clone(), Paragraph::default(), no_reset];
+        assert!(
+            saved_vpos_multiline_tail_fits_before_top_reset(
+                &st,
+                &tail,
+                &fmt,
+                &no_reset_paragraphs,
+                0,
+                body_height,
+                true,
+            )
+            .is_none(),
+            "ordinary following body text must keep the strict fit path"
+        );
+
+        let mut mid_page = st;
+        mid_page.current_height = body_height * 0.50;
+        assert!(
+            saved_vpos_multiline_tail_fits_before_top_reset(
+                &mid_page,
+                &tail,
+                &fmt,
+                &paragraphs,
+                0,
+                body_height,
+                true,
+            )
+            .is_none(),
+            "mid-page paragraphs do not use the late-tail exception"
+        );
+    }
+
+    #[test]
+    fn single_line_saved_tail_can_pack_before_blank_page_break_top_reset() {
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let layout = PageLayoutInfo::from_page_def(&page_def, &col_def, DEFAULT_DPI);
+        let body_height = layout.body_area.height;
+        let saved_top_hu = ((body_height - 32.0) * 75.0).round() as i32;
+
+        let tail = Paragraph {
+            text: "③ <삭제 2025.11.20.>".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: saved_top_hu,
+                line_height: 1_050,
+                line_spacing: 420,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let blank_page_break = Paragraph {
+            column_type: ColumnBreakType::Page,
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 1_200,
+                line_spacing: 480,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let top_reset_heading = Paragraph {
+            text: "제2절 교육과정, 수업, 성적".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 1_680,
+                line_height: 1_200,
+                line_spacing: 480,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paragraphs = vec![tail.clone(), blank_page_break, top_reset_heading];
+        let fmt = FormattedParagraph {
+            total_height: 19.6,
+            line_heights: vec![14.0],
+            line_spacings: vec![5.6],
+            spacing_before: 0.0,
+            spacing_after: 0.0,
+            height_for_fit: 19.6,
+        };
+
+        let mut st = TypesetState::new(layout.clone(), 1, 0, 0.0, 0.0, ColumnType::Normal);
+        st.current_height = body_height - 13.0;
+        st.current_items
+            .push(PageItem::FullParagraph { para_index: 99 });
+
+        assert!(
+            saved_vpos_single_line_tail_fits_before_blank_top_reset(
+                &st,
+                &tail,
+                &fmt,
+                &paragraphs,
+                0,
+                body_height,
+                true,
+            )
+            .is_some(),
+            "saved vpos should keep a one-line statutory tail before the following authored page break"
+        );
+        assert!(
+            !should_move_late_tail_before_explicit_page_break(
+                &st,
+                &tail,
+                &fmt,
+                &paragraphs,
+                0,
+                body_height,
+                true,
+            ),
+            "the late-tail singleton-page guard must not override the saved-vpos fit"
+        );
+
+        let direct_top_reset = Paragraph {
+            text: "- 참고문헌(Reference)".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 0,
+                line_height: 1_400,
+                line_spacing: 840,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let direct_reset_paragraphs = vec![tail.clone(), direct_top_reset];
+        assert!(
+            saved_vpos_single_line_tail_fits_before_blank_top_reset(
+                &st,
+                &tail,
+                &fmt,
+                &direct_reset_paragraphs,
+                0,
+                body_height,
+                true,
+            )
+            .is_some(),
+            "a one-line saved tail should also pack before a direct top-reset paragraph"
+        );
+
+        let mut mid_page = st;
+        mid_page.current_height = body_height * 0.50;
+        assert!(
+            saved_vpos_single_line_tail_fits_before_blank_top_reset(
+                &mid_page,
+                &tail,
+                &fmt,
+                &paragraphs,
+                0,
+                body_height,
+                true,
+            )
+            .is_none(),
+            "mid-page single-line text must keep the ordinary fit path"
         );
     }
 

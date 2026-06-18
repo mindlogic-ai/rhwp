@@ -112,6 +112,30 @@
       }
       return doc.insertTextInCell(sec, para, ctrl, cellIdx, cellPara, start, text);
     }
+    // Read a cell's FULL text across ALL its paragraphs, joined with "\n".
+    // A cell often holds several paragraphs (e.g. an address cell has a
+    // 제출주소 line + a 사업담당자 line). Reading only cell paragraph 0 — as the
+    // table views used to — hid every line after the first from the agent.
+    // Joining with "\n" mirrors how setCellText writes multi-line cells, so
+    // read and write use the same line-break convention. `cap` bounds the
+    // returned length so huge cells don't blow up the agent's context.
+    function readCellAllParas(doc, sec, para, ctrl, cellIdx, cap) {
+      const limit = cap || 2000;
+      let n = 1;
+      try { n = doc.getCellParagraphCount(sec, para, ctrl, cellIdx) || 1; } catch {}
+      const parts = [];
+      let total = 0;
+      for (let p = 0; p < n; p++) {
+        let t = '';
+        try { t = getCellTextCompat(doc, sec, para, ctrl, cellIdx, p, 0, 9999) || ''; } catch {}
+        parts.push(t);
+        total += t.length;
+        if (total >= limit) break;
+      }
+      let joined = parts.join('\n');
+      if (joined.length > limit) joined = joined.slice(0, limit) + '…';
+      return joined;
+    }
     function refresh() {
       cleanSinceLoad = false;
       originalHwpxBytes = null;
@@ -145,6 +169,29 @@
         }
       }
       return wasmProps;
+    }
+    // Tool surface uses snake_case + display units (align: 'center',
+    // line_spacing_pct: 180, space_before_pt: 6). WASM applyParaFormat /
+    // parse_para_shape_mods expects camelCase engine keys + HWPUnit
+    // (alignment: 'center', lineSpacing: 180, spacingBefore: 600). Without
+    // this translation the props were passed straight through and SILENTLY
+    // DROPPED — alignment/spacing edits returned ok:true but never applied
+    // (the 2026-06-17 "중앙정렬 안됨" QA bug). Engine-shaped keys (alignment,
+    // lineSpacing, indent, ...) pass through unchanged so direct callers work.
+    function translateParaProps(props) {
+      const out = {};
+      for (const [k, v] of Object.entries(props || {})) {
+        if (v === null || v === undefined) continue;
+        switch (k) {
+          case 'align':                out.alignment = v; break;                       // left|center|right|justify|distribute
+          case 'line_spacing_pct':     out.lineSpacing = Math.round(Number(v)); out.lineSpacingType = 'Percent'; break;
+          case 'indent_first_line_mm': out.indent = Math.round(Number(v) * 283.465); break; // mm → HWPUnit (1/7200")
+          case 'space_before_pt':      out.spacingBefore = Math.round(Number(v) * 100); break; // pt → HWPUnit
+          case 'space_after_pt':       out.spacingAfter = Math.round(Number(v) * 100); break;
+          default:                     out[k] = v;
+        }
+      }
+      return out;
     }
 
     // ── Agent-active flag — suppress user_edit during our own mutations ──
@@ -332,20 +379,66 @@
       const focus = { total_pages: null, caret: null, viewport: null, selection: null };
       const doc = getDoc();
       try { focus.total_pages = doc.pageCount(); } catch {}
+      // Caret + selection come from the studio's live CursorState
+      // (window.__inputHandler), NOT doc.getCaretPosition(): the WASM caret
+      // is decoupled from studio cursor movement and always reports
+      // {0,0,0} no matter where the user clicks. Verified empirically
+      // 2026-06-18 (rhwp v0.7.13). CursorState is the single source of
+      // truth for "where the user is". Best-effort throughout. Falls back
+      // to total_pages-only when __inputHandler isn't exposed (older studio
+      // bundle), so this is safe to ship ahead of the bundle rebuild.
+      const ih = window.__inputHandler;
+      const cur = ih && ih.cursor;
       try {
-        const raw = doc.getCaretPosition();
-        const parsed = safeParse(raw);
-        if (parsed && typeof parsed === 'object' && !parsed.ok === false) {
-          // rhwp returns various shapes across versions — normalize the
-          // common ones (sec/para/offset or section/paragraph/char).
+        const pos = cur && cur.getPosition && cur.getPosition();
+        if (pos && pos.sectionIndex != null) {
           focus.caret = {
-            sec: parsed.sec ?? parsed.section_idx ?? parsed.section ?? null,
-            para: parsed.para ?? parsed.paragraph_idx ?? parsed.paragraph ?? null,
-            offset: parsed.offset ?? parsed.char_offset ?? parsed.char ?? null,
-            path: (parsed.sec ?? parsed.section_idx) != null
-              ? `s${parsed.sec ?? parsed.section_idx}:p${parsed.para ?? parsed.paragraph_idx ?? 0}`
-              : null,
+            sec: pos.sectionIndex,
+            para: pos.paragraphIndex,
+            offset: pos.charOffset,
+            path: `s${pos.sectionIndex}:p${pos.paragraphIndex}`,
           };
+        }
+      } catch {}
+      // Cell-block selection (F5 / drag across table cells) takes priority —
+      // it's a table-scoped range the agent should act on as cells.
+      try {
+        if (ih && ih.isInCellSelectionMode && ih.isInCellSelectionMode()) {
+          const range = ih.getSelectedCellRange && ih.getSelectedCellRange();
+          const ctx = ih.getCellTableContext && ih.getCellTableContext();
+          if (range) {
+            focus.selection = {
+              kind: 'cells',
+              table_path: ctx && ctx.sec != null ? `s${ctx.sec}:p${ctx.ppi}` : null,
+              start_row: range.startRow, start_col: range.startCol,
+              end_row: range.endRow, end_col: range.endCol,
+            };
+          }
+        }
+      } catch {}
+      // Text selection (drag-highlight). Skipped if a cell selection won.
+      try {
+        if (!focus.selection && cur && cur.hasSelection && cur.hasSelection()) {
+          const sel = cur.getSelectionOrdered && cur.getSelectionOrdered();
+          if (sel && sel.start && sel.end) {
+            let text = '';
+            try {
+              const r = safeParse(doc.copySelection(
+                sel.start.sectionIndex, sel.start.paragraphIndex, sel.start.charOffset,
+                sel.end.paragraphIndex, sel.end.charOffset));
+              if (r && r.ok) text = r.text || '';
+            } catch {}
+            focus.selection = {
+              kind: 'text',
+              start_path: `s${sel.start.sectionIndex}:p${sel.start.paragraphIndex}`,
+              start_offset: sel.start.charOffset,
+              end_path: `s${sel.end.sectionIndex}:p${sel.end.paragraphIndex}`,
+              end_offset: sel.end.charOffset,
+              // Cap the inlined snippet — a multi-page selection must not
+              // blow up per-turn context. Server truncates again anyway.
+              text: text.length > 500 ? text.slice(0, 500) + '…' : text,
+            };
+          }
         }
       } catch {}
       // Viewport is the studio's concept, not rhwp's. We map scrollTop
@@ -486,21 +579,28 @@
           if (bboxes.length > 0) {
             const sorted = [...bboxes].sort((a, b) => a.row - b.row || a.col - b.col);
             for (const b of sorted) {
-              let ct = '';
-              try {
-                ct = (doc.getTextInCell(sec, para, ctrl, b.cellIdx, 0, 0, CELL_HARD_CAP) || '').trim();
-              } catch {}
+              // Full multi-paragraph cell text. A cell can hold several
+              // paragraphs (one per line); render the first on the [rXcY] line
+              // and each following paragraph as an indented continuation line
+              // aligned under it — so multi-line cells read naturally with no
+              // mystery glyph.
+              const ct = readCellAllParas(doc, sec, para, ctrl, b.cellIdx, CELL_HARD_CAP).trim();
               const span = (b.rowSpan > 1 || b.colSpan > 1) ? ` span=${b.rowSpan}x${b.colSpan}` : '';
-              lines.push(`  [r${b.row}c${b.col}${span}] ${ct}`);
+              const tag = `  [r${b.row}c${b.col}${span}] `;
+              const cl = ct.split('\n');
+              lines.push(tag + cl[0]);
+              for (let k = 1; k < cl.length; k++) lines.push(' '.repeat(tag.length) + cl[k]);
               charCount += ct.length;
             }
           } else {
             for (let r = 0; r < dims.rowCount; r++) {
               for (let c = 0; c < dims.colCount; c++) {
                 const idx = r * dims.colCount + c;
-                let ct = '';
-                try { ct = (doc.getTextInCell(sec, para, ctrl, idx, 0, 0, CELL_HARD_CAP) || '').trim(); } catch {}
-                lines.push(`  [r${r}c${c}] ${ct}`);
+                const ct = readCellAllParas(doc, sec, para, ctrl, idx, CELL_HARD_CAP).trim();
+                const tag = `  [r${r}c${c}] `;
+                const cl = ct.split('\n');
+                lines.push(tag + cl[0]);
+                for (let k = 1; k < cl.length; k++) lines.push(' '.repeat(tag.length) + cl[k]);
                 charCount += ct.length;
               }
             }
@@ -560,13 +660,16 @@
         try { bboxes = JSON.parse(doc.getTableCellBboxes(sec, para, ctrl)) || []; } catch {}
         if (bboxes.length > 0) {
           const cells = bboxes.map(b => {
-            let text = '';
-            try { text = (doc.getTextInCell(sec, para, ctrl, b.cellIdx, 0, 0, 200) || '').trim(); } catch {}
+            // Full multi-paragraph cell text. Newlines kept literal here —
+            // this is structured JSON, so the agent can see exactly where the
+            // cell's line breaks are (one "\n" per cell paragraph).
+            const text = readCellAllParas(doc, sec, para, ctrl, b.cellIdx, 2000).trim();
             return {
               row: b.row, col: b.col,
               row_span: b.rowSpan, col_span: b.colSpan,
               cell_idx: b.cellIdx,
               text,
+              lines: text === '' ? 0 : text.split('\n').length,
             };
           });
           // Sort row-major so the agent reads top-to-bottom, left-to-right.
@@ -585,7 +688,7 @@
           const row = [];
           for (let c = 0; c < dims.colCount; c++) {
             const cellIdx = r * dims.colCount + c;
-            try { row.push(doc.getTextInCell(sec, para, ctrl, cellIdx, 0, 0, 200) || ''); }
+            try { row.push(readCellAllParas(doc, sec, para, ctrl, cellIdx, 2000)); }
             catch { row.push(''); }
           }
           cells.push(row);
@@ -809,7 +912,10 @@
       async replaceAll(params) {
         const r = safeParse(getDoc().replaceAll(params.query, params.replacement, !!params.case_sensitive));
         refresh();
-        return { ok: !!r.ok, replaced: r.replaced ?? 0 };
+        // The WASM returns {ok, count} — NOT `replaced`. Reading the wrong key
+        // made replaceAll always report 0 even when it replaced text (the
+        // 2026-06-17 "일괄치환 안먹음" QA bug: agent saw 0 and assumed failure).
+        return { ok: !!r.ok, replaced: r.count ?? r.replaced ?? 0 };
       },
       // ── Bulk ops over searchAllText hits ──
       // The agent reaches for these when a single semantic action ("clear
@@ -1021,11 +1127,33 @@
         const doc = getDoc();
         doc.beginBatch();
         try {
-          doc.insertParagraph(sec, para + 1);
+          // Inherit the source paragraph's shape the way a human pressing
+          // Enter at end-of-line does: split the source paragraph at its end.
+          // The engine's split_at() carries para_shape_id + the trailing
+          // char_shape into the new (empty) paragraph, and the text we then
+          // insert adopts that char_shape. The old path — insertParagraph()
+          // → Paragraph::new_empty() — produced a blank paragraph with
+          // para_shape_id=0 and no char_shapes, so the new line fell back to
+          // the document-default shape (smaller font, often center-aligned)
+          // instead of matching the list it was appended to.
+          const srcLen = doc.getParagraphLength(sec, para);
+          doc.splitParagraph(sec, para, srcLen);
           if (params.text) doc.insertText(sec, para + 1, 0, params.text);
           doc.endBatch();
           refresh();
-          return { ok: true, new_path: `s${sec}:p${para + 1}` };
+          // Read-back: confirm the new paragraph actually inherited the
+          // source's char + para shape, so a silent regression surfaces as
+          // shape_matched=false rather than a wrong-size/alignment line the
+          // agent can't see.
+          let shape_matched = null;
+          try {
+            const srcChar = doc.getCharPropertiesAt(sec, para, Math.max(0, srcLen - 1));
+            const newChar = doc.getCharPropertiesAt(sec, para + 1, 0);
+            const srcPara = doc.getParaPropertiesAt(sec, para);
+            const newPara = doc.getParaPropertiesAt(sec, para + 1);
+            shape_matched = (srcChar === newChar) && (srcPara === newPara);
+          } catch {}
+          return { ok: true, new_path: `s${sec}:p${para + 1}`, shape_matched };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
       async deleteParagraph(params) {
@@ -1037,6 +1165,76 @@
           doc.endBatch();
           refresh();
           return { ok: true };
+        } catch (e) { try { doc.endBatch(); } catch {} throw e; }
+      },
+      // Reformat `to_path` to match `reference_path` on BOTH axes that govern
+      // how a list item lines up:
+      //   1. Paragraph + character shape (indent, margins, alignment, font).
+      //      Copied BY REFERENCE — we DON'T read reference props and re-apply
+      //      them: getParaPropertiesAt emits a 96-DPI dialog projection (px,
+      //      with the hanging indent folded into marginLeft, plus an HWP3-
+      //      variant branch), so round-tripping through applyParaFormat
+      //      double-counts the indent and mis-scales. Splitting the reference
+      //      paragraph at its end carries para_shape_id + the trailing
+      //      char_shape into the new empty paragraph unit-free.
+      //   2. Leading-whitespace prefix. Korean form docs (gov/univ templates)
+      //      very often align sub-items with literal leading spaces in the
+      //      TEXT while paragraph indent stays 0 (e.g. "     5. …"). Shape copy
+      //      alone leaves a new line flush-left under such a list, so we strip
+      //      the target's own leading whitespace and re-apply the reference's.
+      // The line ends up directly after the reference — the natural "make this
+      // line match the one it sits under" case.
+      async matchParagraphFormat(params) {
+        const ref = pathToCoords(params.reference_path);
+        const tgt = pathToCoords(params.to_path);
+        const doc = getDoc();
+        if (ref.sec !== tgt.sec) {
+          return { ok: false, error: 'match across sections is not supported' };
+        }
+        if (ref.para === tgt.para) {
+          return { ok: false, error: 'reference and target are the same paragraph' };
+        }
+        // Leading run of spaces / tabs / full-width spaces (U+3000) / NBSP.
+        const LEAD_WS = /^[ \t　 ]*/;
+        doc.beginBatch();
+        try {
+          const tgtLen = doc.getParagraphLength(tgt.sec, tgt.para);
+          const rawText = doc.getTextRange(tgt.sec, tgt.para, 0, tgtLen);
+          // Delete first so reference-index bookkeeping is trivial afterward.
+          doc.deleteParagraph(tgt.sec, tgt.para);
+          const refAfter = ref.para > tgt.para ? ref.para - 1 : ref.para;
+          const refLen = doc.getParagraphLength(ref.sec, refAfter);
+          const refText = doc.getTextRange(ref.sec, refAfter, 0, refLen);
+          // Reproduce the reference's leading-whitespace indentation on the
+          // target body (its own leading whitespace stripped first).
+          const refLead = (refText.match(LEAD_WS) || [''])[0];
+          const text = refLead + rawText.replace(LEAD_WS, '');
+          doc.splitParagraph(ref.sec, refAfter, refLen);
+          const newPara = refAfter + 1;
+          if (text) doc.insertText(ref.sec, newPara, 0, text);
+          doc.endBatch();
+          refresh();
+          // Read-back: confirm the VISIBLE formatting transferred. We compare
+          // the fields a user actually sees (alignment, indent, margins, list
+          // head type) rather than full-JSON equality — split intentionally
+          // advances per-instance numbering counters, and a reference with
+          // mixed character runs contributes its trailing run, so a strict
+          // whole-object compare would report false mismatches.
+          let shape_matched = null;
+          try {
+            const rp = JSON.parse(doc.getParaPropertiesAt(ref.sec, refAfter));
+            const np = JSON.parse(doc.getParaPropertiesAt(ref.sec, newPara));
+            const fields = ['alignment', 'indent', 'marginLeft', 'marginRight', 'headType'];
+            // char: split copies the reference's trailing run → compare that.
+            const rc = doc.getCharPropertiesAt(ref.sec, refAfter, Math.max(0, refLen - 1));
+            const nc = doc.getCharPropertiesAt(ref.sec, newPara, 0);
+            // leading-whitespace indentation transferred?
+            const newLen = doc.getParagraphLength(ref.sec, newPara);
+            const newText = doc.getTextRange(ref.sec, newPara, 0, newLen);
+            const leadOk = (newText.match(LEAD_WS) || [''])[0] === refLead;
+            shape_matched = fields.every((f) => np[f] === rp[f]) && rc === nc && leadOk;
+          } catch {}
+          return { ok: true, new_path: `s${ref.sec}:p${newPara}`, shape_matched };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
       async insertPageBreak(params) {
@@ -1080,10 +1278,19 @@
           return { ok: false, error: `range is empty (start=${start} end=${end} at ${params.path})` };
         }
         const wasmProps = translateCharProps(props);
+        let beforeShape = null;
+        try { beforeShape = doc.getCharPropertiesAt(sec, para, start); } catch {}
         const r = safeParse(doc.applyCharFormat(sec, para, start, end, JSON.stringify(wasmProps)));
         if (!r.ok && r.raw === undefined) throw new Error(r.error || 'applyCharFormat failed');
         refresh();
-        return { ok: true, applied_to: { start, end } };
+        // Read-back: confirm the char shape actually moved. changed=false means
+        // the engine accepted the call but the run was already in that state, OR
+        // the format was clamped/ignored — surface it so the agent doesn't claim
+        // a visible change that never happened.
+        let afterShape = null, changed = null;
+        try { afterShape = doc.getCharPropertiesAt(sec, para, start); } catch {}
+        if (beforeShape !== null && afterShape !== null) changed = beforeShape !== afterShape;
+        return { ok: true, applied_to: { start, end }, changed };
       },
       // Scale the paragraph's character font size by a ratio (e.g. 1.5x).
       // Bridge reads the current size from getCharPropertiesAt so the agent
@@ -1144,10 +1351,20 @@
       },
       async applyParaStyle(params) {
         const { sec, para } = pathToCoords(params.path);
-        const r = safeParse(getDoc().applyParaFormat(sec, para, JSON.stringify(params.props)));
+        const doc = getDoc();
+        const wasmProps = translateParaProps(params.props);
+        let beforeShape = null;
+        try { beforeShape = doc.getParaPropertiesAt(sec, para); } catch {}
+        const r = safeParse(doc.applyParaFormat(sec, para, JSON.stringify(wasmProps)));
         if (!r.ok && r.raw === undefined) throw new Error(r.error || 'applyParaFormat failed');
         refresh();
-        return { ok: true };
+        // Read-back: alignment / indent / spacing that doesn't move the paragraph
+        // shape (e.g. "center" when already centered, or a value the engine
+        // rejected) comes back changed=false.
+        let afterShape = null, changed = null;
+        try { afterShape = doc.getParaPropertiesAt(sec, para); } catch {}
+        if (beforeShape !== null && afterShape !== null) changed = beforeShape !== afterShape;
+        return { ok: true, changed };
       },
       async applyStyleByName(params) {
         const { sec, para } = pathToCoords(params.path);
@@ -1180,15 +1397,69 @@
           if (!col_count) throw new Error(`no table at ${params.path}`);
         }
         const cellIdx = resolveCellIdx(sec, para, ctrl, row, col, col_count);
+        text = text || '';
+        // An HWP cell holds MULTIPLE paragraphs. A literal "\n" stuffed into a
+        // single cell paragraph is NOT a line break — the renderer's width
+        // reflow ignores it, so the text runs off the page edge. So split on
+        // "\n" and write one cell paragraph per line. splitParagraphInCell
+        // carries the cell paragraph's shape into the new line (same as Enter).
+        const segments = text.split('\n');
         doc.beginBatch();
         try {
-          let existingLen = 0;
-          try { existingLen = (getCellTextCompat(doc, sec, para, ctrl, cellIdx, 0, 0, 9999) || '').length; } catch {}
-          if (existingLen > 0) deleteCellTextCompat(doc, sec, para, ctrl, cellIdx, 0, 0, existingLen);
-          insertCellTextCompat(doc, sec, para, ctrl, cellIdx, 0, 0, text);
+          // 1) Collapse the cell to a single empty paragraph — handles re-writes
+          //    of cells that already hold several paragraphs (clear each, then
+          //    merge the extras down into paragraph 0).
+          let pcount = 1;
+          try { pcount = doc.getCellParagraphCount(sec, para, ctrl, cellIdx) || 1; } catch {}
+          for (let p = pcount - 1; p >= 0; p--) {
+            let len = 0;
+            try { len = (getCellTextCompat(doc, sec, para, ctrl, cellIdx, p, 0, 9999) || '').length; } catch {}
+            if (len > 0) deleteCellTextCompat(doc, sec, para, ctrl, cellIdx, p, 0, len);
+            if (p > 0) { try { doc.mergeParagraphInCell(sec, para, ctrl, cellIdx, p); } catch {} }
+          }
+          // 2) Write each line as its own cell paragraph.
+          insertCellTextCompat(doc, sec, para, ctrl, cellIdx, 0, 0, segments[0]);
+          for (let i = 1; i < segments.length; i++) {
+            const prev = i - 1;
+            let len = 0;
+            try { len = doc.getCellParagraphLength(sec, para, ctrl, cellIdx, prev); }
+            catch { len = (getCellTextCompat(doc, sec, para, ctrl, cellIdx, prev, 0, 9999) || '').length; }
+            doc.splitParagraphInCell(sec, para, ctrl, cellIdx, prev, len);
+            if (segments[i]) insertCellTextCompat(doc, sec, para, ctrl, cellIdx, i, 0, segments[i]);
+          }
+          // 3) Normalize justify → left on the written paragraphs. Korean form
+          //    cells default to 양쪽정렬(justify); justify is visually identical
+          //    to left for any line that doesn't wrap, but on a WRAPPED line it
+          //    spreads the words edge-to-edge (the ugly gaps in a narrow cell).
+          //    So downgrade justify/distribute to left — never worse, fixes the
+          //    wrap case. center/right are intentional and left untouched.
+          if (typeof doc.applyParaFormatInCell === 'function' &&
+              typeof doc.getCellParaPropertiesAt === 'function') {
+            for (let i = 0; i < segments.length; i++) {
+              try {
+                const a = JSON.parse(doc.getCellParaPropertiesAt(sec, para, ctrl, cellIdx, i)).alignment;
+                if (a === 'justify' || a === 'distribute') {
+                  doc.applyParaFormatInCell(sec, para, ctrl, cellIdx, i, JSON.stringify({ alignment: 'left' }));
+                }
+              } catch {}
+            }
+          }
           doc.endBatch();
           refresh();
-          return { ok: true };
+          // Read-back: reconstruct the cell as paragraph0\nparagraph1\n… and
+          // compare to the requested text. verified=false means the write didn't
+          // land (bad cellIdx, merged-region surprise, line count mismatch) — so
+          // the agent doesn't report a cell as filled when it isn't. `lines` is
+          // the resulting cell paragraph count (1 for single-line text).
+          let verified = null, lines = null;
+          try {
+            const n = doc.getCellParagraphCount(sec, para, ctrl, cellIdx) || 1;
+            const got = [];
+            for (let p = 0; p < n; p++) got.push(getCellTextCompat(doc, sec, para, ctrl, cellIdx, p, 0, 9999) || '');
+            lines = got.length;
+            verified = got.join('\n') === text;
+          } catch {}
+          return { ok: true, verified, lines };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
       // setCellText only replaces content — the cell template's character
@@ -1229,6 +1500,50 @@
         if (!r.ok && r.raw === undefined) throw new Error(r.error || 'applyCharFormatInCell failed');
         refresh();
         return { ok: true, applied_to: { row, col, cell_para: cellPara, start, end } };
+      },
+      // Set a cell's BACKGROUND fill color (셀 채우기색 / 배경색). The WASM gates
+      // the fill path on the JSON also carrying border definitions, so we read
+      // the cell's current properties (which already include borderLeft/Right/
+      // Top/Bottom + the existing fill) via getCellProperties, flip
+      // fillType→solid + fillColor, and write the whole object back — borders
+      // are round-tripped untouched. color: '#RRGGBB' (use '#FFFFFF' to clear a
+      // gray placeholder fill to white).
+      async setCellFill(params) {
+        const { sec, para, ctrl } = pathToCoords(params.path);
+        const { row, col, color } = params;
+        let { col_count } = params;
+        const doc = getDoc();
+        if (col_count === undefined || col_count === null) {
+          const dims = tryGetTableDims(sec, para, ctrl);
+          col_count = dims?.colCount;
+          if (!col_count) throw new Error(`no table at ${params.path}`);
+        }
+        const cellIdx = resolveCellIdx(sec, para, ctrl, row, col, col_count);
+        let props;
+        try { props = JSON.parse(doc.getCellProperties(sec, para, ctrl, cellIdx)); }
+        catch (e) { throw new Error(`failed to read cell (${row},${col}): ${e?.message || e}`); }
+        const norm = (c) => (typeof c === 'string' ? c.trim().toLowerCase() : c);
+        const before = { fillType: props.fillType, fillColor: props.fillColor };
+        props.fillType = 'solid';
+        props.fillColor = color;
+        doc.beginBatch();
+        try {
+          const r = safeParse(doc.setCellProperties(sec, para, ctrl, cellIdx, JSON.stringify(props)));
+          doc.endBatch();
+          if (!r.ok && r.raw === undefined) throw new Error(r.error || 'setCellProperties failed');
+          refresh();
+          // Read-back: verified = the cell IS now the requested color (the fill
+          // took). changed = the color actually moved from before (false when it
+          // was already that color — a no-op, not a failure).
+          let after = null, changed = null, verified = null;
+          try {
+            const v = JSON.parse(doc.getCellProperties(sec, para, ctrl, cellIdx));
+            after = { fillType: v.fillType, fillColor: v.fillColor };
+            verified = v.fillType === 'solid' && norm(v.fillColor) === norm(color);
+            changed = norm(before.fillColor) !== norm(after.fillColor) || before.fillType !== after.fillType;
+          } catch {}
+          return { ok: true, applied_to: { row, col }, before, after, changed, verified };
+        } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
       async insertTableRow(params) {
         const { sec, para, ctrl } = pathToCoords(params.path);

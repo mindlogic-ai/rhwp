@@ -242,10 +242,16 @@ async function initialize(): Promise<void> {
     setupGlobalShortcuts();
     loadFromUrlParam();
 
+    // Expose inputHandler + canvasView always (not just DEV) so the agent
+    // bridge (public/agent-bridge.js) can read the live caret/selection
+    // (CursorState) in production builds — same rationale as window.__wasm
+    // above. The WASM doc.getCaretPosition() is decoupled from the studio
+    // cursor and always returns {0,0,0}, so CursorState is the only correct
+    // source for user_focus. The render-debug handles below stay DEV-only.
+    (window as any).__inputHandler = inputHandler;
+    (window as any).__canvasView = canvasView;
     // E2E 테스트용 전역 노출 (개발 모드 전용)
     if (import.meta.env.DEV) {
-      (window as any).__inputHandler = inputHandler;
-      (window as any).__canvasView = canvasView;
       (window as any).__renderBackend = renderBackend;
       (window as any).__canvaskitRenderMode = canvaskitMode;
       (window as any).__canvaskitSurfaceRequest = canvaskitSurfaceRequest;

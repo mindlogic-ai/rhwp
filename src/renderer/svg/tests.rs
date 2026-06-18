@@ -271,6 +271,53 @@ fn test_xml_escape() {
     assert_eq!(escape_xml("<test>&\"'"), "&lt;test&gt;&amp;&quot;&apos;");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_invalid_font_face_names_are_not_emitted_in_svg_style() {
+    let mut renderer = SvgRenderer::new();
+    renderer.font_embed_mode = FontEmbedMode::Style;
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "A",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_family: "&quot".to_string(),
+            font_size: 12.0,
+            ..Default::default()
+        },
+    );
+
+    let css = generate_font_style(&renderer, &[]);
+
+    assert!(!css.contains("&quot"));
+    assert!(!css.contains("@font-face"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_bundled_hancom_font_filenames_are_discovered() {
+    let dir = std::env::temp_dir().join(format!("rhwp-svg-font-lookup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("HANBatang.ttf"), b"").unwrap();
+    std::fs::write(dir.join("HANDotum.ttf"), b"").unwrap();
+
+    assert_eq!(
+        find_font_file("함초롬바탕", &[dir.clone()]).unwrap(),
+        dir.join("HANBatang.ttf")
+    );
+    assert_eq!(
+        find_font_file("돋움", &[dir.clone()]).unwrap(),
+        dir.join("HANDotum.ttf")
+    );
+    assert_eq!(
+        find_font_file("휴먼명조", &[dir.clone()]).unwrap(),
+        dir.join("HANBatang.ttf")
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn test_color_to_svg() {
     assert_eq!(color_to_svg(0x000000FF), "#ff0000");

@@ -58,6 +58,88 @@ fn non_tac_topbottom_picture(height: u32) -> crate::model::image::Picture {
     picture
 }
 
+#[test]
+fn leading_topbottom_picture_reserves_before_visible_text_only_when_at_anchor() {
+    let mut zero_offset = non_tac_topbottom_picture(8_474);
+    zero_offset.common.vertical_offset = 0;
+    let mut negative_peer = non_tac_topbottom_picture(8_474);
+    negative_peer.common.vertical_offset = (-8_474i32) as u32;
+    let para = Paragraph {
+        text: "d. visible body".to_string(),
+        controls: vec![
+            Control::Picture(Box::new(zero_offset)),
+            Control::Picture(Box::new(negative_peer)),
+        ],
+        line_segs: vec![LineSeg {
+            line_height: 1_000,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let reserve =
+        leading_topbottom_picture_pre_text_reserve_px(&para, crate::renderer::DEFAULT_DPI);
+    let expected = crate::renderer::hwpunit_to_px(8_474, crate::renderer::DEFAULT_DPI);
+    assert!(
+        (reserve - expected).abs() < 0.1,
+        "zero/negative leading picture row should reserve before text: got {reserve:.2}, expected {expected:.2}"
+    );
+
+    let mut positive = non_tac_topbottom_picture(6_593);
+    positive.common.vertical_offset = 1_222;
+    let heading_para = Paragraph {
+        text: "(2) heading before image".to_string(),
+        controls: vec![Control::Picture(Box::new(positive))],
+        ..Default::default()
+    };
+    assert_eq!(
+        leading_topbottom_picture_pre_text_reserve_px(&heading_para, crate::renderer::DEFAULT_DPI),
+        0.0,
+        "positive-offset picture headings keep the existing heading-before-image layout"
+    );
+
+    let empty_host = Paragraph {
+        controls: para.controls.clone(),
+        ..Default::default()
+    };
+    assert_eq!(
+        leading_topbottom_picture_pre_text_reserve_px(&empty_host, crate::renderer::DEFAULT_DPI),
+        0.0,
+        "empty picture hosts are handled by the existing picture flow path"
+    );
+}
+
+#[test]
+fn topbottom_picture_clamps_only_negative_para_offsets() {
+    let mut negative = non_tac_topbottom_picture(8_474);
+    negative.common.vertical_offset = (-7_099i32) as u32;
+    let empty_host = Paragraph {
+        controls: vec![Control::Picture(Box::new(negative.clone()))],
+        ..Default::default()
+    };
+    assert!(
+        should_clamp_picture_negative_para_offset(&empty_host, &negative),
+        "empty picture host should clamp signed-negative Para offsets to its row"
+    );
+
+    let mut positive = negative.clone();
+    positive.common.vertical_offset = 1_222;
+    assert!(
+        !should_clamp_picture_negative_para_offset(&empty_host, &positive),
+        "positive offsets keep existing below-anchor placement"
+    );
+
+    let visible_host = Paragraph {
+        text: "1.3 heading".to_string(),
+        controls: vec![Control::Picture(Box::new(negative.clone()))],
+        ..Default::default()
+    };
+    assert!(
+        should_clamp_picture_negative_para_offset(&visible_host, &negative),
+        "visible-text picture rows also keep signed-negative peers at the host row"
+    );
+}
+
 fn composed_with_line_height(line_height: i32) -> ComposedParagraph {
     ComposedParagraph {
         lines: vec![ComposedLine {

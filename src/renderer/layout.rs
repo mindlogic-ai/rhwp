@@ -100,6 +100,70 @@ fn para_has_visible_text(para: &Paragraph) -> bool {
     para.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}')
 }
 
+fn leading_topbottom_picture_pre_text_reserve_px(para: &Paragraph, dpi: f64) -> f64 {
+    if !para_has_visible_text(para) {
+        return 0.0;
+    }
+
+    let mut has_at_or_above_anchor = false;
+    let mut reserve = 0.0_f64;
+    for control in &para.controls {
+        let common = match control {
+            Control::Picture(pic) => Some(&pic.common),
+            Control::Shape(shape) => match shape.as_ref() {
+                crate::model::shape::ShapeObject::Picture(pic) => Some(&pic.common),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(common) = common else {
+            continue;
+        };
+        if common.treat_as_char
+            || !matches!(common.text_wrap, TextWrap::TopAndBottom)
+            || !matches!(common.vert_rel_to, VertRelTo::Para)
+        {
+            continue;
+        }
+
+        let voff = hwpunit_to_px(common.vertical_offset as i32, dpi);
+        let height = hwpunit_to_px(common.height as i32, dpi).max(0.0);
+        let margin_bottom = hwpunit_to_px(common.margin.bottom as i32, dpi).max(0.0);
+        if voff <= 0.0 {
+            has_at_or_above_anchor = true;
+        }
+        reserve = reserve.max(voff.max(0.0) + height + margin_bottom);
+    }
+
+    if has_at_or_above_anchor {
+        reserve
+    } else {
+        0.0
+    }
+}
+
+fn should_clamp_picture_negative_para_offset(
+    para: &Paragraph,
+    pic: &crate::model::image::Picture,
+) -> bool {
+    !pic.common.treat_as_char
+        && matches!(pic.common.text_wrap, TextWrap::TopAndBottom)
+        && matches!(pic.common.vert_rel_to, VertRelTo::Para)
+        && matches!(pic.common.horz_rel_to, HorzRelTo::Column)
+        && matches!(pic.common.vert_align, VertAlign::Top | VertAlign::Inside)
+        && (pic.common.vertical_offset as i32) < 0
+        && para.controls.iter().any(|control| {
+            matches!(
+                control,
+                Control::Picture(peer)
+                    if !peer.common.treat_as_char
+                        && matches!(peer.common.text_wrap, TextWrap::TopAndBottom)
+                        && matches!(peer.common.vert_rel_to, VertRelTo::Para)
+                        && matches!(peer.common.horz_rel_to, HorzRelTo::Column)
+            )
+        })
+}
+
 fn para_has_visible_text_before_control(para: &Paragraph, control_index: usize) -> bool {
     if matches!(para.controls.get(control_index), Some(Control::Table(_))) {
         if let Some(has_text) = hwpx_has_visible_text_before_table_control(para, control_index) {
@@ -3553,7 +3617,10 @@ impl LayoutEngine {
                         );
                         let final_comp = numbered_comp.as_ref().or(comp);
 
-                        para_start_y.insert(*para_index, y_offset);
+                        let para_origin_y = y_offset;
+                        let text_y_offset = y_offset
+                            + leading_topbottom_picture_pre_text_reserve_px(para, self.dpi);
+                        para_start_y.insert(*para_index, para_origin_y);
                         y_offset = self.layout_paragraph(
                             tree,
                             col_node,
@@ -3561,7 +3628,7 @@ impl LayoutEngine {
                             final_comp,
                             styles,
                             col_area,
-                            y_offset,
+                            text_y_offset,
                             page_content.section_index,
                             *para_index,
                             multi_col_width,
@@ -5308,6 +5375,18 @@ impl LayoutEngine {
                                 std::env::var("RHWP_FLOAT_RENDER_DRIFT").is_ok();
                             // === [/Mindlogic patch] ===
                             let mut effective_col_area = **col_area;
+                            let adjusted_picture;
+                            let pic_for_layout =
+                                if should_clamp_picture_negative_para_offset(para, pic) {
+                                    adjusted_picture = {
+                                        let mut picture = pic.clone();
+                                        picture.common.vertical_offset = 0;
+                                        picture
+                                    };
+                                    &adjusted_picture
+                                } else {
+                                    pic
+                                };
                             let column_base_fallback = if !pic.common.treat_as_char
                                 && matches!(
                                     pic.common.text_wrap,
@@ -5365,7 +5444,7 @@ impl LayoutEngine {
                             result_y = self.layout_body_picture(
                                 tree,
                                 col_node,
-                                pic,
+                                pic_for_layout,
                                 &pic_container,
                                 &effective_col_area,
                                 &layout.body_area,
@@ -5384,6 +5463,15 @@ impl LayoutEngine {
                                 control_index,
                                 vpos_accounts_for_height,
                             );
+                            if para_has_visible_text(para)
+                                && matches!(
+                                    pic.common.text_wrap,
+                                    crate::model::shape::TextWrap::TopAndBottom
+                                )
+                                && matches!(pic.common.vert_rel_to, VertRelTo::Para)
+                            {
+                                result_y = result_y.max(saved_y_offset);
+                            }
                             if visual_only_anchor_shift > 0.0 {
                                 result_y =
                                     (result_y - visual_only_anchor_shift).max(saved_y_offset);

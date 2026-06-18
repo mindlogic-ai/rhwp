@@ -3045,31 +3045,41 @@ fn font_local_aliases(font_family: &str) -> Vec<&'static str> {
 fn known_font_filenames(font_name: &str) -> Vec<&'static str> {
     match font_name {
         "함초롬바탕" | "함초롱바탕" | "한컴바탕" => {
-            vec!["hamchob-r.ttf", "HBATANG.TTF"]
+            vec!["HANBatang.ttf", "hamchob-r.ttf", "HBATANG.TTF"]
         }
         "함초롬돋움" | "함초롱돋움" | "한컴돋움" => {
-            vec!["hamchod-r.ttf", "HDOTUM.TTF"]
+            vec!["HANDotum.ttf", "hamchod-r.ttf", "HDOTUM.TTF"]
         }
         "HY헤드라인M" | "HYHeadLine M" => vec!["H2HDRM.TTF"],
         "HY견고딕" | "HYGothic-Extra" => vec!["HYGTRE.TTF"],
         "HY그래픽" | "HYGraphic-Medium" => vec!["HYGPRM.TTF"],
         "HY견명조" | "HYMyeongJo-Extra" => vec!["HYMJRE.TTF"],
-        "HY신명조" => vec!["HYSNMJ.TTF", "hamchob-r.ttf"],
+        "HY신명조" => vec!["HANBatang.ttf", "HYSNMJ.TTF", "hamchob-r.ttf"],
         "Latin Modern Math" => vec![
             "latinmodern-math.otf",
             "LatinModernMath-Regular.otf",
             "lmmath-regular.otf",
         ],
         "맑은 고딕" | "Malgun Gothic" => vec!["malgun.ttf", "MalgunGothic.ttf"],
-        "바탕" | "Batang" => vec!["batang.ttc", "BATANG.TTC", "hamchob-r.ttf"],
-        "돋움" | "Dotum" => vec!["dotum.ttc", "DOTUM.TTC", "hamchod-r.ttf"],
-        "굴림" | "Gulim" => vec!["gulim.ttc", "GULIM.TTC", "hamchod-r.ttf"],
-        "궁서" | "Gungsuh" => vec!["gungsuh.ttc", "GUNGSUH.TTC", "hamchob-r.ttf"],
-        "굴림체" | "GulimChe" => vec!["gulim.ttc", "hamchod-r.ttf"],
-        "바탕체" | "BatangChe" => vec!["batang.ttc", "hamchob-r.ttf"],
-        "휴먼명조" => vec!["HYMJRE.TTF", "hamchob-r.ttf"],
+        "바탕" | "Batang" => vec!["batang.ttc", "BATANG.TTC", "HANBatang.ttf", "hamchob-r.ttf"],
+        "돋움" | "Dotum" => vec!["dotum.ttc", "DOTUM.TTC", "HANDotum.ttf", "hamchod-r.ttf"],
+        "굴림" | "Gulim" => vec!["gulim.ttc", "GULIM.TTC", "HANDotum.ttf", "hamchod-r.ttf"],
+        "궁서" | "Gungsuh" => vec![
+            "gungsuh.ttc",
+            "GUNGSUH.TTC",
+            "HANBatang.ttf",
+            "hamchob-r.ttf",
+        ],
+        "굴림체" | "GulimChe" => vec!["gulim.ttc", "HANDotum.ttf", "hamchod-r.ttf"],
+        "바탕체" | "BatangChe" => vec!["batang.ttc", "HANBatang.ttf", "hamchob-r.ttf"],
+        "휴먼명조" => vec!["HANBatang.ttf", "HYMJRE.TTF", "hamchob-r.ttf"],
         "새바탕" | "새돋움" | "새굴림" | "새궁서" => {
-            vec!["hamchob-r.ttf", "hamchod-r.ttf"]
+            vec![
+                "HANBatang.ttf",
+                "HANDotum.ttf",
+                "hamchob-r.ttf",
+                "hamchod-r.ttf",
+            ]
         }
         _ => vec![],
     }
@@ -3151,6 +3161,22 @@ fn find_font_file(
 
 /// SvgRenderer의 수집된 폰트 정보를 기반으로 @font-face CSS를 생성한다.
 #[cfg(not(target_arch = "wasm32"))]
+fn valid_svg_font_face_name(font_name: &str) -> bool {
+    let trimmed = font_name.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().all(|ch| {
+            !matches!(ch, '&' | '<' | '>' | '"' | '\'' | '\\')
+                && matches!(
+                    ch,
+                    '\u{09}' | '\u{0A}' | '\u{0D}'
+                        | '\u{20}'..='\u{D7FF}'
+                        | '\u{E000}'..='\u{FFFD}'
+                        | '\u{10000}'..='\u{10FFFF}'
+                )
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_font_style(renderer: &SvgRenderer, font_paths: &[std::path::PathBuf]) -> String {
     let codepoints = renderer.font_codepoints();
     if codepoints.is_empty() {
@@ -3162,6 +3188,9 @@ pub fn generate_font_style(renderer: &SvgRenderer, font_paths: &[std::path::Path
     match renderer.font_embed_mode {
         FontEmbedMode::Style => {
             for font_name in codepoints.keys() {
+                if !valid_svg_font_face_name(font_name) {
+                    continue;
+                }
                 let aliases = font_local_aliases(font_name);
                 let src = if aliases.is_empty() {
                     format!("local(\"{}\")", font_name)
@@ -3180,6 +3209,9 @@ pub fn generate_font_style(renderer: &SvgRenderer, font_paths: &[std::path::Path
         }
         FontEmbedMode::Subset => {
             for (font_name, chars) in codepoints.iter() {
+                if !valid_svg_font_face_name(font_name) {
+                    continue;
+                }
                 if let Some(font_path) = find_font_file(font_name, font_paths) {
                     if let Ok(font_data) = std::fs::read(&font_path) {
                         // codepoint → glyph ID 변환 (ttf-parser cmap 사용)
@@ -3239,6 +3271,9 @@ pub fn generate_font_style(renderer: &SvgRenderer, font_paths: &[std::path::Path
         }
         FontEmbedMode::Full => {
             for font_name in codepoints.keys() {
+                if !valid_svg_font_face_name(font_name) {
+                    continue;
+                }
                 if let Some(font_path) = find_font_file(font_name, font_paths) {
                     if let Ok(font_data) = std::fs::read(&font_path) {
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&font_data);

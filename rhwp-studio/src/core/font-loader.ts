@@ -99,8 +99,9 @@ const FONT_LIST: FontEntry[] = [
   { name: 'HY울릉도M', file: 'fonts/NotoSansKR-Regular.woff2' },
   { name: 'HY울릉도B', file: 'fonts/NotoSansKR-Bold.woff2' },
   { name: 'HY태백B', file: 'fonts/HYTBRB.TTF', format: 'truetype' },
-  { name: 'HY동녘M', file: 'fonts/HYDNKM.TTF', format: 'truetype' },
-  { name: 'HY동녘B', file: 'fonts/HYDNKB.TTF', format: 'truetype' },
+  // HYDNK*.TTF has an invalid cmap glyph reference that Chromium rejects; use bundled serif fallbacks.
+  { name: 'HY동녘M', file: 'fonts/NotoSerifKR-Regular.woff2' },
+  { name: 'HY동녘B', file: 'fonts/NotoSerifKR-Bold.woff2' },
   { name: 'HY산B', file: 'fonts/HYSANB.TTF', format: 'truetype' },
   // === 한컴 윤고딕 (HWP 번들 Yoon 서체 — 2026-06-10 한컴 사용 허락 확보, webhwp SDK 원본) ===
   { name: '한컴 윤고딕 230', file: 'fonts/HANYGO230.ttf', format: 'truetype' },
