@@ -1156,6 +1156,52 @@
           return { ok: true, new_path: `s${sec}:p${para + 1}`, shape_matched };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
+      async insertParagraphsAfter(params) {
+        const { sec, para } = pathToCoords(params.path);
+        const lines = Array.isArray(params.lines) ? params.lines : [];
+        if (lines.length === 0) return { ok: false, error: 'lines must not be empty' };
+        const formatPath = params.match_format_from || params.path;
+        const fmt = pathToCoords(formatPath);
+        if (fmt.sec !== sec) return { ok: false, error: 'match_format_from must be in the same section' };
+        const doc = getDoc();
+        doc.beginBatch();
+        try {
+          let anchorPara = para;
+          const paths = [];
+          for (const line of lines) {
+            const anchorLen = doc.getParagraphLength(sec, anchorPara);
+            doc.splitParagraph(sec, anchorPara, anchorLen);
+            const newPara = anchorPara + 1;
+            if (line) doc.insertText(sec, newPara, 0, line);
+            paths.push(`s${sec}:p${newPara}`);
+            anchorPara = newPara;
+          }
+          doc.endBatch();
+          refresh();
+          let shape_matched = null;
+          try {
+            const fmtPara = fmt.para <= para ? fmt.para : fmt.para + lines.length;
+            const refLen = doc.getParagraphLength(fmt.sec, fmtPara);
+            const refChar = doc.getCharPropertiesAt(fmt.sec, fmtPara, Math.max(0, refLen - 1));
+            const refPara = doc.getParaPropertiesAt(fmt.sec, fmtPara);
+            shape_matched = paths.every((path) => {
+              const current = pathToCoords(path);
+              return (
+                doc.getCharPropertiesAt(current.sec, current.para, 0) === refChar
+                && doc.getParaPropertiesAt(current.sec, current.para) === refPara
+              );
+            });
+          } catch {}
+          return {
+            ok: true,
+            inserted: lines.length,
+            paths,
+            first_path: paths[0],
+            last_path: paths[paths.length - 1],
+            shape_matched,
+          };
+        } catch (e) { try { doc.endBatch(); } catch {} throw e; }
+      },
       async deleteParagraph(params) {
         const { sec, para } = pathToCoords(params.path);
         const doc = getDoc();
