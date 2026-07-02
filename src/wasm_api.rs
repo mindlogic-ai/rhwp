@@ -1053,6 +1053,92 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// hop-list 경로의 (중첩) 표에 행을 삽입한다.
+    ///
+    /// path_json: `[{"controlIndex":N,"cellIndex":N,"cellParaIndex":N}, ...]`
+    /// (getTableDimensionsByPath 와 동일한 hop-list 문법)
+    /// 반환값: JSON `{"ok":true,"rowCount":<N>,"colCount":<M>}`
+    #[wasm_bindgen(js_name = insertTableRowByPath)]
+    pub fn insert_table_row_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        row_idx: u32,
+        below: bool,
+    ) -> Result<String, JsValue> {
+        self.insert_table_row_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            path_json,
+            row_idx as u16,
+            below,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// hop-list 경로의 (중첩) 표에 열을 삽입한다.
+    ///
+    /// 반환값: JSON `{"ok":true,"rowCount":<N>,"colCount":<M>}`
+    #[wasm_bindgen(js_name = insertTableColumnByPath)]
+    pub fn insert_table_column_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        col_idx: u32,
+        right: bool,
+    ) -> Result<String, JsValue> {
+        self.insert_table_column_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            path_json,
+            col_idx as u16,
+            right,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// hop-list 경로의 (중첩) 표에서 행을 삭제한다.
+    ///
+    /// 반환값: JSON `{"ok":true,"rowCount":<N>,"colCount":<M>}`
+    #[wasm_bindgen(js_name = deleteTableRowByPath)]
+    pub fn delete_table_row_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        row_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.delete_table_row_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            path_json,
+            row_idx as u16,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// hop-list 경로의 (중첩) 표에서 열을 삭제한다.
+    ///
+    /// 반환값: JSON `{"ok":true,"rowCount":<N>,"colCount":<M>}`
+    #[wasm_bindgen(js_name = deleteTableColumnByPath)]
+    pub fn delete_table_column_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        col_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.delete_table_column_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            path_json,
+            col_idx as u16,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 표의 셀을 병합한다.
     ///
     /// 반환값: JSON `{"ok":true,"cellCount":<N>}`

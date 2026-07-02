@@ -236,12 +236,72 @@
       if (ref.nested) {
         throw new Error(
           `${opName} cannot target a NESTED table yet (${path}) — the engine's ` +
-          'row/column APIs only reach body-level tables. Cell text edits work via ' +
-          'set_cell_text with this nested path; tell the user structural changes to ' +
-          'this inner table are not supported yet instead of rewriting the outer cell.'
+          `${opName} API only reaches body-level tables. Cell text edits work via ` +
+          'set_cell_text and row/column changes via insert/delete_table_row/column ' +
+          'with this nested path; tell the user this specific operation is not ' +
+          'supported on inner tables yet instead of rewriting the outer cell.'
         );
       }
       return { sec: ref.sec, para: ref.para, ctrl: ref.hops[0].controlIndex };
+    }
+    // Older WASM builds (before the *ByPath structural exports) trap with an
+    // unrecoverable 'unreachable' panic when a footnote/equation is inserted
+    // into an HWPX paragraph that already hosts a control (empty
+    // ctrl_data_records + Vec::insert OOB). Guard: on old WASM, refuse the
+    // known-fatal shape (control-hosting paragraph) instead of bricking the
+    // editor until refresh. The *ByPath export doubles as the fixed-engine
+    // sentinel — both ship in the same build.
+    function guardLegacyInsertTrap(sec, para, opName) {
+      const doc = getDoc();
+      if (typeof doc.insertTableRowByPath === 'function') return null; // fixed engine
+      // Trap shapes on the old engine: paragraph 0 (hosts the section/column
+      // def controls) and table-hosting paragraphs. Both leave the insert
+      // index past the (empty) ctrl_data_records vec.
+      let hosts = para === 0 ? 'the section definition' : null;
+      if (!hosts) {
+        for (let ctrl = 0; ctrl < 3; ctrl++) {
+          if (tryGetTableDims(sec, para, ctrl)) { hosts = 'a table'; break; }
+        }
+      }
+      if (hosts) {
+        return {
+          ok: false,
+          error: `${opName} into a paragraph that hosts ${hosts} is not ` +
+            'supported on this engine build — target a plain text ' +
+            'paragraph (insert one with insert_paragraph_after first).',
+        };
+      }
+      return null;
+    }
+    // Structural row/col op shared shell: body tables use the legacy flat
+    // API, nested paths use the *ByPath variant (hop-list JSON). On an older
+    // WASM without the *ByPath export the TypeError becomes an actionable
+    // refusal rather than a silent mutation of the outer table.
+    function structuralTableOp(path, opName, flatCall, byPathCall) {
+      const doc = getDoc();
+      let ref;
+      try { ref = resolveTablePath(path); }
+      catch (e) { return { ok: false, error: e?.message || String(e) }; }
+      let r;
+      try {
+        if (ref.nested) {
+          r = safeParse(byPathCall(doc, ref.sec, ref.para, JSON.stringify(ref.hops)));
+        } else {
+          r = safeParse(flatCall(doc, ref.sec, ref.para, ref.hops[0].controlIndex));
+        }
+      } catch (e) {
+        if (e instanceof TypeError && /is not a function/.test(e.message || '')) {
+          return {
+            ok: false,
+            error: `${opName} on a NESTED table needs a newer WASM build ` +
+              '(*ByPath structural API missing) — tell the user structural ' +
+              'changes to this inner table are not available yet.',
+          };
+        }
+        return { ok: false, error: e?.message || String(e) };
+      }
+      refresh();
+      return r;
     }
     // Read a cell's FULL text across ALL its paragraphs, joined with "\n".
     // A cell often holds several paragraphs (e.g. an address cell has a
@@ -1954,51 +2014,32 @@
           return { ok: true, applied_to: { row, col }, before, after, changed, verified };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
-      // Structural table ops (row/col insert/delete, merge/split) only have
-      // body-level WASM APIs today — no *ByPath variants. A nested path here
-      // gets a clear refusal instead of silently mutating the OUTER table.
+      // Structural row/col ops reach ANY nesting depth via the *ByPath WASM
+      // APIs (hop-list JSON, same grammar as getTableDimensionsByPath). On an
+      // older WASM without them, nested paths get a clear refusal instead of
+      // silently mutating the OUTER table. merge/split stay body-level only.
       async insertTableRow(params) {
-        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'insert_table_row');
-        let r;
-        try {
-          r = safeParse(getDoc().insertTableRow(sec, para, ctrl, params.after_row, true));
-        } catch (e) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-        refresh();
+        const r = structuralTableOp(params.path, 'insert_table_row',
+          (doc, sec, para, ctrl) => doc.insertTableRow(sec, para, ctrl, params.after_row, true),
+          (doc, sec, para, hopsJson) => doc.insertTableRowByPath(sec, para, hopsJson, params.after_row, true));
         return r;
       },
       async insertTableColumn(params) {
-        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'insert_table_column');
-        let r;
-        try {
-          r = safeParse(getDoc().insertTableColumn(sec, para, ctrl, params.after_col, true));
-        } catch (e) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-        refresh();
+        const r = structuralTableOp(params.path, 'insert_table_column',
+          (doc, sec, para, ctrl) => doc.insertTableColumn(sec, para, ctrl, params.after_col, true),
+          (doc, sec, para, hopsJson) => doc.insertTableColumnByPath(sec, para, hopsJson, params.after_col, true));
         return r;
       },
       async deleteTableRow(params) {
-        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'delete_table_row');
-        let r;
-        try {
-          r = safeParse(getDoc().deleteTableRow(sec, para, ctrl, params.row));
-        } catch (e) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-        refresh();
+        const r = structuralTableOp(params.path, 'delete_table_row',
+          (doc, sec, para, ctrl) => doc.deleteTableRow(sec, para, ctrl, params.row),
+          (doc, sec, para, hopsJson) => doc.deleteTableRowByPath(sec, para, hopsJson, params.row));
         return r;
       },
       async deleteTableColumn(params) {
-        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'delete_table_column');
-        let r;
-        try {
-          r = safeParse(getDoc().deleteTableColumn(sec, para, ctrl, params.col));
-        } catch (e) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-        refresh();
+        const r = structuralTableOp(params.path, 'delete_table_column',
+          (doc, sec, para, ctrl) => doc.deleteTableColumn(sec, para, ctrl, params.col),
+          (doc, sec, para, hopsJson) => doc.deleteTableColumnByPath(sec, para, hopsJson, params.col));
         return r;
       },
       async mergeTableCells(params) {
@@ -2045,6 +2086,8 @@
       // Rich content
       async insertFootnote(params) {
         const { sec, para } = pathToCoords(params.path);
+        const guard = guardLegacyInsertTrap(sec, para, 'insertFootnote');
+        if (guard) return guard;
         const doc = getDoc();
         doc.beginBatch();
         try {
@@ -2061,6 +2104,8 @@
       },
       async insertEquation(params) {
         const { sec, para } = pathToCoords(params.path);
+        const guard = guardLegacyInsertTrap(sec, para, 'insertEquation');
+        if (guard) return guard;
         const doc = getDoc();
         const colorInt = parseInt((params.color || '#000000').replace('#', ''), 16);
         const fontSize = (params.font_size || 12) * 100;
@@ -2178,9 +2223,9 @@
           const found = items.find(b => b.name === params.name);
           if (!found) return { ok: false, error: `bookmark not found: ${params.name}` };
           return safeParse(getDoc().deleteBookmark(
-            found.sectionIdx ?? found.sec ?? 0,
-            found.paraIdx ?? found.para ?? 0,
-            found.controlIdx ?? found.ctrl_idx ?? 0,
+            found.sec ?? found.sectionIdx ?? 0,
+            found.para ?? found.paraIdx ?? 0,
+            found.ctrlIdx ?? found.controlIdx ?? found.ctrl_idx ?? 0,
           ));
         } catch (e) { return { ok: false, error: e.message }; }
       },
@@ -2299,12 +2344,15 @@
           }
           if (budget <= 0) truncated = true;
         }
+        let pageCount = 0;
+        try { pageCount = doc.pageCount(); } catch {}
         return {
           paragraphs,
           body_tables: bodyTables,
           nested_tables: nestedTables,
           tables_total: bodyTables + nestedTables,
           cells_scanned: cellsScanned,
+          page_count: pageCount,
           truncated,
         };
       },

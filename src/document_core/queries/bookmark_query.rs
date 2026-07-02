@@ -81,12 +81,16 @@ impl DocumentCore {
         );
 
         // CTRL_DATA 레코드 생성 (ParameterSet: 책갈피 이름)
+        // HWPX 파싱 문단은 ctrl_data_records 가 비어 있으므로 None 패딩으로
+        // controls ↔ ctrl_data_records 정렬을 맞춘 뒤 삽입 (skip 하면 저장 시
+        // 책갈피 이름이 유실된다).
         let ctrl_data = build_bookmark_ctrl_data(name);
-        if paragraph.ctrl_data_records.len() >= insert_idx {
-            paragraph
-                .ctrl_data_records
-                .insert(insert_idx, Some(ctrl_data));
+        if paragraph.ctrl_data_records.len() < insert_idx {
+            paragraph.ctrl_data_records.resize(insert_idx, None);
         }
+        paragraph
+            .ctrl_data_records
+            .insert(insert_idx, Some(ctrl_data));
 
         // char_offsets에 컨트롤 위치 정보 추가
         if !paragraph.char_offsets.is_empty() {

@@ -139,6 +139,20 @@ pub(crate) fn find_control_text_positions(para: &Paragraph) -> Vec<usize> {
     para.control_text_positions()
 }
 
+/// controls[insert_idx] 삽입과 짝을 이루는 ctrl_data_records[insert_idx] 삽입.
+///
+/// HWPX 파서는 CTRL_DATA 레코드(HWP5 바이너리 개념)를 채우지 않으므로 컨트롤이
+/// 있어도 `ctrl_data_records` 가 빈 문단이 존재한다. 그대로 `Vec::insert` 하면
+/// insert_idx > len 에서 panic → WASM 'unreachable' trap 이 되므로 (form_19 빈
+/// 문단 각주/수식 삽입 사고), None 패딩으로 controls ↔ ctrl_data_records 인덱스
+/// 정렬을 유지한 뒤 삽입한다.
+pub(crate) fn insert_ctrl_data_record_aligned(para: &mut Paragraph, insert_idx: usize) {
+    if para.ctrl_data_records.len() < insert_idx {
+        para.ctrl_data_records.resize(insert_idx, None);
+    }
+    para.ctrl_data_records.insert(insert_idx, None);
+}
+
 /// 편집/커서 이동용 control position 을 반환한다.
 ///
 /// `find_control_text_positions()` 는 HWP/HWPX record stream 의 raw text position 을 보존한다.

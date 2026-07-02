@@ -2844,7 +2844,7 @@ impl DocumentCore {
             paragraph
                 .controls
                 .insert(insert_idx, Control::Shape(Box::new(shape_obj)));
-            paragraph.ctrl_data_records.insert(insert_idx, None);
+            crate::document_core::helpers::insert_ctrl_data_record_aligned(paragraph, insert_idx);
 
             // char_offsets에 raw offset 삽입
             if !paragraph.char_offsets.is_empty() {
@@ -3844,8 +3844,7 @@ impl DocumentCore {
             let ctrl_insert = insert_ci.min(para.controls.len());
             para.controls
                 .insert(ctrl_insert, Control::Shape(Box::new(group_obj)));
-            let cdr_insert = ctrl_insert.min(para.ctrl_data_records.len());
-            para.ctrl_data_records.insert(cdr_insert, None);
+            crate::document_core::helpers::insert_ctrl_data_record_aligned(para, ctrl_insert);
 
             // char_offsets: 텍스트 문자 매핑이므로 컨트롤 인덱스와 무관
             // 기존 char_offsets에서 마지막 gap 위치 다음에 8바이트 추가
@@ -4034,7 +4033,7 @@ impl DocumentCore {
             // 문단에 삽입
             para.controls
                 .insert(insert_idx, Control::Shape(Box::new(child)));
-            para.ctrl_data_records.insert(insert_idx, None);
+            crate::document_core::helpers::insert_ctrl_data_record_aligned(para, insert_idx);
             para.char_count += 8;
             para.control_mask |= 0x00000800;
             para.has_para_text = true;
@@ -4631,7 +4630,7 @@ impl DocumentCore {
         paragraph
             .controls
             .insert(insert_idx, Control::Footnote(Box::new(footnote)));
-        paragraph.ctrl_data_records.insert(insert_idx, None);
+        crate::document_core::helpers::insert_ctrl_data_record_aligned(paragraph, insert_idx);
 
         // char_offsets 조정: char_offset 위치에 8바이트 갭 생성
         // char_offsets[i]는 텍스트 i번째 문자의 UTF-16 오프셋 (컨트롤은 갭으로 표현)
@@ -4792,7 +4791,7 @@ impl DocumentCore {
         paragraph
             .controls
             .insert(insert_idx, Control::Equation(Box::new(equation)));
-        paragraph.ctrl_data_records.insert(insert_idx, None);
+        crate::document_core::helpers::insert_ctrl_data_record_aligned(paragraph, insert_idx);
 
         if !paragraph.char_offsets.is_empty() {
             let text_len = paragraph.text.chars().count();
@@ -5028,7 +5027,7 @@ impl crate::document_core::DocumentCore {
         paragraph
             .controls
             .insert(insert_idx, Control::NewNumber(new_number));
-        paragraph.ctrl_data_records.insert(insert_idx, None);
+        crate::document_core::helpers::insert_ctrl_data_record_aligned(paragraph, insert_idx);
 
         if !paragraph.char_offsets.is_empty() {
             let text_len = paragraph.text.chars().count();

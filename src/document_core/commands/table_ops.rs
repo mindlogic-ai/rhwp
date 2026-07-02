@@ -161,6 +161,189 @@ impl DocumentCore {
         )))
     }
 
+    /// hop-list 경로로 (중첩) 표에 대한 가변 참조를 얻는다.
+    ///
+    /// `parse_cell_path` 가 파싱하는 hop-list JSON
+    /// `[{"controlIndex":N,"cellIndex":N,"cellParaIndex":N}, ...]` 과 동일한
+    /// 의미 체계 — `resolve_table_by_path` (cursor_nav.rs) 의 가변 미러.
+    /// 마지막 hop 의 controlIndex 가 대상 표, 중간 hop 은 표(cellIndex 는 flat
+    /// 셀 인덱스) 또는 글상자(Shape, cellParaIndex 만 사용) 를 통과한다.
+    pub(crate) fn resolve_table_by_path_mut(
+        &mut self,
+        sec: usize,
+        parent_para: usize,
+        path: &[(usize, usize, usize)],
+    ) -> Result<&mut crate::model::table::Table, HwpError> {
+        if path.is_empty() {
+            return Err(HwpError::RenderError("경로가 비어있습니다".to_string()));
+        }
+        let paragraphs = &mut self
+            .document
+            .sections
+            .get_mut(sec)
+            .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", sec)))?
+            .paragraphs;
+
+        fn descend<'a>(
+            paragraphs: &'a mut [crate::model::paragraph::Paragraph],
+            para_idx: usize,
+            path: &[(usize, usize, usize)],
+            depth: usize,
+        ) -> Result<&'a mut crate::model::table::Table, HwpError> {
+            let para = paragraphs
+                .get_mut(para_idx)
+                .ok_or_else(|| HwpError::RenderError(format!("문단 {} 범위 초과", para_idx)))?;
+            let &(ctrl_idx, cell_idx, cell_para_idx) = &path[0];
+            let ctrl = para.controls.get_mut(ctrl_idx).ok_or_else(|| {
+                HwpError::RenderError(format!(
+                    "경로[{}]: controls[{}] 범위 초과",
+                    depth, ctrl_idx
+                ))
+            })?;
+
+            if path.len() == 1 {
+                return match ctrl {
+                    Control::Table(t) => Ok(t),
+                    _ => Err(HwpError::RenderError(format!(
+                        "경로[{}]: controls[{}]가 표가 아닙니다",
+                        depth, ctrl_idx
+                    ))),
+                };
+            }
+
+            match ctrl {
+                Control::Table(table) => {
+                    let cell_count = table.cells.len();
+                    let cell = table.cells.get_mut(cell_idx).ok_or_else(|| {
+                        HwpError::RenderError(format!(
+                            "경로[{}]: 셀 {} 범위 초과 (총 {}개)",
+                            depth, cell_idx, cell_count
+                        ))
+                    })?;
+                    descend(&mut cell.paragraphs, cell_para_idx, &path[1..], depth + 1)
+                }
+                Control::Shape(shape) => {
+                    let inner = shape
+                        .drawing_mut()
+                        .and_then(|d| d.text_box.as_mut())
+                        .map(|tb| &mut tb.paragraphs)
+                        .ok_or_else(|| {
+                            HwpError::RenderError(format!(
+                                "경로[{}]: controls[{}] Shape 에 텍스트박스가 없습니다",
+                                depth, ctrl_idx
+                            ))
+                        })?;
+                    descend(inner, cell_para_idx, &path[1..], depth + 1)
+                }
+                _ => Err(HwpError::RenderError(format!(
+                    "경로[{}]: controls[{}]가 표/글상자가 아닙니다",
+                    depth, ctrl_idx
+                ))),
+            }
+        }
+
+        descend(paragraphs, parent_para, path, 0)
+    }
+
+    /// hop-list 경로 기반 구조 변경 공통부: 표를 찾아 mutate 하고 재조판한다.
+    fn mutate_table_by_path(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path_json: &str,
+        mutate: impl FnOnce(&mut crate::model::table::Table) -> Result<(), String>,
+        event: impl FnOnce(usize, usize, usize) -> DocumentEvent,
+    ) -> Result<String, HwpError> {
+        let path = Self::parse_cell_path(path_json)?;
+        let first_ctrl = path.first().map(|h| h.0).unwrap_or(0);
+        let table = self.resolve_table_by_path_mut(section_idx, parent_para_idx, &path)?;
+        mutate(table).map_err(HwpError::RenderError)?;
+        table.dirty = true;
+        let row_count = table.row_count;
+        let col_count = table.col_count;
+
+        self.document.sections[section_idx].raw_stream = None;
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+
+        self.event_log
+            .push(event(section_idx, parent_para_idx, first_ctrl));
+        Ok(super::super::helpers::json_ok_with(&format!(
+            "\"rowCount\":{},\"colCount\":{}",
+            row_count, col_count
+        )))
+    }
+
+    /// hop-list 경로의 (중첩) 표에 행을 삽입한다 (네이티브).
+    pub fn insert_table_row_by_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path_json: &str,
+        row_idx: u16,
+        below: bool,
+    ) -> Result<String, HwpError> {
+        self.mutate_table_by_path(
+            section_idx,
+            parent_para_idx,
+            path_json,
+            |t| t.insert_row(row_idx, below),
+            |section, para, ctrl| DocumentEvent::TableRowInserted { section, para, ctrl },
+        )
+    }
+
+    /// hop-list 경로의 (중첩) 표에 열을 삽입한다 (네이티브).
+    pub fn insert_table_column_by_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path_json: &str,
+        col_idx: u16,
+        right: bool,
+    ) -> Result<String, HwpError> {
+        self.mutate_table_by_path(
+            section_idx,
+            parent_para_idx,
+            path_json,
+            |t| t.insert_column(col_idx, right),
+            |section, para, ctrl| DocumentEvent::TableColumnInserted { section, para, ctrl },
+        )
+    }
+
+    /// hop-list 경로의 (중첩) 표에서 행을 삭제한다 (네이티브).
+    pub fn delete_table_row_by_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path_json: &str,
+        row_idx: u16,
+    ) -> Result<String, HwpError> {
+        self.mutate_table_by_path(
+            section_idx,
+            parent_para_idx,
+            path_json,
+            |t| t.delete_row(row_idx),
+            |section, para, ctrl| DocumentEvent::TableRowDeleted { section, para, ctrl },
+        )
+    }
+
+    /// hop-list 경로의 (중첩) 표에서 열을 삭제한다 (네이티브).
+    pub fn delete_table_column_by_path_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path_json: &str,
+        col_idx: u16,
+    ) -> Result<String, HwpError> {
+        self.mutate_table_by_path(
+            section_idx,
+            parent_para_idx,
+            path_json,
+            |t| t.delete_column(col_idx),
+            |section, para, ctrl| DocumentEvent::TableColumnDeleted { section, para, ctrl },
+        )
+    }
+
     /// 표 셀을 병합한다 (네이티브).
     pub fn merge_table_cells_native(
         &mut self,
