@@ -112,6 +112,137 @@
       }
       return doc.insertTextInCell(sec, para, ctrl, cellIdx, cellPara, start, text);
     }
+    // ── Nested-table addressing ─────────────────────────────────────────
+    // Path grammar (extends the body-table form):
+    //   body table:    s{sec}:p{para}[:c{ctrl}]
+    //   nested table:  <table path>:cell({row},{col}):p{cellPara}[:c{ctrl}]
+    //                  — repeatable for tables inside cells of nested tables.
+    // The WASM's *ByPath APIs address nested content with a JSON hop list
+    // [{controlIndex, cellIndex, cellParaIndex}, …]: each hop descends one
+    // table control → cell → cell paragraph. The LAST hop's controlIndex is
+    // the target table; its cellIndex/cellParaIndex address a cell inside it
+    // for cell-scoped calls and are ignored by table-scoped ones (dims,
+    // bboxes). A tableRef normalizes both forms: {sec, para, ctrl, hops[]},
+    // hops always non-empty with the last hop's cell fields zeroed.
+    function resolveTablePath(path) {
+      const m = /^s(\d+):p(\d+)((?::.*)?)$/.exec(path);
+      if (!m) throw new Error(`bad path: ${path}`);
+      const sec = +m[1], para = +m[2];
+      let rest = m[3] || '';
+      let ctrl = 0;
+      const cm = /^:c(\d+)(?=$|:)/.exec(rest);
+      if (cm) { ctrl = +cm[1]; rest = rest.slice(cm[0].length); }
+      const hops = [{ controlIndex: ctrl, cellIndex: 0, cellParaIndex: 0 }];
+      const segRe = /^:cell\((\d+),(\d+)\):p(\d+)(?::c(\d+)(?=$|:))?/;
+      while (rest.length) {
+        const sm = segRe.exec(rest);
+        if (!sm) throw new Error(`bad nested path segment ${JSON.stringify(rest)} in ${path}`);
+        const row = +sm[1], col = +sm[2], cellPara = +sm[3];
+        const nextCtrl = sm[4] !== undefined ? +sm[4] : 0;
+        const cur = hops[hops.length - 1];
+        cur.cellIndex = resolveCellIdxAt({ sec, para, hops }, row, col);
+        cur.cellParaIndex = cellPara;
+        hops.push({ controlIndex: nextCtrl, cellIndex: 0, cellParaIndex: 0 });
+        rest = rest.slice(sm[0].length);
+      }
+      return { sec, para, ctrl, hops, nested: hops.length > 1, path };
+    }
+    function tableDimsAt(ref) {
+      const doc = getDoc();
+      if (ref.hops.length === 1) return JSON.parse(doc.getTableDimensions(ref.sec, ref.para, ref.hops[0].controlIndex));
+      if (typeof doc.getTableDimensionsByPath !== 'function') throw new Error('nested tables need a newer WASM (getTableDimensionsByPath missing)');
+      return JSON.parse(doc.getTableDimensionsByPath(ref.sec, ref.para, JSON.stringify(ref.hops)));
+    }
+    function tryTableDimsAt(ref) { try { return tableDimsAt(ref); } catch { return null; } }
+    function tableBboxesAt(ref) {
+      const doc = getDoc();
+      if (ref.hops.length === 1) return JSON.parse(doc.getTableCellBboxes(ref.sec, ref.para, ref.hops[0].controlIndex)) || [];
+      if (typeof doc.getTableCellBboxesByPath !== 'function') throw new Error('nested tables need a newer WASM (getTableCellBboxesByPath missing)');
+      return JSON.parse(doc.getTableCellBboxesByPath(ref.sec, ref.para, JSON.stringify(ref.hops))) || [];
+    }
+    // Cell-scoped hop list: the ref's hops with the final hop pointed at
+    // (cellIdx, cellPara). This is the pathJson every *InCellByPath call takes.
+    function cellPathJsonAt(ref, cellIdx, cellPara = 0) {
+      const hops = ref.hops.map((h) => ({ ...h }));
+      const last = hops[hops.length - 1];
+      last.cellIndex = cellIdx;
+      last.cellParaIndex = cellPara;
+      return JSON.stringify(hops);
+    }
+    // Visual (row, col) → physical cellIdx, merge-aware, at any nesting level.
+    function resolveCellIdxAt(ref, row, col) {
+      let bboxes = [];
+      try { bboxes = tableBboxesAt(ref); } catch {}
+      const anchor = bboxes.find((b) => b.row === row && b.col === col);
+      if (anchor) return anchor.cellIdx;
+      const enclosing = bboxes.find((b) =>
+        b.row <= row && row < b.row + b.rowSpan &&
+        b.col <= col && col < b.col + b.colSpan
+      );
+      if (enclosing) return enclosing.cellIdx;
+      let colCount = 1;
+      const dims = tryTableDimsAt(ref);
+      if (dims && dims.colCount) colCount = dims.colCount;
+      return row * colCount + col;
+    }
+    function cellParagraphCountAt(ref, cellIdx) {
+      const doc = getDoc();
+      if (typeof doc.getCellParagraphCountByPath === 'function') {
+        return doc.getCellParagraphCountByPath(ref.sec, ref.para, cellPathJsonAt(ref, cellIdx, 0)) || 1;
+      }
+      if (ref.hops.length === 1) return doc.getCellParagraphCount(ref.sec, ref.para, ref.hops[0].controlIndex, cellIdx) || 1;
+      throw new Error('nested tables need a newer WASM (getCellParagraphCountByPath missing)');
+    }
+    function cellTextAt(ref, cellIdx, cellPara, start, count) {
+      const doc = getDoc();
+      if (typeof doc.getTextInCellByPath === 'function') {
+        return doc.getTextInCellByPath(ref.sec, ref.para, cellPathJsonAt(ref, cellIdx, cellPara), start, count);
+      }
+      if (ref.hops.length === 1) return doc.getTextInCell(ref.sec, ref.para, ref.hops[0].controlIndex, cellIdx, cellPara, start, count);
+      throw new Error('nested tables need a newer WASM (getTextInCellByPath missing)');
+    }
+    // Probe one cell for nested table controls. The WASM has no direct
+    // "controls in cell" enumerator; the only signal is that
+    // getTableDimensionsByPath succeeds for a hop that points at a control
+    // hosting a table and throws (범위 초과) otherwise. Bounded: paraCap
+    // paragraphs × ctrl 0..2 probes.
+    function scanCellNestedTables(ref, cellIdx, paraCap = 12) {
+      const doc = getDoc();
+      if (typeof doc.getTableDimensionsByPath !== 'function') return [];
+      let nParas = 1;
+      try { nParas = cellParagraphCountAt(ref, cellIdx); } catch {}
+      const found = [];
+      for (let cp = 0; cp < Math.min(nParas, paraCap); cp++) {
+        for (let k = 0; k < 3; k++) {
+          const hops = JSON.parse(cellPathJsonAt(ref, cellIdx, cp));
+          hops.push({ controlIndex: k, cellIndex: 0, cellParaIndex: 0 });
+          try {
+            const d = JSON.parse(doc.getTableDimensionsByPath(ref.sec, ref.para, JSON.stringify(hops)));
+            if (d && d.rowCount) found.push({ cell_para: cp, ctrl: k, rows: d.rowCount, cols: d.colCount });
+          } catch { /* no table control at (cp, k) */ }
+        }
+      }
+      return found;
+    }
+    // Agent-facing path for a table nested in (row, col) of the table at
+    // basePath: `${basePath}:cell(r,c):p{cellPara}:c{ctrl}`.
+    function nestedTablePath(basePath, row, col, cellPara, ctrl) {
+      return `${basePath}:cell(${row},${col}):p${cellPara}:c${ctrl || 0}`;
+    }
+    // For ops whose WASM API is body-level only: accept legacy paths, refuse
+    // nested ones with a message the agent can act on.
+    function bodyTableCoordsOrThrow(path, opName) {
+      const ref = resolveTablePath(path);
+      if (ref.nested) {
+        throw new Error(
+          `${opName} cannot target a NESTED table yet (${path}) — the engine's ` +
+          'row/column APIs only reach body-level tables. Cell text edits work via ' +
+          'set_cell_text with this nested path; tell the user structural changes to ' +
+          'this inner table are not supported yet instead of rewriting the outer cell.'
+        );
+      }
+      return { sec: ref.sec, para: ref.para, ctrl: ref.hops[0].controlIndex };
+    }
     // Read a cell's FULL text across ALL its paragraphs, joined with "\n".
     // A cell often holds several paragraphs (e.g. an address cell has a
     // 제출주소 line + a 사업담당자 line). Reading only cell paragraph 0 — as the
@@ -128,6 +259,25 @@
       for (let p = 0; p < n; p++) {
         let t = '';
         try { t = getCellTextCompat(doc, sec, para, ctrl, cellIdx, p, 0, 9999) || ''; } catch {}
+        parts.push(t);
+        total += t.length;
+        if (total >= limit) break;
+      }
+      let joined = parts.join('\n');
+      if (joined.length > limit) joined = joined.slice(0, limit) + '…';
+      return joined;
+    }
+    // tableRef-aware sibling of readCellAllParas — same join convention,
+    // works at any nesting depth via the *ByPath APIs.
+    function readCellAllParasAt(ref, cellIdx, cap) {
+      const limit = cap || 2000;
+      let n = 1;
+      try { n = cellParagraphCountAt(ref, cellIdx); } catch {}
+      const parts = [];
+      let total = 0;
+      for (let p = 0; p < n; p++) {
+        let t = '';
+        try { t = cellTextAt(ref, cellIdx, p, 0, 9999) || ''; } catch {}
         parts.push(t);
         total += t.length;
         if (total >= limit) break;
@@ -646,9 +796,10 @@
         return { scope, text: lines.join('\n'), char_count: charCount };
       },
       async getTable(params) {
-        const { sec, para, ctrl } = pathToCoords(params.path);
+        const ref = resolveTablePath(params.path);
+        const { sec, para, ctrl } = ref;
         const doc = getDoc();
-        const dims = tryGetTableDims(sec, para, ctrl);
+        const dims = tryTableDimsAt(ref);
         if (!dims) throw new Error(`no table at ${params.path}`);
         // Merge-aware layout: getTableCellBboxes returns the real cellIdx
         // for each (row, col) anchor along with rowSpan/colSpan. The naive
@@ -657,30 +808,64 @@
         // caused the agent to write to the wrong visual column. Fall back
         // to the flat formula if the bbox API is unavailable.
         let bboxes = [];
-        try { bboxes = JSON.parse(doc.getTableCellBboxes(sec, para, ctrl)) || []; } catch {}
+        try { bboxes = tableBboxesAt(ref); } catch {}
+        // Nested-table probe budget for the whole call — 27-cell forms use
+        // ~250 probes; the cap only bites on pathological 100+-cell tables,
+        // where we set nested_scan_truncated instead of stalling the UI.
+        let probeBudget = 900;
+        const scanCell = (cellIdx) => {
+          if (probeBudget <= 0) return null;
+          let nParas = 1;
+          try { nParas = cellParagraphCountAt(ref, cellIdx); } catch {}
+          probeBudget -= Math.min(nParas, 12) * 3;
+          try { return scanCellNestedTables(ref, cellIdx); } catch { return []; }
+        };
         if (bboxes.length > 0) {
           const cells = bboxes.map(b => {
             // Full multi-paragraph cell text. Newlines kept literal here —
             // this is structured JSON, so the agent can see exactly where the
             // cell's line breaks are (one "\n" per cell paragraph).
-            const text = readCellAllParas(doc, sec, para, ctrl, b.cellIdx, 2000).trim();
-            return {
+            const text = readCellAllParasAt(ref, b.cellIdx, 2000).trim();
+            const entry = {
               row: b.row, col: b.col,
               row_span: b.rowSpan, col_span: b.colSpan,
               cell_idx: b.cellIdx,
               text,
               lines: text === '' ? 0 : text.split('\n').length,
             };
+            // Tables nested INSIDE this cell are invisible in the text
+            // (their host paragraphs read as "") — surface them explicitly
+            // so the agent can address them and never overwrites them
+            // blind (the form_19 postmortem: setCellText silently deleted
+            // two data tables the read path never showed).
+            const nested = scanCell(b.cellIdx);
+            if (nested === null) entry.nested_scan_skipped = true;
+            else if (nested.length > 0) {
+              entry.nested_tables = nested.map(n => ({
+                path: nestedTablePath(params.path, b.row, b.col, n.cell_para, n.ctrl),
+                rows: n.rows,
+                cols: n.cols,
+              }));
+            }
+            return entry;
           });
           // Sort row-major so the agent reads top-to-bottom, left-to-right.
           cells.sort((a, b) => a.row - b.row || a.col - b.col);
-          return {
+          const out = {
             path: params.path,
             rows: dims.rowCount,
             cols: dims.colCount,
             merged: cells.some(c => c.row_span > 1 || c.col_span > 1),
             cells,
           };
+          if (probeBudget <= 0) out.nested_scan_truncated = true;
+          if (cells.some(c => c.nested_tables)) {
+            out.has_nested_tables = true;
+            out.nested_note = 'some cells contain nested tables (see nested_tables[].path) — ' +
+              'read/edit them via get_table / set_cell_text with that path; ' +
+              'set_cell_text on the OUTER cell would destroy them.';
+          }
+          return out;
         }
         // Fallback (no bbox API): old flat-grid behaviour.
         const cells = [];
@@ -688,7 +873,7 @@
           const row = [];
           for (let c = 0; c < dims.colCount; c++) {
             const cellIdx = r * dims.colCount + c;
-            try { row.push(readCellAllParas(doc, sec, para, ctrl, cellIdx, 2000)); }
+            try { row.push(readCellAllParasAt(ref, cellIdx, 2000)); }
             catch { row.push(''); }
           }
           cells.push(row);
@@ -1434,16 +1619,66 @@
 
       // Tables
       async setCellText(params) {
-        const { sec, para, ctrl } = pathToCoords(params.path);
+        const ref = resolveTablePath(params.path);
+        const { sec, para } = ref;
+        const ctrl = ref.hops[ref.hops.length - 1].controlIndex;
         let { row, col, text, col_count } = params;
         const doc = getDoc();
         if (col_count === undefined || col_count === null) {
-          const dims = tryGetTableDims(sec, para, ctrl);
+          const dims = tryTableDimsAt(ref);
           col_count = dims?.colCount;
           if (!col_count) throw new Error(`no table at ${params.path}`);
         }
-        const cellIdx = resolveCellIdx(sec, para, ctrl, row, col, col_count);
+        const cellIdx = resolveCellIdxAt(ref, row, col);
         text = text || '';
+        // GUARDRAIL: a cell can host nested tables that the text read path
+        // does not show (their host paragraphs read as ""). Collapsing the
+        // cell would silently delete them AND their data — and the text
+        // read-back below would still report verified=true (the form_19
+        // postmortem). Refuse unless the caller explicitly forces.
+        if (params.force !== true) {
+          const nested = scanCellNestedTables(ref, cellIdx);
+          if (nested.length > 0) {
+            return {
+              ok: false,
+              error: 'cell_contains_nested_tables',
+              nested_tables: nested.map(n => ({
+                path: nestedTablePath(params.path, row, col, n.cell_para, n.ctrl),
+                rows: n.rows,
+                cols: n.cols,
+              })),
+              hint: 'This cell hosts nested table(s) that a full-cell rewrite would DELETE. ' +
+                'To edit a nested table cell, call set_cell_text with the nested table path ' +
+                'above. To really replace the whole cell including its tables, pass force=true.',
+            };
+          }
+        }
+        // Per-cell hop json for the *InCellByPath calls at this paragraph.
+        const cp = (cellPara) => cellPathJsonAt(ref, cellIdx, cellPara);
+        const byPath = typeof doc.insertTextInCellByPath === 'function';
+        if (ref.nested && !byPath) throw new Error('nested tables need a newer WASM (insertTextInCellByPath missing)');
+        const delText = (p, start, count) => byPath
+          ? doc.deleteTextInCellByPath(sec, para, cp(p), start, count)
+          : doc.deleteTextInCell(sec, para, ctrl, cellIdx, p, start, count);
+        const insText = (p, start, t) => byPath
+          ? doc.insertTextInCellByPath(sec, para, cp(p), start, t)
+          : doc.insertTextInCell(sec, para, ctrl, cellIdx, p, start, t);
+        const getText = (p) => {
+          try {
+            return byPath
+              ? (doc.getTextInCellByPath(sec, para, cp(p), 0, 9999) || '')
+              : (doc.getTextInCell(sec, para, ctrl, cellIdx, p, 0, 9999) || '');
+          } catch { return ''; }
+        };
+        const paraCount = () => { try { return cellParagraphCountAt(ref, cellIdx); } catch { return 1; } };
+        const mergePara = (p) => {
+          if (typeof doc.mergeParagraphInCellByPath === 'function') return doc.mergeParagraphInCellByPath(sec, para, cp(p));
+          if (!ref.nested) return doc.mergeParagraphInCell(sec, para, ctrl, cellIdx, p);
+        };
+        const splitPara = (p, at) => {
+          if (typeof doc.splitParagraphInCellByPath === 'function') return doc.splitParagraphInCellByPath(sec, para, cp(p), at);
+          return doc.splitParagraphInCell(sec, para, ctrl, cellIdx, p, at);
+        };
         // An HWP cell holds MULTIPLE paragraphs. A literal "\n" stuffed into a
         // single cell paragraph is NOT a line break — the renderer's width
         // reflow ignores it, so the text runs off the page edge. So split on
@@ -1455,23 +1690,23 @@
           // 1) Collapse the cell to a single empty paragraph — handles re-writes
           //    of cells that already hold several paragraphs (clear each, then
           //    merge the extras down into paragraph 0).
-          let pcount = 1;
-          try { pcount = doc.getCellParagraphCount(sec, para, ctrl, cellIdx) || 1; } catch {}
+          const pcount = paraCount();
           for (let p = pcount - 1; p >= 0; p--) {
-            let len = 0;
-            try { len = (getCellTextCompat(doc, sec, para, ctrl, cellIdx, p, 0, 9999) || '').length; } catch {}
-            if (len > 0) deleteCellTextCompat(doc, sec, para, ctrl, cellIdx, p, 0, len);
-            if (p > 0) { try { doc.mergeParagraphInCell(sec, para, ctrl, cellIdx, p); } catch {} }
+            const len = getText(p).length;
+            if (len > 0) delText(p, 0, len);
+            if (p > 0) { try { mergePara(p); } catch {} }
           }
           // 2) Write each line as its own cell paragraph.
-          insertCellTextCompat(doc, sec, para, ctrl, cellIdx, 0, 0, segments[0]);
+          insText(0, 0, segments[0]);
           for (let i = 1; i < segments.length; i++) {
             const prev = i - 1;
             let len = 0;
-            try { len = doc.getCellParagraphLength(sec, para, ctrl, cellIdx, prev); }
-            catch { len = (getCellTextCompat(doc, sec, para, ctrl, cellIdx, prev, 0, 9999) || '').length; }
-            doc.splitParagraphInCell(sec, para, ctrl, cellIdx, prev, len);
-            if (segments[i]) insertCellTextCompat(doc, sec, para, ctrl, cellIdx, i, 0, segments[i]);
+            try { len = doc.getCellParagraphLength && !ref.nested
+              ? doc.getCellParagraphLength(sec, para, ctrl, cellIdx, prev)
+              : getText(prev).length; }
+            catch { len = getText(prev).length; }
+            splitPara(prev, len);
+            if (segments[i]) insText(i, 0, segments[i]);
           }
           // 3) Normalize justify → left on the written paragraphs. Korean form
           //    cells default to 양쪽정렬(justify); justify is visually identical
@@ -1479,7 +1714,10 @@
           //    spreads the words edge-to-edge (the ugly gaps in a narrow cell).
           //    So downgrade justify/distribute to left — never worse, fixes the
           //    wrap case. center/right are intentional and left untouched.
-          if (typeof doc.applyParaFormatInCell === 'function' &&
+          //    (Body-level tables only — the *InCell format APIs have no
+          //    ByPath variants yet, so nested writes keep the template align.)
+          if (!ref.nested &&
+              typeof doc.applyParaFormatInCell === 'function' &&
               typeof doc.getCellParaPropertiesAt === 'function') {
             for (let i = 0; i < segments.length; i++) {
               try {
@@ -1499,9 +1737,9 @@
           // the resulting cell paragraph count (1 for single-line text).
           let verified = null, lines = null;
           try {
-            const n = doc.getCellParagraphCount(sec, para, ctrl, cellIdx) || 1;
+            const n = paraCount();
             const got = [];
-            for (let p = 0; p < n; p++) got.push(getCellTextCompat(doc, sec, para, ctrl, cellIdx, p, 0, 9999) || '');
+            for (let p = 0; p < n; p++) got.push(getText(p));
             lines = got.length;
             verified = got.join('\n') === text;
           } catch {}
@@ -1570,6 +1808,16 @@
               skippedNonEmpty += 1;
               continue;
             }
+            // A cell whose TEXT reads empty can still host nested tables
+            // (their anchor paragraphs have no text). Filling it would
+            // collapse the cell and delete them — skip like non-empty.
+            try {
+              const fillRef = { sec, para, ctrl, hops: [{ controlIndex: ctrl, cellIndex: 0, cellParaIndex: 0 }], nested: false };
+              if (scanCellNestedTables(fillRef, a.cellIdx).length > 0) {
+                skippedNonEmpty += 1;
+                continue;
+              }
+            } catch {}
 
             try {
               let pcount = 1;
@@ -1706,8 +1954,11 @@
           return { ok: true, applied_to: { row, col }, before, after, changed, verified };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
+      // Structural table ops (row/col insert/delete, merge/split) only have
+      // body-level WASM APIs today — no *ByPath variants. A nested path here
+      // gets a clear refusal instead of silently mutating the OUTER table.
       async insertTableRow(params) {
-        const { sec, para, ctrl } = pathToCoords(params.path);
+        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'insert_table_row');
         let r;
         try {
           r = safeParse(getDoc().insertTableRow(sec, para, ctrl, params.after_row, true));
@@ -1718,7 +1969,7 @@
         return r;
       },
       async insertTableColumn(params) {
-        const { sec, para, ctrl } = pathToCoords(params.path);
+        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'insert_table_column');
         let r;
         try {
           r = safeParse(getDoc().insertTableColumn(sec, para, ctrl, params.after_col, true));
@@ -1729,7 +1980,7 @@
         return r;
       },
       async deleteTableRow(params) {
-        const { sec, para, ctrl } = pathToCoords(params.path);
+        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'delete_table_row');
         let r;
         try {
           r = safeParse(getDoc().deleteTableRow(sec, para, ctrl, params.row));
@@ -1740,7 +1991,7 @@
         return r;
       },
       async deleteTableColumn(params) {
-        const { sec, para, ctrl } = pathToCoords(params.path);
+        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'delete_table_column');
         let r;
         try {
           r = safeParse(getDoc().deleteTableColumn(sec, para, ctrl, params.col));
@@ -1751,14 +2002,14 @@
         return r;
       },
       async mergeTableCells(params) {
-        const { sec, para, ctrl } = pathToCoords(params.path);
+        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'merge_table_cells');
         const r = safeParse(getDoc().mergeTableCells(sec, para, ctrl,
           params.start_row, params.start_col, params.end_row, params.end_col));
         refresh();
         return r;
       },
       async splitTableCell(params) {
-        const { sec, para, ctrl } = pathToCoords(params.path);
+        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'split_table_cell');
         const r = safeParse(getDoc().splitTableCell(sec, para, ctrl, params.row, params.col));
         refresh();
         return r;
@@ -2008,6 +2259,54 @@
       async convertToEditable() {
         try { return safeParse(getDoc().convertToEditable()); }
         catch (e) { return { ok: false, error: e.message }; }
+      },
+      // Cheap structural census for the BE's per-turn content-loss gate:
+      // if tables (body or nested) vanish across a turn without an explicit
+      // delete op, the turn destroyed content it couldn't see. Bounded by a
+      // probe budget so 200-page docs return a truncated (but comparable —
+      // same budget both sides of the turn) count instead of stalling.
+      async getDocStats() {
+        const doc = getDoc();
+        const sections = doc.getSectionCount();
+        let paragraphs = 0, bodyTables = 0, nestedTables = 0, cellsScanned = 0;
+        let budget = 3000;
+        let truncated = false;
+        for (let s = 0; s < sections; s++) {
+          const pCount = doc.getParagraphCount(s);
+          paragraphs += pCount;
+          for (let p = 0; p < pCount; p++) {
+            if (budget <= 0) { truncated = true; break; }
+            for (let ctrl = 0; ctrl < 6; ctrl++) {
+              budget -= 1;
+              const dims = tryGetTableDims(s, p, ctrl);
+              if (!dims) continue;
+              bodyTables += 1;
+              const ref = { sec: s, para: p, ctrl, hops: [{ controlIndex: ctrl, cellIndex: 0, cellParaIndex: 0 }], nested: false };
+              let bboxes = [];
+              try { bboxes = tableBboxesAt(ref); } catch {}
+              const cellIdxs = bboxes.length
+                ? bboxes.map(b => b.cellIdx)
+                : Array.from({ length: Math.min(dims.cellCount || dims.rowCount * dims.colCount, 200) }, (_, i) => i);
+              for (const cellIdx of cellIdxs) {
+                if (budget <= 0) { truncated = true; break; }
+                cellsScanned += 1;
+                let hits = [];
+                try { hits = scanCellNestedTables(ref, cellIdx); } catch {}
+                budget -= 3;
+                nestedTables += hits.length;
+              }
+            }
+          }
+          if (budget <= 0) truncated = true;
+        }
+        return {
+          paragraphs,
+          body_tables: bodyTables,
+          nested_tables: nestedTables,
+          tables_total: bodyTables + nestedTables,
+          cells_scanned: cellsScanned,
+          truncated,
+        };
       },
     };
 
