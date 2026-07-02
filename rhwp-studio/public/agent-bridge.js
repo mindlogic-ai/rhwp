@@ -1508,6 +1508,121 @@
           return { ok: true, verified, lines };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
+      async fillEmptyTableCells(params) {
+        const { sec, para, ctrl } = pathToCoords(params.path);
+        const doc = getDoc();
+        const dims = tryGetTableDims(sec, para, ctrl);
+        if (!dims) throw new Error(`no table at ${params.path}`);
+
+        const rowStart = Math.max(0, params.row_start ?? 0);
+        const rowEnd = params.row_end == null || params.row_end < 0
+          ? dims.rowCount - 1
+          : Math.min(params.row_end, dims.rowCount - 1);
+        const colStart = Math.max(0, params.col_start ?? 0);
+        const colEnd = params.col_end == null || params.col_end < 0
+          ? dims.colCount - 1
+          : Math.min(params.col_end, dims.colCount - 1);
+        const maxCells = params.max_cells ?? 500;
+        const text = params.text || '';
+        const segments = text.split('\n');
+
+        let anchors = [];
+        try {
+          const bboxes = JSON.parse(doc.getTableCellBboxes(sec, para, ctrl)) || [];
+          anchors = bboxes.map(b => ({
+            row: b.row,
+            col: b.col,
+            cellIdx: b.cellIdx,
+            row_span: b.rowSpan,
+            col_span: b.colSpan,
+          }));
+        } catch {}
+        if (anchors.length === 0) {
+          for (let r = 0; r < dims.rowCount; r++) {
+            for (let c = 0; c < dims.colCount; c++) {
+              anchors.push({ row: r, col: c, cellIdx: r * dims.colCount + c, row_span: 1, col_span: 1 });
+            }
+          }
+        }
+        anchors = anchors
+          .filter(a => a.row >= rowStart && a.row <= rowEnd && a.col >= colStart && a.col <= colEnd)
+          .sort((a, b) => a.row - b.row || a.col - b.col);
+
+        const failures = [];
+        const filledCells = [];
+        let scanned = 0;
+        let skippedNonEmpty = 0;
+        let truncated = false;
+
+        doc.beginBatch();
+        try {
+          for (const a of anchors) {
+            scanned += 1;
+            if (filledCells.length >= maxCells) { truncated = true; break; }
+            let existing = '';
+            try {
+              existing = readCellAllParas(doc, sec, para, ctrl, a.cellIdx, 9999).trim();
+            } catch (e) {
+              failures.push({ row: a.row, col: a.col, error: e?.message || String(e) });
+              continue;
+            }
+            if (existing !== '') {
+              skippedNonEmpty += 1;
+              continue;
+            }
+
+            try {
+              let pcount = 1;
+              try { pcount = doc.getCellParagraphCount(sec, para, ctrl, a.cellIdx) || 1; } catch {}
+              for (let p = pcount - 1; p >= 0; p--) {
+                let len = 0;
+                try { len = (getCellTextCompat(doc, sec, para, ctrl, a.cellIdx, p, 0, 9999) || '').length; } catch {}
+                if (len > 0) deleteCellTextCompat(doc, sec, para, ctrl, a.cellIdx, p, 0, len);
+                if (p > 0) { try { doc.mergeParagraphInCell(sec, para, ctrl, a.cellIdx, p); } catch {} }
+              }
+              insertCellTextCompat(doc, sec, para, ctrl, a.cellIdx, 0, 0, segments[0]);
+              for (let i = 1; i < segments.length; i++) {
+                const prev = i - 1;
+                let len = 0;
+                try { len = doc.getCellParagraphLength(sec, para, ctrl, a.cellIdx, prev); }
+                catch { len = (getCellTextCompat(doc, sec, para, ctrl, a.cellIdx, prev, 0, 9999) || '').length; }
+                doc.splitParagraphInCell(sec, para, ctrl, a.cellIdx, prev, len);
+                if (segments[i]) insertCellTextCompat(doc, sec, para, ctrl, a.cellIdx, i, 0, segments[i]);
+              }
+              filledCells.push({ row: a.row, col: a.col, row_span: a.row_span, col_span: a.col_span });
+            } catch (e) {
+              failures.push({ row: a.row, col: a.col, error: e?.message || String(e) });
+            }
+          }
+          doc.endBatch();
+        } catch (e) {
+          try { doc.endBatch(); } catch {}
+          throw e;
+        }
+
+        refresh();
+        let verified = true;
+        for (const a of filledCells) {
+          const cellIdx = resolveCellIdx(sec, para, ctrl, a.row, a.col, dims.colCount);
+          try {
+            const got = readCellAllParas(doc, sec, para, ctrl, cellIdx, 9999).trim();
+            if (got !== text.trim()) verified = false;
+          } catch {
+            verified = false;
+          }
+        }
+        return {
+          ok: failures.length === 0,
+          filled: filledCells.length,
+          scanned,
+          skipped_non_empty: skippedNonEmpty,
+          truncated,
+          verified,
+          range: { row_start: rowStart, row_end: rowEnd, col_start: colStart, col_end: colEnd },
+          cells: filledCells.slice(0, 50),
+          failures,
+        };
+      },
       // setCellText only replaces content — the cell template's character
       // formatting (italic/color from the original HWPX style sheet) sticks
       // to the new text. This is the format-override path: same prop shape
