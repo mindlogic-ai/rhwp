@@ -599,6 +599,120 @@ impl DocumentCore {
         }
     }
 
+    /// path 기반 셀 문단 리플로우 (중첩 표 지원).
+    ///
+    /// `reflow_cell_paragraph` 의 path 버전 — 경로 마지막 엔트리가 가리키는
+    /// (가장 안쪽) 셀 문단을 그 셀의 inner 폭 기준으로 재-줄바꿈한다.
+    /// `*_by_path` 편집 API(insert/delete/split/merge)는 native 버전과 달리
+    /// 리플로우를 생략하고 있었다 → 편집 후 stale 한 단일 LINE_SEG 가 남아
+    /// `needs_line_seg_reflow`(빈 seg 만 감지)의 자동 경로에도 걸리지 않아
+    /// 긴 텍스트가 셀 폭을 넘겨 한 줄로 overflow 되었다(#form_21). native 와
+    /// 동일하게 편집 직후 동기 리플로우한다. 구조 기반(경로가 가리키는 셀
+    /// 문단만) — 문서 내용에 의존하지 않는다.
+    pub(crate) fn reflow_cell_paragraph_by_path(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path: &[(usize, usize, usize)],
+    ) {
+        use crate::renderer::hwpunit_to_px;
+        if path.is_empty() {
+            return;
+        }
+
+        // 1) 불변 walk: 가장 안쪽 셀의 폭/패딩 + 대상 문단 para_shape_id 읽기.
+        let (cell_width, pad_left, pad_right, para_shape_id) = {
+            let section = match self.document.sections.get(section_idx) {
+                Some(s) => s,
+                None => return,
+            };
+            let mut para = match section.paragraphs.get(parent_para_idx) {
+                Some(p) => p,
+                None => return,
+            };
+            let mut resolved = None;
+            for (i, &(ctrl_idx, cell_idx, cell_para_idx)) in path.iter().enumerate() {
+                let table = match para.controls.get(ctrl_idx) {
+                    Some(Control::Table(t)) => t.as_ref(),
+                    _ => return,
+                };
+                let cell = match table.cells.get(cell_idx) {
+                    Some(c) => c,
+                    None => return,
+                };
+                if i == path.len() - 1 {
+                    let pad_l = if cell.padding.left != 0 {
+                        cell.padding.left
+                    } else {
+                        table.padding.left
+                    };
+                    let pad_r = if cell.padding.right != 0 {
+                        cell.padding.right
+                    } else {
+                        table.padding.right
+                    };
+                    let psid = match cell.paragraphs.get(cell_para_idx) {
+                        Some(p) => p.para_shape_id,
+                        None => return,
+                    };
+                    resolved = Some((cell.width, pad_l, pad_r, psid));
+                    break;
+                }
+                para = match cell.paragraphs.get(cell_para_idx) {
+                    Some(p) => p,
+                    None => return,
+                };
+            }
+            match resolved {
+                Some(r) => r,
+                None => return,
+            }
+        };
+
+        let cell_width_px = hwpunit_to_px(cell_width as i32, self.dpi);
+        let pad_left_px = hwpunit_to_px(pad_left as i32, self.dpi);
+        let pad_right_px = hwpunit_to_px(pad_right as i32, self.dpi);
+        let available_width = (cell_width_px - pad_left_px - pad_right_px).max(0.0);
+        let para_style = self.styles.para_styles.get(para_shape_id as usize);
+        let margin_left = para_style.map(|s| s.margin_left).unwrap_or(0.0);
+        let margin_right = para_style.map(|s| s.margin_right).unwrap_or(0.0);
+        let final_width = (available_width - margin_left - margin_right).max(0.0);
+
+        // 2) 가변 walk + 리플로우. self.document 만 mut 로 잡고 styles/dpi 는
+        //    별도 필드로 접근(disjoint borrow) — get_cell_paragraph_mut_by_path
+        //    는 &mut self 전체를 잡아 &self.styles 와 충돌하므로 인라인한다.
+        let dpi = self.dpi;
+        let styles = &self.styles;
+        let section = match self.document.sections.get_mut(section_idx) {
+            Some(s) => s,
+            None => return,
+        };
+        let mut para = match section.paragraphs.get_mut(parent_para_idx) {
+            Some(p) => p,
+            None => return,
+        };
+        for (i, &(ctrl_idx, cell_idx, cell_para_idx)) in path.iter().enumerate() {
+            let table = match para.controls.get_mut(ctrl_idx) {
+                Some(Control::Table(t)) => t.as_mut(),
+                _ => return,
+            };
+            let cell = match table.cells.get_mut(cell_idx) {
+                Some(c) => c,
+                None => return,
+            };
+            if i == path.len() - 1 {
+                if let Some(cell_para) = cell.paragraphs.get_mut(cell_para_idx) {
+                    reflow_line_segs(cell_para, final_width, styles, dpi);
+                }
+                return;
+            }
+            para = match cell.paragraphs.get_mut(cell_para_idx) {
+                Some(p) => p,
+                None => return,
+            };
+        }
+    }
+
     // ─── Phase 3 네이티브 구현: 커서 이동 API ─────────────────
 
     pub(crate) fn delete_range_native(
@@ -2693,7 +2807,11 @@ impl DocumentCore {
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
 
-        // 리플로우 (최외곽 표 기준 — 중첩 표 셀 폭은 별도 계산이 필요하나 우선 section dirty로 처리)
+        // 편집한 셀 문단을 셀 폭 기준으로 리플로우 (native insert 경로와 동일).
+        // 생략 시 stale 한 단일 LINE_SEG 가 남아 긴 텍스트가 셀 폭을 넘겨
+        // 한 줄로 overflow 된다(#form_21).
+        self.reflow_cell_paragraph_by_path(section_idx, parent_para_idx, path);
+
         self.invalidate_section_source(section_idx);
         self.invalidate_paragraph_source(section_idx, parent_para_idx);
         self.mark_section_dirty(section_idx);
@@ -2726,6 +2844,8 @@ impl DocumentCore {
 
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
+        // 편집한 셀 문단 리플로우 (native delete 경로와 동일).
+        self.reflow_cell_paragraph_by_path(section_idx, parent_para_idx, path);
         self.invalidate_section_source(section_idx);
         self.invalidate_paragraph_source(section_idx, parent_para_idx);
         self.mark_section_dirty(section_idx);
@@ -2793,6 +2913,16 @@ impl DocumentCore {
 
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
+        // 분할된 양쪽 문단 리플로우 (native split 경로와 동일).
+        let mut split_path = path.to_vec();
+        if let Some(last) = split_path.last_mut() {
+            last.2 = cell_para_idx;
+            self.reflow_cell_paragraph_by_path(section_idx, parent_para_idx, &split_path);
+        }
+        if let Some(last) = split_path.last_mut() {
+            last.2 = cell_para_idx + 1;
+            self.reflow_cell_paragraph_by_path(section_idx, parent_para_idx, &split_path);
+        }
         self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
@@ -2863,6 +2993,12 @@ impl DocumentCore {
 
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
+        // 병합된 문단 리플로우 (native merge 경로와 동일).
+        let mut merge_path = path.to_vec();
+        if let Some(last) = merge_path.last_mut() {
+            last.2 = cell_para_idx - 1;
+            self.reflow_cell_paragraph_by_path(section_idx, parent_para_idx, &merge_path);
+        }
         self.invalidate_section_source(section_idx);
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();

@@ -436,6 +436,31 @@ fn test_insert_text_in_cell() {
 }
 
 #[test]
+fn test_insert_text_in_cell_by_path_reflows_wrap() {
+    // Regression (#form_21): the *_by_path in-cell edit APIs must reflow the
+    // edited cell paragraph like their _native siblings do. Before the fix
+    // they left the cell's stale single LINE_SEG untouched, and the on-demand
+    // reflow (needs_line_seg_reflow) only fires for EMPTY (zero-height) segs —
+    // so a long run rendered on one line and overflowed the cell edge instead
+    // of wrapping. After the fix the paragraph must have >1 line_segs.
+    let mut doc = create_doc_with_table();
+    // cell 0 width = 21000 HWPUNIT (~280px @96dpi): this run cannot fit one line.
+    let long = "국회 및 외부 협력 환경의 변동성을 고려하여 정성평가 요소를 보완하는 방안도 함께 검토할 필요가 있음";
+    let res = doc.insert_text_in_cell_by_path(0, 0, &[(0, 0, 0)], 2, long);
+    assert!(res.is_ok(), "insert_text_in_cell_by_path failed: {:?}", res);
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.get(0) {
+        let segs = table.cells[0].paragraphs[0].line_segs.len();
+        assert!(
+            segs > 1,
+            "expected wrapped line_segs (>1) after by_path insert, got {}",
+            segs
+        );
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+}
+
+#[test]
 fn test_insert_text_in_cell_invalidates_parent_hwpx_paragraph_xml() {
     let mut doc = create_doc_with_table();
     doc.document.sections[0].raw_stream = Some(vec![1, 2, 3]);
