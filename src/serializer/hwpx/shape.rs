@@ -239,13 +239,45 @@ fn write_draw_text_paragraph<W: Write>(
     let cs_str = cs.to_string();
     start_tag_attrs(w, "hp:run", &[("charPrIDRef", &cs_str)])?;
 
-    // simple text output — XML escape
-    start_tag(w, "hp:t")?;
-    w.write_event(quick_xml::events::Event::Text(
-        quick_xml::events::BytesText::new(&super::utils::xml_escape(&p.text)),
-    ))
-    .map_err(|e| SerializeError::XmlError(format!("drawText text: {e}")))?;
-    end_tag(w, "hp:t")?;
+    // 텍스트 + 필드 컨트롤 인터리브. 글상자 문단도 field_ranges 를 갖는다
+    // (예: 배너 rect 안의 MEMO 필드) — 텍스트만 쓰면 필드가 통째로 유실된다.
+    let mut ranges: Vec<&crate::model::paragraph::FieldRange> = p.field_ranges.iter().collect();
+    ranges.sort_by_key(|r| r.start_char_idx);
+    let chars: Vec<char> = p.text.chars().collect();
+    let mut pos = 0usize;
+    let write_t = |w: &mut Writer<W>, s: &str| -> Result<(), SerializeError> {
+        start_tag(w, "hp:t")?;
+        w.write_event(quick_xml::events::Event::Text(
+            quick_xml::events::BytesText::new(s),
+        ))
+        .map_err(|e| SerializeError::XmlError(format!("drawText text: {e}")))?;
+        end_tag(w, "hp:t")
+    };
+    for r in ranges {
+        use crate::model::control::Control;
+        let Some(Control::Field(f)) = p.controls.get(r.control_idx) else { continue };
+        let (start, end) = (
+            r.start_char_idx.min(chars.len()),
+            r.end_char_idx.min(chars.len()),
+        );
+        if start < pos {
+            continue; // overlapping/out-of-order range — skip rather than duplicate text
+        }
+        if pos < start {
+            write_t(w, &chars[pos..start].iter().collect::<String>())?;
+        }
+        start_tag(w, "hp:ctrl")?;
+        super::field::write_field_begin(w, f)?;
+        end_tag(w, "hp:ctrl")?;
+        if start < end {
+            write_t(w, &chars[start..end].iter().collect::<String>())?;
+        }
+        start_tag(w, "hp:ctrl")?;
+        super::field::write_field_end(w, f.field_id)?;
+        end_tag(w, "hp:ctrl")?;
+        pos = end;
+    }
+    write_t(w, &chars[pos..].iter().collect::<String>())?;
 
     end_tag(w, "hp:run")?;
 
@@ -434,6 +466,37 @@ mod tests {
         let xml = serialize_rect(&rect);
         assert!(xml.contains("<hp:rect "));
         assert!(xml.contains("</hp:rect>"));
+    }
+
+    #[test]
+    fn draw_text_paragraph_interleaves_memo_field() {
+        // 글상자 문단 내 MEMO 필드(field_ranges) 가 텍스트만 남기고 유실되던
+        // 회귀 가드 (19_org_diagnosis Ⅳ 배너 rect).
+        use crate::model::control::{Control, Field, FieldType};
+        use crate::model::paragraph::FieldRange;
+        let mut rect = RectangleShape::default();
+        let mut tb = TextBox::default();
+        let mut p = Paragraph::default();
+        p.text = " 인력 효율화 방안".to_string();
+        let mut f = Field::default();
+        f.field_type = FieldType::Memo;
+        f.field_id = 5;
+        f.memo_paragraphs.push(Paragraph {
+            text: "기획과, 총무과".to_string(),
+            ..Default::default()
+        });
+        p.controls.push(Control::Field(f));
+        p.field_ranges.push(FieldRange {
+            start_char_idx: 0,
+            end_char_idx: p.text.chars().count(),
+            control_idx: 0,
+        });
+        tb.paragraphs.push(p);
+        rect.drawing.text_box = Some(tb);
+        let xml = serialize_rect(&rect);
+        assert!(xml.contains("기획과, 총무과"), "memo text must survive: {}", xml);
+        assert!(xml.contains(" 인력 효율화 방안"), "{}", xml);
+        assert!(xml.contains(r#"<hp:fieldEnd beginIDRef="5"/>"#), "{}", xml);
     }
 
     #[test]

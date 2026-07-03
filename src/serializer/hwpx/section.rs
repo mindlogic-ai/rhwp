@@ -634,13 +634,31 @@ fn render_shape(shape: &ShapeObject, ctx: &SerializeContext) -> String {
             }
         };
     }
+    // Group (container): 자식 도형을 재귀 직렬화. 이전에는
+    // render_common_shape_xml 로 빈 껍데기만 출력되어 그룹 내부의
+    // rect/drawText (글상자 텍스트) 가 편집 후 재직렬화에서 전부
+    // 유실됐다 (19_org_diagnosis Ⅳ 배너 등).
+    if let ShapeObject::Group(g) = shape {
+        let mut out = match writer_to_string(|w| super::shape::write_container_open(w, &g.common))
+        {
+            Ok(xml) => xml,
+            Err(e) => {
+                eprintln!("[hwpx] Shape::Group 직렬화 실패: {e}");
+                return String::new();
+            }
+        };
+        for child in &g.children {
+            out.push_str(&render_shape(child, ctx));
+        }
+        out.push_str("</hp:container>");
+        return out;
+    }
     let (tag, c) = match shape {
-        ShapeObject::Rectangle(_) | ShapeObject::Line(_) => unreachable!(),
+        ShapeObject::Rectangle(_) | ShapeObject::Line(_) | ShapeObject::Group(_) => unreachable!(),
         ShapeObject::Ellipse(e) => ("ellipse", &e.common),
         ShapeObject::Arc(a) => ("arc", &a.common),
         ShapeObject::Polygon(p) => ("polygon", &p.common),
         ShapeObject::Curve(cv) => ("curve", &cv.common),
-        ShapeObject::Group(g) => ("container", &g.common),
         ShapeObject::Picture(pic) => {
             return match writer_to_string(|w| picture::write_picture(w, pic, ctx)) {
                 Ok(xml) => xml,
@@ -1137,6 +1155,36 @@ mod tests {
         let xml = String::from_utf8(write_section(&section, &doc, 0, &mut ctx).unwrap()).unwrap();
         assert!(xml.contains(std::str::from_utf8(&raw_sec_pr).unwrap()));
         assert!(!xml.contains(r#"left="8504""#));
+    }
+
+    #[test]
+    fn group_shape_serializes_children_with_draw_text() {
+        // <hp:container> 가 빈 껍데기로 직렬화되어 그룹 내부 rect/drawText
+        // (글상자 텍스트) 가 편집 후 유실되던 회귀 가드 (19_org_diagnosis).
+        use crate::model::control::Control;
+        use crate::model::shape::{GroupShape, RectangleShape, ShapeObject, TextBox};
+        let mut rect = RectangleShape::default();
+        let mut tb = TextBox::default();
+        tb.paragraphs.push(Paragraph {
+            text: "그룹 안 글상자".to_string(),
+            ..Default::default()
+        });
+        rect.drawing.text_box = Some(tb);
+        let group = GroupShape {
+            children: vec![ShapeObject::Rectangle(rect)],
+            ..Default::default()
+        };
+        let mut para = Paragraph::default();
+        para.controls
+            .push(Control::Shape(Box::new(ShapeObject::Group(group))));
+        let (doc, section) = make_doc_with_paragraph(para);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_section(&section, &doc, 0, &mut ctx).unwrap();
+        let xml = std::str::from_utf8(&bytes).unwrap();
+        assert!(xml.contains("<hp:container"), "{}", &xml[..300.min(xml.len())]);
+        assert!(xml.contains("</hp:container>"), "container must not be an empty tag");
+        assert!(xml.contains("<hp:rect"), "group child rect must serialize");
+        assert!(xml.contains("그룹 안 글상자"), "drawText text must survive");
     }
 
     #[test]
