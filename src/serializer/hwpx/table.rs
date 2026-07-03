@@ -32,6 +32,7 @@ use crate::model::shape::{
     Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo,
 };
 use crate::model::table::{Cell, HwpxTablePageBreak, Table, TablePageBreak, VerticalAlign};
+use crate::model::HwpUnit;
 
 use super::context::SerializeContext;
 use super::section;
@@ -101,12 +102,14 @@ pub fn write_table<W: Write>(
     write_in_margin(w, table)?;
 
     // tr[]: 행 단위 반복. 각 행에 속한 셀 (cell.row == r) 을 col 오름차순으로 출력.
+    // cellSz height 는 Table::serialized_cell_height 로 방어한다 — u32 언더플로우로
+    // 오염된 wrapped-negative 높이를 그대로 내보내면 재열람 시 표가 붕괴한다.
     for row_idx in 0..table.row_count {
         start_tag(w, "hp:tr")?;
         let mut row_cells: Vec<&Cell> = table.cells.iter().filter(|c| c.row == row_idx).collect();
         row_cells.sort_by_key(|c| c.col);
         for cell in row_cells {
-            write_cell(w, cell, ctx)?;
+            write_cell(w, cell, table.serialized_cell_height(cell), ctx)?;
         }
         end_tag(w, "hp:tr")?;
     }
@@ -251,6 +254,7 @@ fn write_caption<W: Write>(
 fn write_cell<W: Write>(
     w: &mut Writer<W>,
     cell: &Cell,
+    height: HwpUnit,
     ctx: &mut SerializeContext,
 ) -> Result<(), SerializeError> {
     let name = cell.field_name.as_deref().unwrap_or("");
@@ -276,7 +280,7 @@ fn write_cell<W: Write>(
     write_sub_list(w, cell, ctx)?;
     write_cell_addr(w, cell)?;
     write_cell_span(w, cell)?;
-    write_cell_sz(w, cell)?;
+    write_cell_sz(w, cell, height)?;
     write_cell_margin(w, cell)?;
 
     end_tag(w, "hp:tc")?;
@@ -360,9 +364,13 @@ fn write_cell_span<W: Write>(w: &mut Writer<W>, cell: &Cell) -> Result<(), Seria
     empty_tag(w, "hp:cellSpan", &[("colSpan", &cs), ("rowSpan", &rs)])
 }
 
-fn write_cell_sz<W: Write>(w: &mut Writer<W>, cell: &Cell) -> Result<(), SerializeError> {
+fn write_cell_sz<W: Write>(
+    w: &mut Writer<W>,
+    cell: &Cell,
+    height: HwpUnit,
+) -> Result<(), SerializeError> {
     let w_s = cell.width.to_string();
-    let h_s = cell.height.to_string();
+    let h_s = height.to_string();
     empty_tag(w, "hp:cellSz", &[("width", &w_s), ("height", &h_s)])
 }
 
@@ -523,6 +531,48 @@ mod tests {
         let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
         write_table(&mut w, table, &mut ctx).expect("write_table");
         String::from_utf8(w.into_inner()).unwrap()
+    }
+
+    #[test]
+    fn cell_sz_sanitizes_u32_wrapped_negative_height() {
+        // Reproduce the med_01 nested-table-host underflow: one cell in a row
+        // carries a wrapped-negative height (-1282 as u32). The sibling in the
+        // same row holds the real (valid) row height. The serializer must NOT
+        // emit the bogus value — it substitutes the row's max valid height.
+        let mut t = empty_table(2, 2);
+        // row 0: give the real siblings a distinctive valid height…
+        for c in t.cells.iter_mut().filter(|c| c.row == 0) {
+            c.height = 2697;
+        }
+        // …then corrupt exactly one cell (col 0) with a u32-wrapped -1282.
+        let bogus = (-1282_i32) as u32; // 4294966014
+        t.cells.iter_mut().find(|c| c.row == 0 && c.col == 0).unwrap().height = bogus;
+
+        let xml = serialize(&t);
+        assert!(
+            !xml.contains(&bogus.to_string()),
+            "wrapped-negative height must never be serialized: {}",
+            xml
+        );
+        // The corrupted cell should now carry the row's max valid height (2697).
+        assert_eq!(
+            xml.matches(r#"height="2697""#).count(),
+            2,
+            "both row-0 cells should serialize height 2697: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn cell_sz_leaves_valid_heights_untouched() {
+        let t = empty_table(2, 2); // all heights 300 (valid)
+        let xml = serialize(&t);
+        assert_eq!(
+            xml.matches(r#"height="300""#).count(),
+            4,
+            "valid heights must pass through unchanged: {}",
+            xml
+        );
     }
 
     #[test]

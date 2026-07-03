@@ -9,6 +9,7 @@ use super::byte_writer::ByteWriter;
 use crate::document_core::converters::common_obj_attr_writer::pack_common_attr_bits;
 use crate::model::control::*;
 use crate::model::document::SectionDef;
+use crate::model::HwpUnit;
 use crate::model::footnote::FootnoteShape;
 use crate::model::footnote::{Endnote, Footnote};
 use crate::model::header_footer::{Footer, Header, HeaderFooterApply, MasterPage};
@@ -504,9 +505,9 @@ fn serialize_table(table: &Table, level: u16, records: &mut Vec<Record>) {
         data: serialize_table_record(table),
     });
 
-    // 셀 목록
+    // 셀 목록. height 는 serialized_cell_height 로 방어 (wrapped-negative 차단).
     for cell in &table.cells {
-        serialize_cell(cell, level + 1, records);
+        serialize_cell(cell, table.serialized_cell_height(cell), level + 1, records);
     }
 }
 
@@ -555,7 +556,7 @@ fn serialize_table_record(table: &Table) -> Vec<u8> {
     w.into_bytes()
 }
 
-fn serialize_cell(cell: &Cell, level: u16, records: &mut Vec<Record>) {
+fn serialize_cell(cell: &Cell, height: HwpUnit, level: u16, records: &mut Vec<Record>) {
     let mut w = ByteWriter::new();
 
     // LIST_HEADER 공통 (6 + 2 = 8바이트)
@@ -578,7 +579,7 @@ fn serialize_cell(cell: &Cell, level: u16, records: &mut Vec<Record>) {
     w.write_u16(cell.col_span).unwrap();
     w.write_u16(cell.row_span).unwrap();
     w.write_u32(cell.width).unwrap();
-    w.write_u32(cell.height).unwrap();
+    w.write_u32(height).unwrap();
     w.write_i16(cell.padding.left).unwrap();
     w.write_i16(cell.padding.right).unwrap();
     w.write_i16(cell.padding.top).unwrap();

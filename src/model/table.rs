@@ -321,6 +321,51 @@ impl Table {
         heights
     }
 
+    /// u32 언더플로우로 오염된 셀 높이의 sentinel 값. `cell.height`가 이 값 이상이면
+    /// wrapped-negative(예: -1282 → 4294966014)로 간주한다 — 렌더러가 이미 이
+    /// 임계값으로 무효 높이를 무시(auto-fit)하는 것과 동일한 판정 기준이다.
+    pub const INVALID_CELL_HEIGHT: HwpUnit = 0x8000_0000;
+
+    /// 직렬화용으로 안전한 셀 높이를 반환한다.
+    ///
+    /// 어떤 경로(관측상 wasm32 타깃, 중첩 표를 품은 바깥 셀의 행)에서 셀 높이가
+    /// u32를 언더플로우해 상위 비트가 켜진 wrapped-negative가 남는다. 렌더러는
+    /// 이를 무효 sentinel로 보고 행 높이를 자동 계산하므로 화면은 정상이지만,
+    /// 직렬화가 그 값을 그대로 .hwp(x)로 내보내면 한컴이 천문학적 unsigned
+    /// 높이로 읽어 재열람 시 표 레이아웃이 붕괴한다. 같은 행의 유효 최대
+    /// 높이(원본 auto-fit base)로 치환하고, 행 전체가 무효면 표/상수 floor로
+    /// 되돌린다. 구조적 판정(무효-높이 속성)만 사용한다.
+    pub fn serialized_cell_height(&self, cell: &Cell) -> HwpUnit {
+        if cell.height < Self::INVALID_CELL_HEIGHT {
+            return cell.height;
+        }
+        const FLOOR_H: HwpUnit = 400; // get_row_heights() 의 height==0 기본값
+        let mut row_valid_max = vec![0u32; self.row_count as usize];
+        for c in &self.cells {
+            if c.row_span == 1
+                && c.height < Self::INVALID_CELL_HEIGHT
+                && (c.row as usize) < row_valid_max.len()
+            {
+                let r = c.row as usize;
+                if c.height > row_valid_max[r] {
+                    row_valid_max[r] = c.height;
+                }
+            }
+        }
+        let table_valid_max = self
+            .cells
+            .iter()
+            .filter(|c| c.height < Self::INVALID_CELL_HEIGHT)
+            .map(|c| c.height)
+            .max()
+            .unwrap_or(0);
+        // 병합 셀은 걸치는 행들의 base 합, 단일 셀은 해당 행 base.
+        let start = cell.row as usize;
+        let end = (start + cell.row_span.max(1) as usize).min(row_valid_max.len());
+        let spanned: u32 = row_valid_max.get(start..end).map(|s| s.iter().sum()).unwrap_or(0);
+        spanned.max(table_valid_max).max(FLOOR_H)
+    }
+
     /// row_sizes를 행별 실제 셀 개수로 재계산한다.
     fn rebuild_row_sizes(&mut self) {
         self.row_sizes = (0..self.row_count)
