@@ -38,7 +38,7 @@ use super::SerializeError;
 pub fn write_picture<W: Write>(
     w: &mut Writer<W>,
     pic: &Picture,
-    ctx: &SerializeContext,
+    ctx: &mut SerializeContext,
 ) -> Result<(), SerializeError> {
     // --- <hp:pic> 속성 ---
     // 속성 순서 (PictureType + 부모 AbstractShapeObjectType):
@@ -87,6 +87,11 @@ pub fn write_picture<W: Write>(
     write_sz(w, &pic.common)?;
     write_pos(w, &pic.common)?;
     write_out_margin(w, &pic.common)?;
+    // 캡션 — 파서는 채우지만([Mindlogic patch] pic.caption) 여기서 안 쓰면
+    // 편집 후 재직렬화에서 그림 캡션이 통째로 유실된다 (hwp3_sample "그림 ." 4건).
+    if let Some(caption) = &pic.caption {
+        super::table::write_caption(w, caption, ctx)?;
+    }
     write_shape_comment(w, &pic.common)?;
 
     end_tag(w, "hp:pic")?;
@@ -421,7 +426,7 @@ mod tests {
         doc
     }
 
-    fn serialize(pic: &Picture, ctx: &SerializeContext) -> String {
+    fn serialize(pic: &Picture, ctx: &mut SerializeContext) -> String {
         let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
         write_picture(&mut w, pic, ctx).expect("write_picture");
         String::from_utf8(w.into_inner()).unwrap()
@@ -430,9 +435,9 @@ mod tests {
     #[test]
     fn pic_root_attrs_in_canonical_order() {
         let doc = make_doc_with_bin(1, "png");
-        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
         let pic = make_picture(1);
-        let xml = serialize(&pic, &ctx);
+        let xml = serialize(&pic, &mut ctx);
         assert!(xml.contains("<hp:pic "));
         let ip = xml.find("id=").unwrap();
         let zp = xml.find("zOrder=").unwrap();
@@ -446,9 +451,9 @@ mod tests {
     #[test]
     fn img_uses_manifest_id() {
         let doc = make_doc_with_bin(5, "jpg");
-        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
         let pic = make_picture(5);
-        let xml = serialize(&pic, &ctx);
+        let xml = serialize(&pic, &mut ctx);
         assert!(
             xml.contains(r#"binaryItemIDRef="image1""#),
             "binaryItemIDRef must resolve to manifest id image1: {}",
@@ -459,10 +464,10 @@ mod tests {
     #[test]
     fn unresolved_bin_data_id_errors() {
         let doc = Document::default(); // bin_data 없음
-        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
         let pic = make_picture(99); // 미등록 id
         let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
-        let err = write_picture(&mut w, &pic, &ctx).unwrap_err();
+        let err = write_picture(&mut w, &pic, &mut ctx).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("binaryItemIDRef"), "error msg: {}", msg);
         assert!(
@@ -475,9 +480,9 @@ mod tests {
     #[test]
     fn rendering_info_has_three_matrices() {
         let doc = make_doc_with_bin(1, "png");
-        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
         let pic = make_picture(1);
-        let xml = serialize(&pic, &ctx);
+        let xml = serialize(&pic, &mut ctx);
         assert!(xml.contains("<hc:transMatrix "));
         assert!(xml.contains("<hc:scaMatrix "));
         assert!(xml.contains("<hc:rotMatrix "));
@@ -486,9 +491,9 @@ mod tests {
     #[test]
     fn img_rect_has_four_points() {
         let doc = make_doc_with_bin(1, "png");
-        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
         let pic = make_picture(1);
-        let xml = serialize(&pic, &ctx);
+        let xml = serialize(&pic, &mut ctx);
         assert!(xml.contains("<hc:pt0 "));
         assert!(xml.contains("<hc:pt1 "));
         assert!(xml.contains("<hc:pt2 "));
@@ -498,12 +503,12 @@ mod tests {
     #[test]
     fn pic_pos_preserves_flow_and_overlap_flags() {
         let doc = make_doc_with_bin(1, "png");
-        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
         let mut pic = make_picture(1);
         pic.common.flow_with_text = false;
         pic.common.allow_overlap = true;
 
-        let xml = serialize(&pic, &ctx);
+        let xml = serialize(&pic, &mut ctx);
 
         assert!(xml.contains(r#"flowWithText="0""#), "{}", xml);
         assert!(xml.contains(r#"allowOverlap="1""#), "{}", xml);
@@ -512,10 +517,10 @@ mod tests {
     #[test]
     fn shape_comment_emits_description() {
         let doc = make_doc_with_bin(1, "png");
-        let ctx = SerializeContext::collect_from_document(&doc);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
         let mut pic = make_picture(1);
         pic.common.description = "그림입니다.\nA < B & C".to_string();
-        let xml = serialize(&pic, &ctx);
+        let xml = serialize(&pic, &mut ctx);
         assert!(
             xml.contains("<hp:shapeComment>그림입니다.\nA &lt; B &amp; C</hp:shapeComment>"),
             "shapeComment must preserve escaped description: {}",

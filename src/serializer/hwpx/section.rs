@@ -613,7 +613,7 @@ where
         .map_err(|e| SerializeError::XmlError(format!("invalid UTF-8 from XML writer: {e}")))
 }
 
-fn render_shape(shape: &ShapeObject, ctx: &SerializeContext) -> String {
+fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> String {
     // Rectangle: Writer-based serializer (drawText 포함)
     if let ShapeObject::Rectangle(r) = shape {
         return match writer_to_string(|w| super::shape::write_rect(w, r)) {

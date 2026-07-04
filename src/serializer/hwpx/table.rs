@@ -193,7 +193,7 @@ fn write_in_margin<W: Write>(w: &mut Writer<W>, t: &Table) -> Result<(), Seriali
     )
 }
 
-fn write_caption<W: Write>(
+pub(crate) fn write_caption<W: Write>(
     w: &mut Writer<W>,
     caption: &Caption,
     ctx: &mut SerializeContext,
