@@ -72,9 +72,9 @@ pub fn write_picture<W: Write>(
     // --- 자식 순서 (한컴 관찰 샘플 기준) ---
     // offset, orgSz, curSz, flip, rotationInfo, renderingInfo, imgRect, imgClip,
     // inMargin, imgDim, img, effects, sz, pos, outMargin
-    write_offset(w, &pic.common)?;
-    write_org_sz(w)?; // ShapeComponentAttr 매핑 (IR 접근 제한으로 간이)
-    write_cur_sz(w, &pic.common)?;
+    write_offset(w, pic)?;
+    write_org_sz(w, pic)?;
+    write_cur_sz(w, pic)?;
     write_flip(w)?;
     write_rotation_info(w)?;
     write_rendering_info(w)?;
@@ -100,23 +100,46 @@ pub fn write_picture<W: Write>(
 
 // ---------- 자식 요소 ----------
 
-fn write_offset<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), SerializeError> {
-    let x = c.horizontal_offset.to_string();
-    let y = c.vertical_offset.to_string();
+fn write_offset<W: Write>(w: &mut Writer<W>, pic: &Picture) -> Result<(), SerializeError> {
+    // <hp:offset>은 shape-transform 오프셋 (파서가 shape_attr.offset_x/y에 보존).
+    // 페이지 좌표(common.h/v_offset)는 <hp:pos>가 담당 — 여기 쓰면 좌표가 이중 적용된다.
+    let x = pic.shape_attr.offset_x.to_string();
+    let y = pic.shape_attr.offset_y.to_string();
     empty_tag(w, "hp:offset", &[("x", &x), ("y", &y)])
 }
 
-fn write_org_sz<W: Write>(w: &mut Writer<W>) -> Result<(), SerializeError> {
-    // IR에서 원본 크기는 shape_attr.original_width/height 이나 접근이 제한적.
-    // Stage 4 에선 common.width/height 를 그대로 원본 크기로 출력 (간이).
-    // Picture 라운드트립 실제 정확도는 shape_attr 직접 매핑 후 향상됨.
-    empty_tag(w, "hp:orgSz", &[("width", "0"), ("height", "0")])
+fn write_org_sz<W: Write>(w: &mut Writer<W>, pic: &Picture) -> Result<(), SerializeError> {
+    // 한컴은 orgSz 0×0 그림을 "없는 이미지"로 취급한다 (2026-07-04 form_23 8→0 검증).
+    // 저장된 원본 크기가 없을 때만 common 크기로 폴백.
+    let (mut ow, mut oh) = (
+        pic.shape_attr.original_width,
+        pic.shape_attr.original_height,
+    );
+    if ow == 0 && oh == 0 {
+        ow = pic.common.width;
+        oh = pic.common.height;
+    }
+    empty_tag(
+        w,
+        "hp:orgSz",
+        &[("width", &ow.to_string()), ("height", &oh.to_string())],
+    )
 }
 
-fn write_cur_sz<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), SerializeError> {
-    let width = c.width.to_string();
-    let height = c.height.to_string();
-    empty_tag(w, "hp:curSz", &[("width", &width), ("height", &height)])
+fn write_cur_sz<W: Write>(w: &mut Writer<W>, pic: &Picture) -> Result<(), SerializeError> {
+    // curSz 0×0 은 원본 HWPX에도 흔한 정상 값 (한컴이 orgSz로 폴백 렌더) —
+    // 원본에 크기 정보가 아예 없던 합성 그림만 common 크기로 폴백.
+    let (mut cw, mut ch) = (pic.shape_attr.current_width, pic.shape_attr.current_height);
+    if cw == 0 && ch == 0 && pic.shape_attr.original_width == 0 && pic.shape_attr.original_height == 0
+    {
+        cw = pic.common.width;
+        ch = pic.common.height;
+    }
+    empty_tag(
+        w,
+        "hp:curSz",
+        &[("width", &cw.to_string()), ("height", &ch.to_string())],
+    )
 }
 
 fn write_flip<W: Write>(w: &mut Writer<W>) -> Result<(), SerializeError> {

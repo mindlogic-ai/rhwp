@@ -138,6 +138,9 @@ pub fn write_content_hpf(
     )?;
 
     for entry in bin_data {
+        // isEmbeded="1" 필수: 없으면 한컴(doc2pdf/데스크톱)이 BinData 바인딩을
+        // 버려 이미지가 전부 사라진다 (2026-07-04 form_23/59 검증). 여기 오는
+        // 엔트리는 전부 ZIP 내 embedded (링크형은 bin_data_content에 안 들어옴).
         empty_tag(
             &mut w,
             "opf:item",
@@ -145,6 +148,7 @@ pub fn write_content_hpf(
                 ("id", entry.id.as_str()),
                 ("href", entry.href.as_str()),
                 ("media-type", entry.media_type.as_str()),
+                ("isEmbeded", "1"),
             ],
         )?;
     }
