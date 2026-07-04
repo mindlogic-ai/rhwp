@@ -388,10 +388,13 @@ impl DocumentCore {
         // 정상이므로 check_textrun_reflow=false 로 호출하면 건너뜀.
         //
         // 휴리스틱 threshold = 40자 (한글 한 줄 ~30자 안팎을 기준으로 보수적).
+        // '\t' 포함 문단 제외 — needs_reflow_broadly 의 R3 주석 참조 (탭 스톱
+        // 미모델링으로 재계산이 가짜 줄바꿈을 만드는 목차류 문단).
         const LONG_TEXT_THRESHOLD: usize = 40;
         if check_textrun_reflow
             && para.line_segs.len() == 1
             && !para.text.contains('\n')
+            && !para.text.contains('\t')
             && para.text.chars().count() > LONG_TEXT_THRESHOLD
         {
             report.push(ValidationWarning {
@@ -596,10 +599,15 @@ impl DocumentCore {
         if Self::needs_line_seg_reflow(para) {
             return true;
         }
-        // 한컴 textRun reflow 패턴 — 규칙 R3 과 동일 조건
+        // 한컴 textRun reflow 패턴 — 규칙 R3 과 동일 조건.
+        // '\t' 포함 문단 제외: fill_lines 는 오른쪽 정렬 탭(목차의 페이지 번호
+        // 탭 등)을 모델링하지 못해 재계산이 가짜 줄바꿈을 만든다 — 편집과
+        // 무관한 앞 페이지들이 통째로 재배치되는 render_locality 회귀
+        // (corpus/51 pi=86 "… 분석 결과 \t9" 42자 → 2줄 오판).
         const LONG_TEXT_THRESHOLD: usize = 40;
         if para.line_segs.len() == 1
             && !para.text.contains('\n')
+            && !para.text.contains('\t')
             && para.text.chars().count() > LONG_TEXT_THRESHOLD
         {
             return true;
@@ -651,6 +659,18 @@ impl DocumentCore {
                     let prior = para.line_segs.clone();
                     let healthy_single = prior.len() == 1 && prior[0].line_height > 0;
                     reflow_line_segs(para, available_width, &styles, dpi);
+                    if healthy_single && std::env::var("RHWP_REFLOW_DIAG").is_ok() {
+                        eprintln!(
+                            "[reflow-diag] pi={} new_lines={} text_chars={} avail={:.1} prior_horzsize={} seg_starts={:?} text={:?}",
+                            pi,
+                            para.line_segs.len(),
+                            para.text.chars().count(),
+                            available_width,
+                            prior[0].segment_width,
+                            para.line_segs.iter().map(|s| s.text_start).collect::<Vec<_>>(),
+                            para.text.chars().take(50).collect::<String>(),
+                        );
+                    }
                     if healthy_single && para.line_segs.len() == 1 {
                         para.line_segs = prior;
                     } else {
