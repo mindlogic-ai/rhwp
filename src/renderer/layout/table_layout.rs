@@ -2271,7 +2271,19 @@ impl LayoutEngine {
                     // 점점 어긋난다.
                     if use_top_vpos_anchor && !has_nested_table {
                         if let Some(first_seg) = para.line_segs.first() {
-                            if first_seg.vertical_pos >= 0 {
+                            // === [Mindlogic patch — edited-cell vpos=0 anchor guard] ===
+                            // reflow_line_segs(셀 텍스트 편집 직후)는 LineSeg를
+                            // vertical_pos=0(Default)으로 재생성한다. 2번째 이후
+                            // 문단의 vpos=0은 "셀 콘텐츠 상단"이라는 유효 캐시가
+                            // 아니라 캐시-없음 신호다 — 그대로 앵커하면 편집된
+                            // Top 정렬 셀의 모든 문단이 셀 상단 한 줄에 겹쳐
+                            // 그려진다(멀티라인 setCellText 겹침). Top 셀에서
+                            // cp_idx>0 문단의 진짜 vpos는 항상 >0 (앞 문단이
+                            // 최소 한 줄의 높이를 가지므로)이라 vpos>0만 앵커를
+                            // 신뢰하고, 0은 누적 para_y 흐름으로 배치한다.
+                            if first_seg.vertical_pos >= 0
+                                && (cp_idx == 0 || first_seg.vertical_pos > 0)
+                            {
                                 let spacing_before = styles
                                     .para_styles
                                     .get(para.para_shape_id as usize)

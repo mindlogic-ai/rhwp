@@ -303,6 +303,30 @@
       refresh();
       return r;
     }
+    // ── Cell fill read-back ─────────────────────────────────────────────
+    // getCellProperties exposes fillType/fillColor (the same read that
+    // setCellFill round-trips). Body-level tables only — there is no *ByPath
+    // variant of getCellProperties, so nested refs read as null and callers
+    // skip. null = no solid fill (white/transparent/gradient).
+    function cellFillAt(ref, cellIdx) {
+      if (ref.nested) return null;
+      const doc = getDoc();
+      if (typeof doc.getCellProperties !== 'function') return null;
+      try {
+        const p = JSON.parse(doc.getCellProperties(ref.sec, ref.para, ref.hops[0].controlIndex, cellIdx));
+        if (p && p.fillType === 'solid' && typeof p.fillColor === 'string') {
+          return p.fillColor.toUpperCase();
+        }
+        return null;
+      } catch { return null; }
+    }
+    // Background fills of one visual row: [{col, fill}] per anchor cell.
+    function rowFillsAt(ref, bboxes, row) {
+      return bboxes
+        .filter((b) => b.row === row)
+        .sort((a, b) => a.col - b.col)
+        .map((b) => ({ col: b.col, fill: cellFillAt(ref, b.cellIdx) }));
+    }
     // Read a cell's FULL text across ALL its paragraphs, joined with "\n".
     // A cell often holds several paragraphs (e.g. an address cell has a
     // 제출주소 line + a 사업담당자 line). Reading only cell paragraph 0 — as the
@@ -893,6 +917,12 @@
               text,
               lines: text === '' ? 0 : text.split('\n').length,
             };
+            // Non-white solid background → surface it. Header/label rows in
+            // Korean forms carry gray shading; the agent needs to SEE fills
+            // to keep new/edited rows visually consistent with sibling data
+            // rows (and to notice when a header's shading leaked into one).
+            const fill = cellFillAt(ref, b.cellIdx);
+            if (fill && fill !== '#FFFFFF') entry.fill = fill;
             // Tables nested INSIDE this cell are invisible in the text
             // (their host paragraphs read as "") — surface them explicitly
             // so the agent can address them and never overwrites them
@@ -2022,6 +2052,35 @@
         const r = structuralTableOp(params.path, 'insert_table_row',
           (doc, sec, para, ctrl) => doc.insertTableRow(sec, para, ctrl, params.after_row, true),
           (doc, sec, para, hopsJson) => doc.insertTableRowByPath(sec, para, hopsJson, params.after_row, true));
+        // Fill read-back: the engine clones an ADJACENT row's cell style for
+        // the new row — when that template is a header/label/topic row the
+        // new data row inherits its shading (the gray-헤더-배경 bug). Return
+        // the new row's fills next to its neighbors' so the agent can spot
+        // the leak and normalize with set_cell_fill in the same turn.
+        if (r && r.ok !== false) {
+          try {
+            const ref = resolveTablePath(params.path);
+            if (!ref.nested) {
+              const bboxes = tableBboxesAt(ref);
+              const newRow = (typeof params.after_row === 'number' ? params.after_row : -1) + 1;
+              const fills = {
+                inserted_row: newRow,
+                inserted: rowFillsAt(ref, bboxes, newRow),
+                row_above: newRow > 0 ? rowFillsAt(ref, bboxes, newRow - 1) : [],
+                row_below: rowFillsAt(ref, bboxes, newRow + 1),
+              };
+              const key = (cells) => JSON.stringify(cells.map((c) => c.fill));
+              const reference = fills.row_below.length ? fills.row_below : fills.row_above;
+              if (reference.length && key(fills.inserted) !== key(reference)) {
+                fills.fill_note =
+                  'inserted row cell backgrounds differ from the adjacent row — ' +
+                  'check whether it cloned header/label shading (or dropped the ' +
+                  'data rows\' shading) and normalize with set_cell_fill.';
+              }
+              r.fill_check = fills;
+            }
+          } catch {}
+        }
         return r;
       },
       async insertTableColumn(params) {

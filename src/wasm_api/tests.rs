@@ -21742,3 +21742,189 @@ fn test_reflow_linesegs_empty_document_returns_zero() {
     let count = doc.reflow_linesegs();
     assert_eq!(count, 0);
 }
+
+#[test]
+fn test_set_cell_text_multiline_stacks_in_top_aligned_cell() {
+    // Regression (form_08 PJBL 결과보고서 — 멀티라인 setCellText 겹침):
+    // 브리지의 setCellText 는 셀을 문단 1개로 접은 뒤(delete+merge) 줄마다
+    // split+insert 로 다시 쓴다. 편집 직후 reflow_line_segs 가 만든 LineSeg 는
+    // vertical_pos=0(Default) 인데, Top 정렬 셀의 문단별 vpos 앵커가 이 0 을
+    // "셀 상단" 유효 위치로 신뢰하면 기록된 모든 문단이 셀 최상단 한 줄에
+    // 겹쳐 그려진다. cp_idx>0 문단은 vpos>0 일 때만 앵커해야 한다.
+    use std::path::Path;
+    let path = Path::new("samples/form_08_pjbl.hwpx");
+    if !path.exists() {
+        eprintln!("form_08_pjbl.hwpx 없음 — 건너뜀");
+        return;
+    }
+    let data = std::fs::read(path).unwrap();
+    let mut doc = HwpDocument::from_bytes(&data).unwrap();
+
+    // 대상: "이론적 배경" 템플릿 문단을 가진 큰 Top 정렬 셀 (마지막 표).
+    let mut target: Option<(usize, usize, usize)> = None; // (para, ctrl, cell)
+    for (pi, para) in doc.document.sections[0].paragraphs.iter().enumerate() {
+        for (ci, ctrl) in para.controls.iter().enumerate() {
+            if let Control::Table(t) = ctrl {
+                for (cell_i, cell) in t.cells.iter().enumerate() {
+                    if cell
+                        .paragraphs
+                        .iter()
+                        .any(|p| p.text.contains("이론적 배경"))
+                    {
+                        target = Some((pi, ci, cell_i));
+                    }
+                }
+            }
+        }
+    }
+    let (pi, ci, cell_i) = target.expect("form_08 big cell not found");
+
+    // 브리지 setCellText 와 동일 시퀀스: 접기(역순 delete+merge) → 3줄 쓰기.
+    let pcount = {
+        if let Control::Table(t) = &doc.document.sections[0].paragraphs[pi].controls[ci] {
+            t.cells[cell_i].paragraphs.len()
+        } else {
+            panic!("not a table");
+        }
+    };
+    for p in (0..pcount).rev() {
+        let len = {
+            if let Control::Table(t) = &doc.document.sections[0].paragraphs[pi].controls[ci] {
+                t.cells[cell_i].paragraphs[p].text.chars().count()
+            } else {
+                0
+            }
+        };
+        if len > 0 {
+            doc.delete_text_in_cell_native(0, pi, ci, cell_i, p, 0, len)
+                .unwrap();
+        }
+        if p > 0 {
+            doc.merge_paragraph_in_cell_native(0, pi, ci, cell_i, p).unwrap();
+        }
+    }
+    let lines = ["뷁뷁뷁 첫 줄", "쀍쀍쀍 둘째 줄", "휅휅휅 셋째 줄"];
+    doc.insert_text_in_cell_native(0, pi, ci, cell_i, 0, 0, lines[0])
+        .unwrap();
+    for i in 1..lines.len() {
+        let prev_len = {
+            if let Control::Table(t) = &doc.document.sections[0].paragraphs[pi].controls[ci] {
+                t.cells[cell_i].paragraphs[i - 1].text.chars().count()
+            } else {
+                0
+            }
+        };
+        doc.split_paragraph_in_cell_native(0, pi, ci, cell_i, i - 1, prev_len)
+            .unwrap();
+        doc.insert_text_in_cell_native(0, pi, ci, cell_i, i, 0, lines[i])
+            .unwrap();
+    }
+
+    // 마커 글리프의 렌더 y 좌표: 뷁 < 쀍 < 휅 로 줄이 실제로 쌓여야 한다.
+    // 주의: "y=\"" 만 찾으면 font-family=\"…\" 의 꼬리(y=")에 걸린다 —
+    // 공백 포함 " y=\"" 로 속성 경계를 고정한다.
+    let glyph_y = |svg: &str, marker: char| -> Option<f64> {
+        let pos = svg.find(marker)?;
+        let head = &svg[..pos];
+        let ystart = head.rfind(" y=\"")?;
+        let rest = &head[ystart + 4..];
+        let yend = rest.find('"')?;
+        rest[..yend].parse::<f64>().ok()
+    };
+    let mut found = None;
+    for page in 0..12u32 {
+        if let Ok(svg) = doc.render_page_svg_native(page) {
+            if svg.contains('뷁') {
+                found = Some(svg);
+                break;
+            }
+        }
+    }
+    let svg = found.expect("rendered page containing marker not found");
+    let y1 = glyph_y(&svg, '뷁').expect("뷁 y not found");
+    let y2 = glyph_y(&svg, '쀍').expect("쀍 y not found");
+    let y3 = glyph_y(&svg, '휅').expect("휅 y not found");
+    assert!(
+        y2 > y1 + 5.0 && y3 > y2 + 5.0,
+        "multiline cell paragraphs must stack downward, got y1={y1} y2={y2} y3={y3}"
+    );
+}
+
+#[test]
+fn corpus_audit_top_cell_vpos_zero_guard() {
+    // Diagnostic (not a regression assert): counts, per corpus doc, how many
+    // PRISTINE Top-aligned cell paragraphs (cp_idx>0, no nested table) carry
+    // first-seg vertical_pos==0 — the only condition whose render behavior
+    // the [Mindlogic edited-cell vpos=0 anchor guard] changes. 0 hits on a
+    // doc ⇒ its render is byte-identical pre/post guard.
+    use std::path::Path;
+    let dir = Path::new("samples/_corpus_tmp");
+    if !dir.exists() {
+        eprintln!("_corpus_tmp 없음 — 건너뜀");
+        return;
+    }
+    let mut total_docs = 0;
+    let mut affected_docs = 0;
+    let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
+    entries.sort_by_key(|e| e.path());
+    for entry in entries {
+        let p = entry.path();
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "hwpx" && ext != "hwp" {
+            continue;
+        }
+        let data = match std::fs::read(&p) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let doc = match HwpDocument::from_bytes(&data) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("AUDIT parse-fail {}", p.display());
+                continue;
+            }
+        };
+        total_docs += 1;
+        let mut hits = 0usize;
+        fn walk_table(t: &crate::model::table::Table, hits: &mut usize) {
+            for cell in &t.cells {
+                let has_nested = cell
+                    .paragraphs
+                    .iter()
+                    .any(|p| p.controls.iter().any(|c| matches!(c, Control::Table(_))));
+                let is_top = matches!(
+                    cell.vertical_align,
+                    crate::model::table::VerticalAlign::Top
+                );
+                for (cp_idx, cp) in cell.paragraphs.iter().enumerate() {
+                    if is_top && !has_nested && cp_idx > 0 {
+                        if let Some(seg) = cp.line_segs.first() {
+                            if seg.vertical_pos == 0 {
+                                *hits += 1;
+                            }
+                        }
+                    }
+                    for c in &cp.controls {
+                        if let Control::Table(nt) = c {
+                            walk_table(nt, hits);
+                        }
+                    }
+                }
+            }
+        }
+        for section in &doc.document.sections {
+            for para in &section.paragraphs {
+                for ctrl in &para.controls {
+                    if let Control::Table(t) = ctrl {
+                        walk_table(t, &mut hits);
+                    }
+                }
+            }
+        }
+        if hits > 0 {
+            affected_docs += 1;
+            eprintln!("AUDIT HIT {} hits={}", p.display(), hits);
+        }
+    }
+    eprintln!("AUDIT done docs={} affected={}", total_docs, affected_docs);
+}
