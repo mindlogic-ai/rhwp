@@ -56,10 +56,25 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
     z.write_deflated("Contents/header.xml", &header_xml)?;
 
     // 4. Contents/section{N}.xml — 실제 섹션만큼, 없으면 0개
+    //    + 각 섹션의 바탕쪽(masterpage) 파일 raw pass-through — 드롭하면
+    //    페이지 레터헤드/워터마크가 통째로 사라진다 (corpus/59 reopen_render).
     let section_hrefs: Vec<String> = (0..doc.sections.len())
         .map(|i| format!("Contents/section{}.xml", i))
         .collect();
+    let mut master_page_items: Vec<Vec<(String, String)>> = Vec::with_capacity(doc.sections.len());
     for (i, sec) in doc.sections.iter().enumerate() {
+        let mut items = Vec::new();
+        for (href, xml) in &sec.hwpx_master_page_xml {
+            let id = href
+                .rsplit('/')
+                .next()
+                .unwrap_or(href)
+                .trim_end_matches(".xml")
+                .to_string();
+            z.write_deflated(href, xml)?;
+            items.push((id, href.clone()));
+        }
+        master_page_items.push(items);
         let xml = section::write_section(sec, doc, i, &mut ctx)?;
         z.write_deflated(&section_hrefs[i], &xml)?;
     }
@@ -103,7 +118,8 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
             media_type: e.media_type.clone(),
         })
         .collect();
-    let content_hpf = content::write_content_hpf(&section_hrefs, &content_bin_entries)?;
+    let content_hpf =
+        content::write_content_hpf(&section_hrefs, &master_page_items, &content_bin_entries)?;
     z.write_deflated("Contents/content.hpf", &content_hpf)?;
 
     // 10. META-INF/container.xml

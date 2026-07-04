@@ -13,6 +13,19 @@ fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
 }
 
+fn masterpage_count(bytes: &[u8]) -> usize {
+    let cursor = std::io::Cursor::new(bytes);
+    let zip = zip::ZipArchive::new(cursor).expect("zip");
+    (0..zip.len())
+        .filter(|&i| {
+            let mut z = zip.clone();
+            z.by_index(i)
+                .map(|f| f.name().to_ascii_lowercase().contains("masterpage"))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 fn section_xml(bytes: &[u8]) -> String {
     let cursor = std::io::Cursor::new(bytes);
     let mut zip = zip::ZipArchive::new(cursor).expect("zip");
@@ -91,6 +104,11 @@ fn main() {
             }
             detail.push_str(&format!("{}={}→{} ", k.trim_start_matches("<hp:").trim(), a, b));
         }
+        let (ma, mb) = (masterpage_count(&data), masterpage_count(&out));
+        if mb < ma {
+            ok = false;
+        }
+        detail.push_str(&format!("masterpage={}→{}", ma, mb));
         println!("{}: {} {}", path, if ok { "OK" } else { "LOST" }, detail);
     }
 }

@@ -111,6 +111,11 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
                     for master_page_href in master_page_files {
                         match reader.read_file(master_page_href) {
                             Ok(master_page_xml) => {
+                                // raw pass-through 보존 (export 시 그대로 재기록)
+                                section.hwpx_master_page_xml.push((
+                                    master_page_href.clone(),
+                                    master_page_xml.as_bytes().to_vec(),
+                                ));
                                 match section::parse_hwpx_master_page(&master_page_xml) {
                                     Ok(master_page) => {
                                         section.section_def.master_pages.push(master_page);

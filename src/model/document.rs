@@ -184,6 +184,10 @@ pub struct Section {
     /// Body text edits can regenerate paragraph text while preserving page
     /// setup attributes that are not fully represented in the current IR.
     pub hwpx_sec_pr_xml: Option<Vec<u8>>,
+    /// Original HWPX masterpage files for this section: (href, raw XML).
+    /// The edit path never touches 바탕쪽, so export passes them through
+    /// byte-for-byte (dropping them loses page-0 letterheads/watermarks).
+    pub hwpx_master_page_xml: Vec<(String, Vec<u8>)>,
 }
 
 /// 구역 정의 (HWPTAG_CTRL_HEADER - 'secd')

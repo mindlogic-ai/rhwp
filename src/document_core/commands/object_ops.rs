@@ -4864,6 +4864,7 @@ mod resize_clamp_tests {
             raw_stream: None,
             hwpx_section_xml: None,
             hwpx_sec_pr_xml: None,
+            hwpx_master_page_xml: Vec::new(),
         });
         let mut core = DocumentCore::new_empty();
         // set_document이 composed/styles/pagination 벡터를 일관되게 초기화한다.

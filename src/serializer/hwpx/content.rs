@@ -21,6 +21,7 @@ pub struct BinDataEntry {
 /// content.hpf XML 생성
 pub fn write_content_hpf(
     section_hrefs: &[String],
+    master_page_items: &[Vec<(String, String)>],
     bin_data: &[BinDataEntry],
 ) -> Result<Vec<u8>, SerializeError> {
     let buf = Cursor::new(Vec::new());
@@ -98,6 +99,21 @@ pub fn write_content_hpf(
     )?;
 
     for (i, href) in section_hrefs.iter().enumerate() {
+        // 바탕쪽 item 은 소속 section item 앞에 배치 — 파서의 masterpage↔section
+        // 연관 규칙(선행 pending 귀속)이 이 순서에 의존한다.
+        if let Some(items) = master_page_items.get(i) {
+            for (mp_id, mp_href) in items {
+                empty_tag(
+                    &mut w,
+                    "opf:item",
+                    &[
+                        ("id", mp_id.as_str()),
+                        ("href", mp_href.as_str()),
+                        ("media-type", "application/xml"),
+                    ],
+                )?;
+            }
+        }
         let id = format!("section{}", i);
         empty_tag(
             &mut w,

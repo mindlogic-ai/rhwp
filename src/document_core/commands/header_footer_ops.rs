@@ -1133,6 +1133,7 @@ mod tests {
             raw_stream: None,
             hwpx_section_xml: None,
             hwpx_sec_pr_xml: None,
+            hwpx_master_page_xml: Vec::new(),
         };
         doc.sections.push(section);
         let mut core = DocumentCore::new_empty();
