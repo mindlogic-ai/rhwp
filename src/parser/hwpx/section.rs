@@ -29,7 +29,8 @@ use crate::model::HwpUnit16;
 use crate::parser::tags;
 
 use super::utils::{
-    attr_str, local_name, parse_bool, parse_color, parse_gradient_type, parse_hatch_style,
+    attr_str, attr_str_unescaped, local_name, parse_bool, parse_color, parse_gradient_type,
+    parse_hatch_style,
     parse_i16, parse_i32, parse_i32_wrapping, parse_i8, parse_u16, parse_u32, parse_u8,
     skip_element,
 };
@@ -4426,7 +4427,7 @@ fn parse_compose(
             }
             // 한컴 HWPX는 `composeText="장"`처럼 속성에 글자를 넣기도 한다.
             // 자식 element form(<composeText>장</composeText>)이 뒤에 나오면 그쪽이 덮어쓴다.
-            b"composeText" => co.chars = attr_str(&attr).chars().collect(),
+            b"composeText" => co.chars = attr_str_unescaped(&attr).chars().collect(),
             _ => {}
         }
     }
@@ -4750,13 +4751,13 @@ fn parse_form_object(
     // [Task #852 Stage 2.4] HWP5 직렬화에 필요한 ComboBox/Edit/Button 속성 보존
     for attr in e.attributes().flatten() {
         match attr.key.as_ref() {
-            b"name" => form.name = attr_str(&attr),
-            b"caption" => form.caption = attr_str(&attr),
+            b"name" => form.name = attr_str_unescaped(&attr),
+            b"caption" => form.caption = attr_str_unescaped(&attr),
             b"foreColor" => form.fore_color = parse_color(&attr),
             b"backColor" => form.back_color = parse_color(&attr),
             b"enabled" => form.enabled = parse_bool(&attr),
             b"value" => form.value = if attr_str(&attr) == "CHECKED" { 1 } else { 0 },
-            b"selectedValue" => form.text = attr_str(&attr), // comboBox 선택값
+            b"selectedValue" => form.text = attr_str_unescaped(&attr), // comboBox 선택값
             // ComboBox 전용 속성 (HWP5 ComboBoxSet 직렬화에 필요)
             b"listBoxRows" => {
                 form.properties
@@ -4861,7 +4862,7 @@ fn parse_form_object(
                         // <hp:listItem value="..."/> (comboBox 항목)
                         for attr in ce.attributes().flatten() {
                             if attr.key.as_ref() == b"value" {
-                                list_items.push(attr_str(&attr));
+                                list_items.push(attr_str_unescaped(&attr));
                             }
                         }
                     }

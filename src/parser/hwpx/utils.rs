@@ -22,6 +22,15 @@ pub fn attr_str(attr: &quick_xml::events::attributes::Attribute) -> String {
     String::from_utf8_lossy(&attr.value).to_string()
 }
 
+/// attr_str + XML entity 디코딩 — 사용자 표시 문자열(캡션/이름/composeText 등)용.
+/// attr_str 은 raw 이스케이프 형태("R&amp;D")를 그대로 돌려주므로, 표시 문자열을
+/// 모델에 담을 땐 이 함수를 써야 재직렬화 시 이중 이스케이프가 생기지 않는다.
+pub fn attr_str_unescaped(attr: &quick_xml::events::attributes::Attribute) -> String {
+    attr.unescape_value()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| attr_str(attr))
+}
+
 /// 속성 값이 특정 문자열과 일치하는지 확인 (비교용)
 pub fn attr_eq(attr: &quick_xml::events::attributes::Attribute, val: &str) -> bool {
     attr.value.as_ref() == val.as_bytes()

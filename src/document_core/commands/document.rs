@@ -615,6 +615,28 @@ impl DocumentCore {
         false
     }
 
+    /// R3 재계산 결과가 "메트릭 노이즈"인지 판정한다 — 노이즈면 신뢰된 원본
+    /// lineseg 캐시를 유지한다 (커밋하면 편집과 무관한 페이지들이 재배치되는
+    /// render_locality/reopen_render 회귀).
+    ///
+    /// - 1줄 유지: 줄바꿈 불변 → 노이즈.
+    /// - 2줄 + 꼬리가 첫 줄의 1/8 미만: rhwp 라인 메트릭이 한컴보다 몇 % 일찍
+    ///   줄을 접은 것 (corpus/51 tail=3/39, corpus/59 tail=4/52, corpus/52
+    ///   tail=1..7 — 전부 이 패턴). 진짜 textRun overflow(#177)는 텍스트가
+    ///   한 줄을 크게 초과해 꼬리가 실질적이다.
+    fn reflow_is_metric_noise(para: &crate::model::paragraph::Paragraph) -> bool {
+        match para.line_segs.len() {
+            1 => true,
+            2 => {
+                let total: u32 = para.text.chars().map(|c| c.len_utf16() as u32).sum();
+                let line2_start = para.line_segs[1].text_start;
+                let tail = total.saturating_sub(line2_start);
+                tail * 8 < line2_start
+            }
+            _ => false,
+        }
+    }
+
     /// 사용자 명시 요청에 의한 전체 lineseg reflow (#177).
     ///
     /// `validate_linesegs` 에 기록된 경고 대상 문단들 중 reflow 가능한 것을 모두 처리한다.
@@ -671,7 +693,7 @@ impl DocumentCore {
                             para.text.chars().take(50).collect::<String>(),
                         );
                     }
-                    if healthy_single && para.line_segs.len() == 1 {
+                    if healthy_single && Self::reflow_is_metric_noise(para) {
                         para.line_segs = prior;
                     } else {
                         reflowed += 1;
@@ -695,12 +717,12 @@ impl DocumentCore {
                             let cell_inner_width = (cell_w_px - pad_left - pad_right).max(1.0);
                             for cell_para in &mut cell.paragraphs {
                                 if Self::needs_reflow_broadly(cell_para) {
-                                    // 본문과 동일: 줄 수 불변이면 원본 캐시 유지
+                                    // 본문과 동일: 메트릭 노이즈면 원본 캐시 유지
                                     let prior = cell_para.line_segs.clone();
                                     let healthy_single =
                                         prior.len() == 1 && prior[0].line_height > 0;
                                     reflow_line_segs(cell_para, cell_inner_width, &styles, dpi);
-                                    if healthy_single && cell_para.line_segs.len() == 1 {
+                                    if healthy_single && Self::reflow_is_metric_noise(cell_para) {
                                         cell_para.line_segs = prior;
                                     } else {
                                         reflowed += 1;
