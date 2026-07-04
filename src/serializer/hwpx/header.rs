@@ -29,9 +29,18 @@ use super::SerializeError;
 
 /// `header.xml` 바이트 생성. Stage 1 진입점.
 pub fn write_header(doc: &Document, ctx: &SerializeContext) -> Result<Vec<u8>, SerializeError> {
-    if !doc.doc_info.raw_stream_dirty {
-        if let Some(raw) = &doc.doc_info.hwpx_header_xml {
+    if let Some(raw) = &doc.doc_info.hwpx_header_xml {
+        if !doc.doc_info.raw_stream_dirty {
             return Ok(raw.clone());
+        }
+        // dirty 의 대부분은 find_or_create_char/para_shape 의 순수-append
+        // (예: setCellText 의 정렬 보존이 paraPr 하나 추가). 그 경우 헤더
+        // 전체를 재생성하면 재생성 미지원 필드(폰트 typeInfo, charPr
+        // outline/shadow, heading 상세 등)가 통째로 유실돼 재열기 렌더가
+        // 달라진다 (edit-eval reopen_render 회귀). 원본 헤더를 그대로 두고
+        // 추가분만 이어붙일 수 있으면 그렇게 한다.
+        if let Some(patched) = try_patch_raw_header(raw, &doc.doc_info) {
+            return Ok(patched);
         }
     }
 
@@ -343,6 +352,135 @@ fn color_hex(c: ColorRef) -> String {
 // =====================================================================
 // <hh:charProperties>
 // =====================================================================
+
+// ─── raw header 순수-append 패치 ─────────────────────────────────────────────
+
+/// 컨테이너 열림 태그에서 itemCnt 를 읽는다. 컨테이너가 없으면 None 이 아니라
+/// Some(0) 도 아님 — 호출측에서 구분한다.
+fn raw_container(s: &str, tag: &str) -> Option<(usize, usize, usize)> {
+    // returns (itemCnt, open_tag_start, open_tag_end_exclusive)
+    let open = format!("<{} ", tag);
+    let i = s.find(&open)?;
+    let rel_end = s[i..].find('>')?;
+    let head = &s[i..i + rel_end + 1];
+    let j = head.find("itemCnt=\"")? + 9;
+    let k = head[j..].find('\"')? + j;
+    let cnt: usize = head[j..k].parse().ok()?;
+    Some((cnt, i, i + rel_end + 1))
+}
+
+fn raw_cnt_or_zero(s: &str, tag: &str) -> usize {
+    raw_container(s, tag).map(|(c, _, _)| c).unwrap_or(0)
+}
+
+/// 컨테이너의 itemCnt 를 갱신하고 닫힘 태그 직전에 new_items 를 삽입.
+fn append_to_container(
+    s: &mut String,
+    tag: &str,
+    raw_cnt: usize,
+    new_cnt: usize,
+    new_items: &str,
+) -> Option<()> {
+    let (cnt, open_start, open_end) = raw_container(s, tag)?;
+    if cnt != raw_cnt {
+        return None;
+    }
+    let close = format!("</{}>", tag);
+    let close_pos = s[open_end..].find(&close)? + open_end;
+    s.insert_str(close_pos, new_items);
+    // itemCnt 는 열림 태그 범위 안에서만 치환 (동일 숫자가 다른 컨테이너에
+    // 있어도 안전).
+    let head = s[open_start..open_end].to_string();
+    let head_new = head.replacen(
+        &format!("itemCnt=\"{}\"", raw_cnt),
+        &format!("itemCnt=\"{}\"", new_cnt),
+        1,
+    );
+    if head == head_new {
+        return None;
+    }
+    s.replace_range(open_start..open_end, &head_new);
+    Some(())
+}
+
+/// 원본 header.xml 을 보존한 채, 파싱 이후 append 된 charPr/paraPr/tabPr 만
+/// 이어붙인 사본을 만든다. 순수-append 로 설명되지 않는 변화(스타일/번호/
+/// 테두리 개수 변화, 기존 항목 축소 등)가 보이면 None → 전체 재생성 폴백.
+fn try_patch_raw_header(raw: &[u8], di: &crate::model::document::DocInfo) -> Option<Vec<u8>> {
+    let mut s = String::from_utf8(raw.to_vec()).ok()?;
+    let mut appended_any = false;
+
+    // append 이외의 변화가 의심되면 포기 (이 컬렉션들은 이 경로에서 불변이어야 함)
+    if raw_cnt_or_zero(&s, "hh:styles") != di.styles.len()
+        || raw_cnt_or_zero(&s, "hh:borderFills") != di.border_fills.len()
+        || raw_cnt_or_zero(&s, "hh:numberings") != di.numberings.len()
+        || raw_cnt_or_zero(&s, "hh:bullets") != di.bullets.len()
+    {
+        return None;
+    }
+
+    fn render_range<F>(from: usize, to: usize, mut f: F) -> Option<String>
+    where
+        F: FnMut(&mut Writer<Vec<u8>>, usize) -> Result<(), SerializeError>,
+    {
+        let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
+        for idx in from..to {
+            f(&mut w, idx).ok()?;
+        }
+        String::from_utf8(w.into_inner()).ok()
+    }
+
+    // charPr
+    {
+        let raw_cnt = raw_cnt_or_zero(&s, "hh:charProperties");
+        let model_cnt = di.char_shapes.len();
+        if model_cnt < raw_cnt {
+            return None;
+        }
+        if model_cnt > raw_cnt {
+            let items =
+                render_range(raw_cnt, model_cnt, |w, i| write_char_pr(w, i as u32, &di.char_shapes[i]))?;
+            append_to_container(&mut s, "hh:charProperties", raw_cnt, model_cnt, &items)?;
+            appended_any = true;
+        }
+    }
+    // paraPr
+    {
+        let raw_cnt = raw_cnt_or_zero(&s, "hh:paraProperties");
+        let model_cnt = di.para_shapes.len();
+        if model_cnt < raw_cnt {
+            return None;
+        }
+        if model_cnt > raw_cnt {
+            let items =
+                render_range(raw_cnt, model_cnt, |w, i| write_para_pr(w, i as u16, &di.para_shapes[i]))?;
+            append_to_container(&mut s, "hh:paraProperties", raw_cnt, model_cnt, &items)?;
+            appended_any = true;
+        }
+    }
+    // tabPr
+    {
+        let raw_cnt = raw_cnt_or_zero(&s, "hh:tabProperties");
+        let model_cnt = di.tab_defs.len();
+        if model_cnt < raw_cnt {
+            return None;
+        }
+        if model_cnt > raw_cnt {
+            let items =
+                render_range(raw_cnt, model_cnt, |w, i| write_tab_pr(w, i as u16, &di.tab_defs[i]))?;
+            append_to_container(&mut s, "hh:tabProperties", raw_cnt, model_cnt, &items)?;
+            appended_any = true;
+        }
+    }
+
+    // dirty 인데 아무 것도 append 되지 않았다면 이 휴리스틱이 모르는
+    // in-place 변경일 수 있다 → 전체 재생성으로 폴백.
+    if !appended_any {
+        return None;
+    }
+    Some(s.into_bytes())
+}
+
 fn write_char_properties<W: Write>(
     w: &mut Writer<W>,
     doc_info: &DocInfo,
@@ -951,6 +1089,28 @@ mod tests {
         let bytes = write_header(&doc, &ctx).expect("write_header");
 
         assert_eq!(bytes, b"<hh:head original=\"1\"/>");
+    }
+
+    #[test]
+    fn write_header_patches_raw_on_pure_append() {
+        // find_or_create_para_shape 류의 순수-append 는 원본 헤더를 보존한 채
+        // 새 항목만 이어붙여야 한다 — 전체 재생성은 typeInfo/heading 등
+        // 재생성 미지원 필드를 유실한다 (edit-eval reopen_render 회귀 가드).
+        let raw = br#"<hh:head version="1.2" secCnt="1"><hh:refList><hh:fontfaces itemCnt="1"><hh:fontface lang="HANGUL" fontCnt="1"><hh:font id="0" face="F"><hh:typeInfo familyType="FCAT_GOTHIC"/></hh:font></hh:fontface></hh:fontfaces><hh:charProperties itemCnt="1"><hh:charPr id="0" height="1000"/></hh:charProperties><hh:paraProperties itemCnt="1"><hh:paraPr id="0"/></hh:paraProperties></hh:refList></hh:head>"#;
+        let mut doc = Document::default();
+        doc.doc_info.hwpx_header_xml = Some(raw.to_vec());
+        doc.doc_info.char_shapes.push(CharShape::default());
+        doc.doc_info.para_shapes.push(ParaShape::default());
+        doc.doc_info.para_shapes.push(ParaShape::default()); // appended (1 raw → 2 model)
+        doc.doc_info.raw_stream_dirty = true;
+
+        let ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_header(&doc, &ctx).expect("write_header");
+        let xml = std::str::from_utf8(&bytes).unwrap();
+        assert!(xml.contains("FCAT_GOTHIC"), "raw typeInfo must survive: {}", xml);
+        assert!(xml.contains(r#"paraProperties itemCnt="2""#), "{}", xml);
+        assert!(xml.contains(r#"<hh:paraPr id="1""#), "appended paraPr present: {}", xml);
+        assert!(xml.contains(r#"charProperties itemCnt="1""#), "unchanged container untouched: {}", xml);
     }
 
     #[test]
