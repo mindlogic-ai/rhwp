@@ -626,6 +626,29 @@ fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeC
                 auto_num_type_str(an.number_type),
             ));
         }
+        Control::CharOverlap(co) => {
+            // <hp:compose> — 글자겹침 (원문자/박스숫자). 드롭 시 편집된 표의
+            // 모든 셀에서 ①/□1 류 글자가 사라진다 (corpus/01·52 reopen_render).
+            let compose_text: String = co.chars.iter().collect();
+            out.push_str(&format!(
+                r#"<hp:compose circleType="{}" charSz="{}" composeType="{}" charPrCnt="{}" composeText="{}">"#,
+                compose_circle_type_str(co.border_type),
+                co.inner_char_size,
+                if co.expansion == 1 { "OVERLAP" } else { "SPREAD" },
+                co.char_shape_ids.len(),
+                xml_escape(&compose_text),
+            ));
+            for id in &co.char_shape_ids {
+                out.push_str(&format!(r#"<hp:charPr prIDRef="{}"/>"#, id));
+            }
+            out.push_str("</hp:compose>");
+        }
+        Control::Form(form) => {
+            // 양식 개체 (checkBtn 류). 드롭 시 편집된 표의 체크박스가 캡션째
+            // 사라진다 (form-002 180개, corpus/21 9개). 모델이 보존한 속성만
+            // 복원하고 나머지는 한컴 기본값 — 렌더 내용(캡션/체크 상태)은 유지.
+            out.push_str(&render_form_object(form));
+        }
         Control::PageHide(ph) => {
             out.push_str(&format!(
                 r#"<hp:ctrl><hp:pageHiding hideHeader="{}" hideFooter="{}" hideMasterPage="{}" hideBorder="{}" hideFill="{}" hidePageNum="{}"/></hp:ctrl>"#,
@@ -670,6 +693,101 @@ fn num_format_str(format: u8) -> &'static str {
         7 => "HANJA",
         _ => "DIGIT",
     }
+}
+
+/// parse_compose circleType 의 역매핑 (파서의 SHAPE_REVERSAL_TIRANGLE 오탈자 유지).
+fn compose_circle_type_str(border_type: u8) -> &'static str {
+    match border_type {
+        1 => "SHAPE_CIRCLE",
+        2 => "SHAPE_REVERSAL_CIRCLE",
+        3 => "SHAPE_RECTANGLE",
+        4 => "SHAPE_REVERSAL_RECTANGLE",
+        5 => "SHAPE_TRIANGLE",
+        6 => "SHAPE_REVERSAL_TIRANGLE",
+        _ => "CHAR",
+    }
+}
+
+/// 0x00BBGGRR → "#RRGGBB" (parse_color_str 의 역매핑).
+fn color_ref_str(c: u32) -> String {
+    if c == 0xFFFF_FFFF {
+        return "none".to_string();
+    }
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        c & 0xFF,
+        (c >> 8) & 0xFF,
+        (c >> 16) & 0xFF
+    )
+}
+
+/// FormObject → <hp:btn|checkBtn|radioBtn|comboBox|edit> (parse_form_object 의 역매핑).
+/// 모델이 보존하지 않는 속성(triState/backStyle/pos 세부)은 한컴 기본값으로 채운다.
+fn render_form_object(form: &crate::model::control::FormObject) -> String {
+    use crate::model::control::FormType;
+    let tag = match form.form_type {
+        FormType::PushButton => "hp:btn",
+        FormType::CheckBox => "hp:checkBtn",
+        FormType::ComboBox => "hp:comboBox",
+        FormType::RadioButton => "hp:radioBtn",
+        FormType::Edit => "hp:edit",
+    };
+    let prop = |k: &str, d: &str| -> String {
+        form.properties
+            .get(k)
+            .cloned()
+            .unwrap_or_else(|| d.to_string())
+    };
+    let mut out = format!(
+        r#"<{tag} caption="{}" value="{}" radioGroupName="" triState="0" backStyle="OPAQUE" name="{}" foreColor="{}" backColor="{}" groupName="{}" tabStop="{}" editable="{}" tabOrder="{}" enabled="{}" borderTypeIDRef="{}" drawFrame="{}" printable="{}" command="{}""#,
+        xml_escape(&form.caption),
+        if form.value != 0 { "CHECKED" } else { "UNCHECKED" },
+        xml_escape(&form.name),
+        color_ref_str(form.fore_color),
+        color_ref_str(form.back_color),
+        xml_escape(&prop("GroupName", "")),
+        prop("TabStop", "1"),
+        prop("Editable", "1"),
+        prop("TabOrder", "0"),
+        if form.enabled { "1" } else { "0" },
+        prop("BorderType", "0"),
+        prop("DrawFrame", "1"),
+        prop("Printable", "1"),
+        xml_escape(&prop("Command", "")),
+    );
+    if matches!(form.form_type, FormType::ComboBox) {
+        out.push_str(&format!(r#" selectedValue="{}""#, xml_escape(&form.text)));
+        out.push_str(&format!(r#" listBoxRows="{}""#, prop("ListBoxRows", "0")));
+        out.push_str(&format!(r#" listBoxWidth="{}""#, prop("ListBoxWidth", "0")));
+        out.push_str(&format!(r#" editEnable="{}""#, prop("EditEnable", "0")));
+    }
+    out.push('>');
+    out.push_str(&format!(
+        r#"<hp:formCharPr charPrIDRef="{}" followContext="{}" autoSz="{}" wordWrap="{}"/>"#,
+        prop("CharShapeID", "0"),
+        prop("FollowContext", "0"),
+        prop("AutoSize", "0"),
+        prop("WordWrap", "0"),
+    ));
+    out.push_str(&format!(
+        r#"<hp:sz width="{}" widthRelTo="ABSOLUTE" height="{}" heightRelTo="ABSOLUTE" protect="0"/>"#,
+        form.width, form.height
+    ));
+    out.push_str(
+        r#"<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="1" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/>"#,
+    );
+    if matches!(form.form_type, FormType::ComboBox) {
+        let mut i = 0;
+        while let Some(item) = form.properties.get(&format!("listItem{}", i)) {
+            out.push_str(&format!(r#"<hp:listItem value="{}"/>"#, xml_escape(item)));
+            i += 1;
+        }
+    }
+    if matches!(form.form_type, FormType::Edit) && !form.text.is_empty() {
+        out.push_str(&format!("<hp:text>{}</hp:text>", xml_escape(&form.text)));
+    }
+    out.push_str(&format!("</{tag}>"));
+    out
 }
 
 /// parse_num_type 의 역매핑.

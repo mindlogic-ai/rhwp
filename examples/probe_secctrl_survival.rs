@@ -70,7 +70,18 @@ fn main() {
 
         let src = section_xml(&data);
         let edited = section_xml(&out);
-        let keys = ["<hp:pageNum ", "<hp:newNum ", "<hp:autoNum ", "<hp:pageHiding "];
+        let keys = [
+            "<hp:pageNum ",
+            "<hp:newNum ",
+            "<hp:autoNum ",
+            "<hp:pageHiding ",
+            "<hp:compose ",
+            "<hp:checkBtn ",
+            "<hp:btn ",
+            "<hp:radioBtn ",
+            "<hp:comboBox ",
+            "<hp:edit ",
+        ];
         let mut ok = true;
         let mut detail = String::new();
         for k in keys {
