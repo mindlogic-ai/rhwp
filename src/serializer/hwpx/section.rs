@@ -423,6 +423,12 @@ fn render_run_content(para: &Paragraph, ctx: &mut SerializeContext) -> String {
     if out.is_empty() {
         render_hp_t_content("")
     } else {
+        // 한컴은 컨트롤만 있는 run 에도 빈 <hp:t/>를 둔다 — 없으면 재파싱된
+        // run 에 텍스트런이 없어 compose 류 글리프가 렌더되지 않는다
+        // (corpus/52 "목차" 드롭).
+        if !out.contains("<hp:t") {
+            out.push_str("<hp:t></hp:t>");
+        }
         out
     }
 }
@@ -499,6 +505,10 @@ fn render_run_content_with_fields(para: &Paragraph, ctx: &mut SerializeContext) 
     if out.is_empty() {
         render_hp_t_content("")
     } else {
+        // render_run_content 와 동일 — 컨트롤만 있는 run 에도 빈 <hp:t/> 유지.
+        if !out.contains("<hp:t") {
+            out.push_str("<hp:t></hp:t>");
+        }
         out
     }
 }
