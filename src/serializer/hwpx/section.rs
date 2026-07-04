@@ -556,6 +556,10 @@ fn is_hwpx_inline_slot(control: &Control) -> bool {
             | Control::Footer(_)
             | Control::Footnote(_)
             | Control::Endnote(_)
+            | Control::PageNumberPos(_)
+            | Control::NewNumber(_)
+            | Control::AutoNumber(_)
+            | Control::PageHide(_)
     )
 }
 
@@ -598,7 +602,87 @@ fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeC
         Control::Footer(footer) => {
             out.push_str(&render_footer(footer, ctx));
         }
+        // 섹션/번호 인라인 컨트롤 — 편집으로 첫 문단이 IR 재생성될 때
+        // 쪽번호/새번호 표시가 통째로 사라지던 가족 (edit-eval reopen_render).
+        Control::PageNumberPos(pn) => {
+            out.push_str(&format!(
+                r#"<hp:ctrl><hp:pageNum pos="{}" formatType="{}" sideChar="{}"/></hp:ctrl>"#,
+                page_num_pos_str(pn.position),
+                num_format_str(pn.format),
+                xml_escape(&pn.dash_char.to_string()),
+            ));
+        }
+        Control::NewNumber(nn) => {
+            out.push_str(&format!(
+                r#"<hp:ctrl><hp:newNum num="{}" numType="{}"/></hp:ctrl>"#,
+                nn.number,
+                auto_num_type_str(nn.number_type),
+            ));
+        }
+        Control::AutoNumber(an) => {
+            out.push_str(&format!(
+                r#"<hp:ctrl><hp:autoNum num="{}" numType="{}"/></hp:ctrl>"#,
+                an.number,
+                auto_num_type_str(an.number_type),
+            ));
+        }
+        Control::PageHide(ph) => {
+            out.push_str(&format!(
+                r#"<hp:ctrl><hp:pageHiding hideHeader="{}" hideFooter="{}" hideMasterPage="{}" hideBorder="{}" hideFill="{}" hidePageNum="{}"/></hp:ctrl>"#,
+                ph.hide_header as u8,
+                ph.hide_footer as u8,
+                ph.hide_master_page as u8,
+                ph.hide_border as u8,
+                ph.hide_fill as u8,
+                ph.hide_page_num as u8,
+            ));
+        }
         _ => {}
+    }
+}
+
+/// parse_page_num_attrs 의 역매핑 (HWP 스펙 표 150 bit 8~11).
+fn page_num_pos_str(pos: u8) -> &'static str {
+    match pos {
+        0 => "NONE",
+        1 => "TOP_LEFT",
+        2 => "TOP_CENTER",
+        3 => "TOP_RIGHT",
+        4 => "BOTTOM_LEFT",
+        6 => "BOTTOM_RIGHT",
+        7 => "OUTSIDE_TOP",
+        8 => "OUTSIDE_BOTTOM",
+        9 => "INSIDE_TOP",
+        10 => "INSIDE_BOTTOM",
+        _ => "BOTTOM_CENTER",
+    }
+}
+
+/// parse_page_num_attrs formatType 의 역매핑 (표 134).
+fn num_format_str(format: u8) -> &'static str {
+    match format {
+        1 => "CIRCLE_DIGIT",
+        2 => "ROMAN_CAPITAL",
+        3 => "ROMAN_SMALL",
+        4 => "LATIN_CAPITAL",
+        5 => "LATIN_SMALL",
+        6 => "HANGUL",
+        7 => "HANJA",
+        _ => "DIGIT",
+    }
+}
+
+/// parse_num_type 의 역매핑.
+fn auto_num_type_str(t: crate::model::control::AutoNumberType) -> &'static str {
+    use crate::model::control::AutoNumberType::*;
+    match t {
+        Page => "PAGE",
+        TotalPage => "TOTAL_PAGE",
+        Footnote => "FOOTNOTE",
+        Endnote => "ENDNOTE",
+        Picture => "PICTURE",
+        Table => "TABLE",
+        Equation => "EQUATION",
     }
 }
 
