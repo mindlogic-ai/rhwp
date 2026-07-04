@@ -641,10 +641,23 @@ impl DocumentCore {
                     let margin_left = para_style.map(|s| s.margin_left).unwrap_or(0.0);
                     let margin_right = para_style.map(|s| s.margin_right).unwrap_or(0.0);
                     let available_width = (col_width - margin_left - margin_right).max(1.0);
+                    // R3(정상 단일 lineseg + 긴 텍스트) 후보는 재계산 줄 수가
+                    // 그대로면 원본(신뢰된) lineseg 캐시를 유지한다 — 커밋하면
+                    // rhwp 라인 메트릭으로 치환되어 첫 편집에서 편집 위치와
+                    // 무관한 앞 페이지들까지 수 px 들리고 페이지 경계가 밀리는
+                    // 드리프트가 생긴다 (edit-eval render_locality 회귀).
+                    // 실제로 줄바꿈이 달라지는 깨진-렌더 케이스(#177 본래
+                    // 목적)만 커밋한다.
+                    let prior = para.line_segs.clone();
+                    let healthy_single = prior.len() == 1 && prior[0].line_height > 0;
                     reflow_line_segs(para, available_width, &styles, dpi);
-                    reflowed += 1;
-                    if min_reflowed_idx.is_none() {
-                        min_reflowed_idx = Some(pi);
+                    if healthy_single && para.line_segs.len() == 1 {
+                        para.line_segs = prior;
+                    } else {
+                        reflowed += 1;
+                        if min_reflowed_idx.is_none() {
+                            min_reflowed_idx = Some(pi);
+                        }
                     }
                 }
                 // 표 셀 내부 문단도 동일 처리
@@ -662,8 +675,16 @@ impl DocumentCore {
                             let cell_inner_width = (cell_w_px - pad_left - pad_right).max(1.0);
                             for cell_para in &mut cell.paragraphs {
                                 if Self::needs_reflow_broadly(cell_para) {
+                                    // 본문과 동일: 줄 수 불변이면 원본 캐시 유지
+                                    let prior = cell_para.line_segs.clone();
+                                    let healthy_single =
+                                        prior.len() == 1 && prior[0].line_height > 0;
                                     reflow_line_segs(cell_para, cell_inner_width, &styles, dpi);
-                                    reflowed += 1;
+                                    if healthy_single && cell_para.line_segs.len() == 1 {
+                                        cell_para.line_segs = prior;
+                                    } else {
+                                        reflowed += 1;
+                                    }
                                 }
                             }
                         }
