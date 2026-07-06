@@ -1782,6 +1782,21 @@
         }
         const cellIdx = resolveCellIdxAt(ref, row, col);
         text = text || '';
+        // Resolve the ANCHOR bbox of the cell we actually landed on. A (row,col)
+        // that falls inside a merged region (colSpan/rowSpan) resolves silently
+        // to the enclosing anchor — so the write goes to a cell whose coords are
+        // NOT the ones the caller named. Surfacing {row,col,span} lets the agent
+        // detect "I addressed a covered slot / a different cell than I meant"
+        // (the form_21 wrong-cell postmortem: verified=true couldn't catch it).
+        let _resolved = null;
+        try {
+          const _bx = tableBboxesAt(ref);
+          const _b = _bx.find((b) => b.cellIdx === cellIdx);
+          if (_b) _resolved = {
+            row: _b.row, col: _b.col, row_span: _b.rowSpan, col_span: _b.colSpan,
+            addressed_interior: _b.row !== row || _b.col !== col,
+          };
+        } catch {}
         // GUARDRAIL: a cell can host nested tables that the text read path
         // does not show (their host paragraphs read as ""). Collapsing the
         // cell would silently delete them AND their data — and the text
@@ -1835,6 +1850,18 @@
         // reflow ignores it, so the text runs off the page edge. So split on
         // "\n" and write one cell paragraph per line. splitParagraphInCell
         // carries the cell paragraph's shape into the new line (same as Enter).
+        // Capture the cell's PRIOR content before we clear it. set_cell_text is a
+        // full replace, so a wrong-cell write silently destroys whatever was here
+        // AND still reports verified=true (read-back only checks the text we just
+        // wrote). Returning previous_text makes every overwrite auditable and lets
+        // the agent notice it just replaced unrelated content (form_21 postmortem).
+        let previous_text = '';
+        try {
+          const _pc = paraCount();
+          const _prev = [];
+          for (let p = 0; p < _pc; p++) _prev.push(getText(p));
+          previous_text = _prev.join('\n');
+        } catch {}
         const segments = text.split('\n');
         doc.beginBatch();
         try {
@@ -1908,7 +1935,12 @@
               autoFitCellRow(doc, sec, para, ctrl, row, col);
             }
           } catch {}
-          return { ok: true, verified, lines };
+          return {
+            ok: true, verified, lines,
+            previous_text,
+            replaced_nonempty: previous_text.trim().length > 0,
+            resolved: _resolved,
+          };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
       async fillEmptyTableCells(params) {
