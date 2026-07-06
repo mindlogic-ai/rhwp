@@ -300,6 +300,53 @@ impl LayoutEngine {
                             paper_w,
                         );
 
+                        // [Mindlogic patch — 1x1-wrapper nested-table editability]
+                        // The wrapper cell is skipped for rendering, but hit-testing
+                        // and editing must still address the inner table *through* the
+                        // wrapper. Build a cell context that carries the wrapper's
+                        // single cell plus a slot for the inner table's own level, so
+                        // inner cells resolve as a 2-level cellPath instead of being
+                        // addressed against the 1-cell wrapper (which produced
+                        // "셀 인덱스 N 범위 초과 (총 1개)" and made the doc non-editable).
+                        let nested_control_index = p
+                            .controls
+                            .iter()
+                            .position(|c| {
+                                matches!(c, Control::Table(t) if std::ptr::eq(t.as_ref(), nested))
+                            })
+                            .unwrap_or(0);
+                        let unwrap_enclosing_ctx = match table_meta {
+                            Some((wrap_para, wrap_ctrl)) => {
+                                let mut path = enclosing_cell_ctx
+                                    .as_ref()
+                                    .map(|c| c.path.clone())
+                                    .unwrap_or_default();
+                                // wrapper table's single cell (cell 0, para 0)
+                                path.push(CellPathEntry {
+                                    control_index: wrap_ctrl,
+                                    cell_index: 0,
+                                    cell_para_index: 0,
+                                    text_direction: 0,
+                                });
+                                // inner table's own level — cell_index/cell_para_index
+                                // are filled per-cell during inner cell layout.
+                                path.push(CellPathEntry {
+                                    control_index: nested_control_index,
+                                    cell_index: 0,
+                                    cell_para_index: 0,
+                                    text_direction: 0,
+                                });
+                                Some(CellContext {
+                                    parent_para_index: enclosing_cell_ctx
+                                        .as_ref()
+                                        .map(|c| c.parent_para_index)
+                                        .unwrap_or(wrap_para),
+                                    path,
+                                })
+                            }
+                            None => enclosing_cell_ctx.clone(),
+                        };
+
                         let y_end = self.layout_table(
                             tree,
                             col_node,
@@ -313,7 +360,7 @@ impl LayoutEngine {
                             depth,
                             table_meta,
                             host_alignment,
-                            enclosing_cell_ctx,
+                            unwrap_enclosing_ctx,
                             host_margin_left,
                             host_margin_right,
                             inline_x_override,
