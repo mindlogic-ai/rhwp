@@ -58,6 +58,51 @@
       if (!m) throw new Error(`bad path: ${path}`);
       return { sec: +m[1], para: +m[2], ctrl: m[3] !== undefined ? +m[3] : 0 };
     }
+    // Grow a body-table row so a just-written cell whose text overflows its
+    // fixed box becomes fully visible — matching native 한글, which treats a
+    // stored row height as a minimum and grows it to fit. Overflow is MEASURED
+    // from the render tree (content-bottom vs cell-box-bottom), so a cell that
+    // already fits reports overflow<=0 and is left untouched. Grow-only,
+    // capped, best-effort (callers wrap in try/catch — this never throws up).
+    function autoFitCellRow(doc, sec, para, ctrl, row, col) {
+      const bboxes = safeParse(doc.getTableCellBboxes(sec, para, ctrl));
+      if (!Array.isArray(bboxes) || !bboxes.length) return;
+      const me = bboxes.find(b => b.row === row && b.col === col);
+      if (!me) return;
+      const tree = safeParse(doc.getPageRenderTree(me.pageIndex || 0));
+      if (!tree || tree.ok === false) return;
+      const root = tree.root || tree;
+      const walk = (n, cb) => { cb(n); const ch = n.children; if (ch) for (let i = 0; i < ch.length; i++) walk(ch[i], cb); };
+      let node = null, pageH = 0;
+      walk(root, (n) => {
+        const t = n.type || n.nodeType;
+        if (t === 'Page') { const b = n.bbox || n.box || {}; pageH = b.height ?? b.h ?? pageH; }
+        if (t && /cell/i.test(String(t)) && n.row === row && n.col === col) node = n;
+      });
+      if (!node || !pageH) return;
+      const box = node.bbox || node.box || {};
+      const boxBottom = (box.y || 0) + (box.height ?? box.h ?? 0);
+      let contentBottom = boxBottom;
+      walk(node, (n) => {
+        const b = n.bbox || n.box;
+        if (b && typeof b.y === 'number') contentBottom = Math.max(contentBottom, b.y + (b.height ?? b.h ?? 0));
+      });
+      const overflowRU = contentBottom - boxBottom;
+      if (overflowRU <= 2) return;                          // fits (sub-pixel) → leave alone
+      const pd = safeParse(doc.getPageDef(sec));
+      if (!pd || pd.ok === false) return;
+      const pageHwpH = pd.landscape ? pd.width : pd.height; // render is orientation-applied
+      if (!pageHwpH) return;
+      const scale = pageH / pageHwpH;                       // render units per HWPUNIT
+      if (!(scale > 0)) return;
+      let deltaHwp = Math.round(overflowRU / scale + 300);  // +3pt of bottom padding
+      deltaHwp = Math.min(deltaHwp, 40000);                 // cap ~400pt
+      const rowCells = bboxes.filter(b => b.row === row);   // native cells starting on this row
+      if (!rowCells.length) return;
+      const json = rowCells.map(b => ({ cellIdx: b.cellIdx, heightDelta: deltaHwp }));
+      const gr = safeParse(doc.resizeTableCells(sec, para, ctrl, JSON.stringify(json)));
+      if (!(gr && gr.ok === false)) refresh();
+    }
     function tryGetTableDims(sec, para, ctrl) {
       try { return JSON.parse(getDoc().getTableDimensions(sec, para, ctrl)); }
       catch { return null; }
@@ -1368,19 +1413,35 @@
           for (let row = rowStart; row <= rowEnd; row++) {
             for (let col = colStart; col <= colEnd; col++) {
               const cellIdx = row * colCount + col;
-              let len = 0;
-              try { len = (doc.getTextInCell(sec, para, ctrl, cellIdx, cellPara, 0, 9999) || '').length; }
-              catch { skipped++; continue; }
-              if (len === 0) { skipped++; continue; }
-              try {
-                const r = safeParse(
-                  doc.applyCharFormatInCell(sec, para, ctrl, cellIdx, cellPara, 0, len, propsJson)
-                );
-                if (r.ok === false) throw new Error(r.error || 'applyCharFormatInCell failed');
-                applied++;
-              } catch (err) {
-                failures.push({ row, col, error: err?.message || String(err) });
+              // Style EVERY paragraph in the cell. A multi-line cell holds one
+              // paragraph per line; styling only cellPara (default 0) left
+              // lines 2+ untouched (blue/italic residue on "style whole table",
+              // form_08). Honor an explicit cell_para as a single-paragraph target.
+              let cellParas;
+              if (params.cell_para != null) {
+                cellParas = [cellPara];
+              } else {
+                let nParas = 1;
+                try { nParas = doc.getCellParagraphCount(sec, para, ctrl, cellIdx) || 1; } catch {}
+                cellParas = Array.from({ length: nParas }, (_, i) => i);
               }
+              let cellApplied = 0;
+              for (const cp of cellParas) {
+                let len = 0;
+                try { len = (doc.getTextInCell(sec, para, ctrl, cellIdx, cp, 0, 9999) || '').length; }
+                catch { continue; }
+                if (len === 0) continue;
+                try {
+                  const r = safeParse(
+                    doc.applyCharFormatInCell(sec, para, ctrl, cellIdx, cp, 0, len, propsJson)
+                  );
+                  if (r.ok === false) throw new Error(r.error || 'applyCharFormatInCell failed');
+                  cellApplied++;
+                } catch (err) {
+                  failures.push({ row, col, cell_para: cp, error: err?.message || String(err) });
+                }
+              }
+              if (cellApplied > 0) applied++; else skipped++;
             }
           }
           doc.endBatch();
@@ -1833,6 +1894,20 @@
             lines = got.length;
             verified = got.join('\n') === text;
           } catch {}
+          // AUTO-FIT ROW HEIGHT: rhwp draws table rows at their stored (fixed)
+          // height and clips overflow; native 한글 grows the row to fit. After
+          // writing this cell, measure — via the render tree — whether its
+          // content now overflows the cell box, and if so grow just this row to
+          // fit. GROW-ONLY and MEASURED: a cell whose content already fits
+          // reports overflow<=0 and is never touched, so this can only ADD
+          // height where text truly clips (no side effect on fitting cells).
+          // Body-level tables only (resizeTableCells has no *ByPath variant).
+          // Fully best-effort: any failure falls through to the normal result.
+          try {
+            if (!ref.nested && typeof doc.getPageRenderTree === 'function') {
+              autoFitCellRow(doc, sec, para, ctrl, row, col);
+            }
+          } catch {}
           return { ok: true, verified, lines };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
@@ -2113,6 +2188,55 @@
         const r = safeParse(getDoc().splitTableCell(sec, para, ctrl, params.row, params.col));
         refresh();
         return r;
+      },
+      // Grow a table row so text that clips in the PREVIEW (fixed row height,
+      // wrapped to 2+ lines) becomes visible. GROW-ONLY by design: extra_pt is
+      // clamped to a positive value, so this can never shrink a row below its
+      // content (the destructive direction). Worst case of an over-estimate is
+      // extra whitespace — 한글 renders that faithfully, so it never damages the
+      // export the way trimming the user's text would.
+      async growTableRow(params) {
+        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'grow_table_row');
+        const row = params.row;
+        if (typeof row !== 'number' || row < 0) {
+          return { ok: false, error: 'grow_table_row needs a non-negative row index' };
+        }
+        let extraPt = Number(params.extra_pt);
+        if (!Number.isFinite(extraPt) || extraPt <= 0) extraPt = 24; // ~one body line
+        extraPt = Math.min(extraPt, 400);                            // sanity cap
+        const heightDelta = Math.round(extraPt * 100);               // pt→HWPUNIT (1pt=100)
+        const doc = getDoc();
+        let bboxes;
+        try { bboxes = JSON.parse(doc.getTableCellBboxes(sec, para, ctrl)) || []; }
+        catch (e) { return { ok: false, error: `getTableCellBboxes failed: ${e?.message || e}` }; }
+        // Grow the cells that START on this visual row (its native cells). A
+        // vertically-merged cell anchored on an EARLIER row is left alone — the
+        // engine already sizes it across the rows it spans, and adding to it
+        // would over-grow the rows above. Horizontally-merged (colSpan) cells
+        // still anchor on this row, so they're included.
+        const cells = bboxes.filter((b) => b.row === row);
+        if (!cells.length) {
+          const rows = new Set(bboxes.map((b) => b.row)).size;
+          return { ok: false, error: `row ${row} not found (table has ${rows} rows)` };
+        }
+        const json = cells.map((b) => ({ cellIdx: b.cellIdx, heightDelta }));
+        const r = safeParse(doc.resizeTableCells(sec, para, ctrl, JSON.stringify(json)));
+        refresh();
+        if (r && r.ok === false) return r;
+        let after = [];
+        try {
+          after = (JSON.parse(doc.getTableCellBboxes(sec, para, ctrl)) || [])
+            .filter((b) => b.row === row);
+        } catch {}
+        return {
+          ok: true,
+          row,
+          extra_pt: extraPt,
+          height_delta_hwpunit: heightDelta,
+          cells_grown: cells.map((b) => b.cellIdx),
+          before_h: cells.map((b) => Math.round(b.h)),
+          after_h: after.map((b) => Math.round(b.h)),
+        };
       },
 
       // Fields
