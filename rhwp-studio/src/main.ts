@@ -853,6 +853,11 @@ function showLoadError(error: unknown): void {
 }
 
 const initPromise = initialize();
+// factchat HWP agent: agent-bridge.js must not announce studio_ready until
+// initialize() fully completes — polling wasm.initialized alone fires mid-boot
+// (after wasm init, before canvasView/toolbar exist), and an early loadFile
+// then skips canvasView?.loadDocument() silently: doc in WASM, blank screen.
+(window as any).__initPromise = initPromise;
 
 // ── iframe 연동 API (postMessage) ──
 // 부모 페이지에서 postMessage로 에디터를 제어할 수 있다.

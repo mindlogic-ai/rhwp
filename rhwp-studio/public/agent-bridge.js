@@ -17,13 +17,21 @@
 (function () {
   'use strict';
 
-  // Wait for BOTH the globals to exist AND WasmBridge.initialize() to have
-  // completed. main.ts assigns window.__wasm before calling wasm.initialize(),
-  // so checking only the globals would let us post studio_ready (and accept
-  // RPCs) while the WASM module is still loading — first loadFile would crash
-  // with `__wbindgen_malloc undefined`. The `initialized` field is a TS
-  // `private` but at runtime it's a normal JS property — safe to read.
+  // Wait for main.ts's initialize() to FULLY complete before announcing
+  // studio_ready. Polling wasm.initialized alone fired mid-boot — after
+  // wasm.initialize() but before CanvasKit/canvasView/toolbar existed — so an
+  // immediate loadFile skipped canvasView?.loadDocument() silently and the
+  // parent revealed a blank pane. __initPromise resolves only when the whole
+  // boot sequence is done; the globals poll remains as a fallback for older
+  // main.ts bundles that don't expose it.
   function whenReady(cb, tries = 0) {
+    if (window.__initPromise) {
+      window.__initPromise.then(() => {
+        if (window.__wasm && window.__eventBus) return cb();
+        console.error('[agent-bridge] init done but globals missing');
+      });
+      return;
+    }
     const w = window.__wasm;
     if (w && window.__eventBus && w.initialized === true) return cb();
     if (tries > 400) { console.error('[agent-bridge] __wasm never initialized'); return; }
