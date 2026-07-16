@@ -482,8 +482,30 @@
       agentDepth++;
       try { return await fn(); } finally { agentDepth--; }
     }
+    // The studio fires document-changed a beat AFTER a load/restore RPC
+    // resolves (agentDepth is back to 0), so the depth check alone lets
+    // those trailing emissions masquerade as user edits — the BE then
+    // kills its redo stack and autosaves a phantom user_edit revision
+    // that severs the forward timeline. Stay quiet from init and after
+    // every editor_lock (doc load / agent turn / undo / redo / jump)
+    // until the user actually touches the editor: only input can make a
+    // change that's genuinely theirs.
+    let quietUntilUserInput = true;
+    ['keydown', 'pointerdown', 'beforeinput', 'paste', 'drop'].forEach((type) => {
+      document.addEventListener(type, () => { quietUntilUserInput = false; }, true);
+    });
+    // First agent-made mutation of the current lock cycle — lets the FE
+    // pill flip from "확인 중" to "편집 중" without duplicating a tool list.
+    let agentMutationReported = false;
     eventBus.on('document-changed', (reason) => {
-      if (agentDepth > 0) return;
+      if (agentDepth > 0) {
+        if (!agentMutationReported) {
+          agentMutationReported = true;
+          sendToParent({ type: 'agent_mutation' });
+        }
+        return;
+      }
+      if (quietUntilUserInput) return;
       cleanSinceLoad = false;
       originalHwpxBytes = null;
       // Skip our own re-render emissions (reason === 'agent-mutation' implies depth > 0;
@@ -492,17 +514,186 @@
       sendToParent({ type: 'user_edit', kind: 'document-changed', summary });
     });
 
+    // ── FactChat save menu (파일 > HWP/HWPX/PDF로 저장) ──
+    // index.html replaces the studio-native 저장/다른 이름으로 저장 (in-iframe
+    // exportHwp download — bypasses the FE's revision snapshot + fidelity
+    // routing) with format-explicit `data-fc-save` items. They carry no
+    // data-cmd, so the studio dispatcher ignores them entirely; the bridge
+    // owns their enable state and forwards clicks to the parent FE, which
+    // runs its existing native/converter download pipeline.
+    const fcSaveItems = Array.from(
+      document.querySelectorAll('.md-item[data-fc-save]'),
+    );
+    let fcSaveEnabled = false;
+    function setFcSaveEnabled(on) {
+      fcSaveEnabled = !!on;
+      fcSaveItems.forEach((el) => el.classList.toggle('disabled', !on));
+    }
+    function closeOpenMenu() {
+      // Toggle the open menu shut through its own title. The controller
+      // listens on MOUSEDOWN (not click), and openMenu === el routes to
+      // closeAll(), keeping its internal state in sync — removing the
+      // `open` class directly would desync the openMenu field.
+      const openTitle = document.querySelector('.menu-item.open .menu-title');
+      if (openTitle instanceof HTMLElement) {
+        openTitle.dispatchEvent(
+          new MouseEvent('mousedown', { bubbles: true, cancelable: true }),
+        );
+      }
+    }
+    document.addEventListener('click', (e) => {
+      const item = e.target && e.target.closest
+        ? e.target.closest('.md-item[data-fc-save]')
+        : null;
+      if (!item) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (item.classList.contains('disabled')) return;
+      const format = item.getAttribute('data-fc-save');
+      sendToParent({ type: 'save_requested', format });
+      closeOpenMenu();
+    }, true);
+
+    // ── FactChat unified undo/redo (되돌리기/다시 실행) ──
+    // Single entry point over TWO histories that never overlap in time:
+    // the editor's local input history (typing since the last agent-turn
+    // boundary — the editor_lock handler clears it, see the router) and
+    // the BE revision timeline (agent turns + coalesced user edits, state
+    // mirrored in from the parent via history_state). Routing: local
+    // first (char-level, instant); when local is exhausted, forward to
+    // the parent → WS undo_last_turn / redo_last_turn.
+    const fcBe = { canUndo: false, canRedo: false, busy: false };
+    const fcHistoryEls = Array.from(
+      document.querySelectorAll('[data-fc-undo], [data-fc-redo]'),
+    );
+    function readInputHandler() {
+      // Re-read on every call: resilient whether the studio keeps one
+      // InputHandler instance or swaps it on doc load.
+      return (
+        (window.__canvasView && window.__canvasView.getInputHandler
+          ? window.__canvasView.getInputHandler()
+          : null) || window.__inputHandler || null
+      );
+    }
+    function localCanUndo() {
+      try { return !!readInputHandler()?.canUndo(); } catch { return false; }
+    }
+    function localCanRedo() {
+      try { return !!readInputHandler()?.canRedo(); } catch { return false; }
+    }
+    function clearLocalHistory() {
+      // Same unminified API deactivate() uses. Called at every agent-turn
+      // boundary (editor_lock) so the local stack only ever holds typing
+      // newer than the last turn/rollback — the non-overlap invariant the
+      // chronological routing depends on.
+      const ih = readInputHandler();
+      try { ih?.history?.clear?.(ih.wasm); } catch (err) {
+        console.warn('[agent-bridge] local history clear failed', err);
+      }
+    }
+    function fcBusy() {
+      return fcBe.busy || document.body.classList.contains('agent-locked');
+    }
+    function refreshFcHistoryUi() {
+      const busy = fcBusy();
+      const canUndo = !busy && (localCanUndo() || fcBe.canUndo);
+      const canRedo = !busy && (localCanRedo() || fcBe.canRedo);
+      fcHistoryEls.forEach((el) => {
+        const can = el.hasAttribute('data-fc-undo') ? canUndo : canRedo;
+        if (el.tagName === 'BUTTON') {
+          el.disabled = !can;
+        } else {
+          el.classList.toggle('disabled', !can);
+        }
+      });
+    }
+    function unifiedUndo() {
+      if (fcBusy()) return;
+      if (localCanUndo()) {
+        try { readInputHandler()?.performUndo(); } catch (err) {
+          console.warn('[agent-bridge] local undo failed', err);
+        }
+      } else if (fcBe.canUndo) {
+        sendToParent({ type: 'undo_requested' });
+      }
+      refreshFcHistoryUi();
+    }
+    function unifiedRedo() {
+      if (fcBusy()) return;
+      if (localCanRedo()) {
+        try { readInputHandler()?.performRedo(); } catch (err) {
+          console.warn('[agent-bridge] local redo failed', err);
+        }
+      } else if (fcBe.canRedo) {
+        sendToParent({ type: 'redo_requested' });
+      }
+      refreshFcHistoryUi();
+    }
+    document.addEventListener('click', (e) => {
+      const el = e.target && e.target.closest
+        ? e.target.closest('[data-fc-undo], [data-fc-redo]')
+        : null;
+      if (!el) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const isDisabled = el.tagName === 'BUTTON'
+        ? el.disabled
+        : el.classList.contains('disabled');
+      const fromMenu = !!el.closest('.menu-dropdown');
+      if (!isDisabled) {
+        if (el.hasAttribute('data-fc-undo')) unifiedUndo();
+        else unifiedRedo();
+      }
+      if (fromMenu) closeOpenMenu();
+    }, true);
+    // Local edits flip canUndo/canRedo — keep the buttons live. Runs for
+    // agent mutations too (harmless: just class toggles).
+    eventBus.on('document-changed', () => refreshFcHistoryUi());
+
     // ── Swallow file-shortcuts we hid from the menu ──
-    // We disabled file:save / file:save-as / file:open / file:new-doc in
-    // shortcut-map.ts so the chat flow owns those. Without this, Ctrl+S
-    // would fall through to the browser ("Save Page As…") which is worse.
+    // file:open / file:new-doc are removed from the menu (doc lifecycle is
+    // owned by the FactChat session model), so Ctrl+O / Ctrl+Alt+N are
+    // swallowed. Plain Ctrl+S is remapped to the FE download in the doc's
+    // original format ('default' — the FE resolves it to hwp/hwpx); without
+    // the preventDefault it would fall through to the browser ("Save Page
+    // As…"). Ctrl+Shift+S passes through — 다른 이름으로 저장 stays
+    // studio-native (the only path with a location/filename picker).
+    // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y are ALWAYS swallowed and routed
+    // through the unified undo/redo — even when busy or empty, so the
+    // studio's own shortcut map (edit:undo/edit:redo) never runs
+    // underneath and can't bypass the turn-boundary invariant.
     window.addEventListener('keydown', (e) => {
+      const k = e.key?.toLowerCase();
+      // Alt+Shift+V (문서 비교) has no ctrl — swallow before the ctrl
+      // guard. The menu/toolbar entries are removed in index.html; the
+      // parent FE's 작업 내역 popover replaces the native history UI.
+      if (e.altKey && e.shiftKey && k === 'v') {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       const ctrl = e.ctrlKey || e.metaKey;
       if (!ctrl) return;
-      const k = e.key?.toLowerCase();
+      if (k === 'z' || k === 'y') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (k === 'z' && !e.shiftKey) unifiedUndo();
+        else unifiedRedo();
+        return;
+      }
+      // Ctrl+Shift+H (문서 이력 관리) — same removal as Alt+Shift+V.
+      if (k === 'h' && e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (k === 's' && e.shiftKey) return;
       if (k === 's' || k === 'o' || (e.altKey && k === 'n')) {
         e.preventDefault();
         e.stopPropagation();
+        if (k === 's' && fcSaveEnabled) {
+          sendToParent({ type: 'save_requested', format: 'default' });
+        }
       }
     }, true);
 
@@ -514,8 +705,7 @@
     // real time — no dim, no center pill, no covered toolbar.
     const lockStyle = document.createElement('style');
     lockStyle.textContent = [
-      'body.agent-locked { cursor: progress !important; }',
-      'body.agent-locked .editor-area, body.agent-locked main, body.agent-locked .menu, body.agent-locked .toolbar { pointer-events: none !important; }',
+      'body.agent-locked #editor-area, body.agent-locked #menu-bar, body.agent-locked #icon-toolbar, body.agent-locked #style-bar { pointer-events: none !important; }',
       // rhwp-studio raises a sticky top-right toast on every HWPX load
       // ("HWPX 문서는 저장 시 HWP 형식으로 변환 저장됩니다…"). It covers
       // the toolbar and is redundant with the inline hint in the parent
@@ -770,6 +960,32 @@
         } else {
           throw new Error('loadFile: either bytes or url is required');
         }
+        // The full load flow resets zoom/scroll and parks the caret at the
+        // document end — fine for opening, jarring for undo/redo/jump.
+        // Capture the view before, re-apply after (no-op on a fresh open).
+        let savedView = null;
+        try {
+          const vm = window.__canvasView && window.__canvasView.viewportManager;
+          if (vm && typeof vm.getZoom === 'function') {
+            savedView = {
+              zoom: vm.getZoom(),
+              scrollY: typeof vm.getScrollY === 'function' ? vm.getScrollY() : 0,
+              caret: null,
+            };
+            // Caret only on a RE-load — restoring the empty-state cursor
+            // on the initial open would focus-steal the chat composer.
+            const ih = readInputHandler();
+            const pos = originalFileName !== null &&
+              ih && ih.cursor && ih.cursor.getPosition && ih.cursor.getPosition();
+            if (pos && pos.sectionIndex != null) {
+              savedView.caret = {
+                sectionIndex: pos.sectionIndex,
+                paragraphIndex: pos.paragraphIndex,
+                charOffset: pos.charOffset,
+              };
+            }
+          }
+        } catch {}
         // Use rhwp-studio's full load flow so CanvasView attaches caret, runs
         // validation, applies font fallback, etc. We listen for the matching
         // :done event to know when loading is finished.
@@ -795,9 +1011,45 @@
             requestId,
           });
         });
+        if (savedView) {
+          const applyView = () => {
+            try {
+              const vm = window.__canvasView && window.__canvasView.viewportManager;
+              if (!vm) return;
+              // Zoom → caret → scroll: moveCursorTo may nudge the
+              // viewport, so the user's scroll position goes last.
+              if (typeof vm.setZoom === 'function') vm.setZoom(savedView.zoom);
+              // moveCursorTo focuses the editor textarea — skip when the
+              // parent owns focus (편집 기록 jump) so it isn't yanked.
+              if (savedView.caret && document.hasFocus()) {
+                const ih = readInputHandler();
+                if (ih && typeof ih.moveCursorTo === 'function') {
+                  // Restored content may be shorter — fall back to the
+                  // paragraph start.
+                  const exact = ih.moveCursorTo(savedView.caret);
+                  if (!exact) {
+                    ih.moveCursorTo({
+                      sectionIndex: savedView.caret.sectionIndex,
+                      paragraphIndex: savedView.caret.paragraphIndex,
+                      charOffset: 0,
+                    });
+                  }
+                }
+              }
+              if (typeof vm.setScrollTop === 'function') vm.setScrollTop(savedView.scrollY);
+            } catch {}
+          };
+          applyView();
+          // Layout may still be settling when :done fires (setScrollTop
+          // clamps) — re-apply once after layout, idempotent.
+          requestAnimationFrame(() => requestAnimationFrame(applyView));
+        }
         const loadedName = fileName || 'document.hwp';
         const sourceFormat = wasm.doc.getSourceFormat();
         cleanSinceLoad = true;
+        // Save is meaningful only once a document is loaded — the
+        // FactChat 파일 menu items start disabled in the markup.
+        setFcSaveEnabled(true);
         originalFileName = loadedName;
         originalHwpxBytes = sourceFormat === 'hwpx' || /\.hwpx$/i.test(loadedName)
           ? new Uint8Array(bytes)
@@ -1410,9 +1662,18 @@
         const failures = [];
         doc.beginBatch();
         try {
+          // Merge-aware: the flat `row * colCount + col` formula is wrong for
+          // any table with merged cells (= every Korean 응시원서/지원서 form)
+          // — high indices don't exist (skipped via catch) and low ones hit
+          // the wrong visual cell while still reporting ok. Resolve through
+          // the bbox anchors like every other cell handler, and dedupe so a
+          // merged region spanning several (row,col) positions is styled once.
+          const styledCells = new Set();
           for (let row = rowStart; row <= rowEnd; row++) {
             for (let col = colStart; col <= colEnd; col++) {
-              const cellIdx = row * colCount + col;
+              const cellIdx = resolveCellIdx(sec, para, ctrl, row, col, colCount);
+              if (styledCells.has(cellIdx)) continue;
+              styledCells.add(cellIdx);
               // Style EVERY paragraph in the cell. A multi-line cell holds one
               // paragraph per line; styling only cellPara (default 0) left
               // lines 2+ untouched (blue/italic residue on "style whole table",
@@ -2577,8 +2838,30 @@
     window.addEventListener('message', async (e) => {
       const msg = e.data;
       if (!msg || typeof msg !== 'object') return;
-      if (msg.type === 'editor_lock')   { setLocked(true);  return; }
-      if (msg.type === 'editor_unlock') { setLocked(false); return; }
+      if (msg.type === 'editor_lock') {
+        setLocked(true);
+        // Turn boundary: every agent turn AND every BE undo/redo starts
+        // with editor_lock. Clearing the local input history here keeps
+        // the two undo timelines non-overlapping (chronological routing).
+        clearLocalHistory();
+        // Changes until the user's next real input are machine-made.
+        quietUntilUserInput = true;
+        agentMutationReported = false;
+        refreshFcHistoryUi();
+        return;
+      }
+      if (msg.type === 'editor_unlock') {
+        setLocked(false);
+        refreshFcHistoryUi();
+        return;
+      }
+      if (msg.type === 'history_state') {
+        fcBe.canUndo = !!msg.canUndo;
+        fcBe.canRedo = !!msg.canRedo;
+        fcBe.busy = !!msg.busy;
+        refreshFcHistoryUi();
+        return;
+      }
       if (msg.type !== 'rpc_request' || !msg.method) return;
 
       const method = msg.method.startsWith('agent.') ? msg.method.slice(6) : msg.method;
