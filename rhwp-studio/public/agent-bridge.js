@@ -28,14 +28,23 @@
     if (window.__initPromise) {
       window.__initPromise.then(() => {
         const w = window.__wasm;
-        if (w && window.__eventBus && w.initialized === true) return cb();
-        // initialize() swallows boot failures (paints the error screen and
-        // resolves anyway) — an engine that never came up must not announce
-        // ready, or the parent's first loadFile crashes into the
-        // uninitialized glue (`__wbindgen_malloc` undefined). Tell the
-        // parent explicitly instead of leaving it to a timeout.
-        console.error('[agent-bridge] init finished but engine unusable — studio_ready withheld');
-        try { window.parent && window.parent.postMessage({ type: 'studio_init_failed' }, '*'); } catch (e) {}
+        if (!(w && window.__eventBus && w.initialized === true)) {
+          // initialize() swallows boot failures (paints the error screen and
+          // resolves anyway) — an engine that never came up must not announce
+          // ready, or the parent's first loadFile crashes into the
+          // uninitialized glue (`__wbindgen_malloc` undefined). Tell the
+          // parent explicitly instead of leaving it to a timeout.
+          console.error('[agent-bridge] init finished but engine unusable — studio_ready withheld');
+          try { window.parent && window.parent.postMessage({ type: 'studio_init_failed' }, '*'); } catch (e) {}
+          return;
+        }
+        // initialize()가 마지막으로 남기는 유휴 상태("HWP 파일을
+        // 선택해주세요." + 툴바/눈금자)가 실제로 화면에 반영된 뒤에
+        // ready를 알린다. resolve 직후는 마지막 셋업 문장과 같은
+        // 태스크라 아직 페인트 전 — 더블 rAF로 페인트 커밋을 기다린다.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => cb());
+        });
       });
       return;
     }
