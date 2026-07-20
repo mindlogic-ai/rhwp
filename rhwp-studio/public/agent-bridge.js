@@ -27,8 +27,15 @@
   function whenReady(cb, tries = 0) {
     if (window.__initPromise) {
       window.__initPromise.then(() => {
-        if (window.__wasm && window.__eventBus) return cb();
-        console.error('[agent-bridge] init done but globals missing');
+        const w = window.__wasm;
+        if (w && window.__eventBus && w.initialized === true) return cb();
+        // initialize() swallows boot failures (paints the error screen and
+        // resolves anyway) — an engine that never came up must not announce
+        // ready, or the parent's first loadFile crashes into the
+        // uninitialized glue (`__wbindgen_malloc` undefined). Tell the
+        // parent explicitly instead of leaving it to a timeout.
+        console.error('[agent-bridge] init finished but engine unusable — studio_ready withheld');
+        try { window.parent && window.parent.postMessage({ type: 'studio_init_failed' }, '*'); } catch (e) {}
       });
       return;
     }
