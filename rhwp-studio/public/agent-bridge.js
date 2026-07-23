@@ -2493,6 +2493,161 @@
           (doc, sec, para, hopsJson) => doc.deleteTableColumnByPath(sec, para, hopsJson, params.col));
         return r;
       },
+      // Create a NEW body-level table at a paragraph, optionally pre-filled.
+      //
+      // Column widths are left to the engine unless col_widths is given:
+      // create_table_native sizes the columns to the section's text area
+      // (page width - margins - the table's own 283hu outer margins) and
+      // appends the empty paragraph HWP keeps after a table control. Doing
+      // either of those caller-side is how tables end up overflowing the
+      // page edge, so this handler deliberately passes neither by default.
+      //
+      // Returns the NEW table's path. Creating a table splits or shifts the
+      // host paragraph (create_table_native inserts before/after depending on
+      // whether the host is empty), so the caller's `path` is stale the
+      // moment this returns — everything downstream must use the returned one.
+      async insertTable(params) {
+        const { sec, para } = pathToCoords(params.path);
+        const guard = guardLegacyInsertTrap(sec, para, 'insertTable');
+        if (guard) return guard;
+        const rows = params.rows;
+        const cols = params.cols;
+        if (!Number.isInteger(rows) || !Number.isInteger(cols) ||
+            rows < 1 || cols < 1 || cols > 256) {
+          return {
+            ok: false,
+            error: `insert_table: bad dimensions (rows=${rows}, cols=${cols}) — ` +
+              'rows >= 1 and 1 <= cols <= 256.',
+          };
+        }
+        const doc = getDoc();
+        const opts = {
+          sectionIdx: sec,
+          paraIdx: para,
+          charOffset: params.offset || 0,
+          rowCount: rows,
+          colCount: cols,
+        };
+        if (Array.isArray(params.col_widths) && params.col_widths.length === cols) {
+          opts.colWidths = params.col_widths;
+        }
+        const rowsData = Array.isArray(params.rows_data) ? params.rows_data : null;
+        doc.beginBatch();
+        let created;
+        let filled = 0;
+        const failures = [];
+        try {
+          created = safeParse(doc.createTableEx(JSON.stringify(opts)));
+          if (!created.ok && created.raw === undefined) {
+            throw new Error(created.error || 'createTableEx failed');
+          }
+          const newPara = created.paraIdx ?? created.para_idx;
+          const newCtrl = created.controlIdx ?? created.control_idx ?? 0;
+          if (typeof newPara !== 'number') {
+            throw new Error('createTableEx returned no paraIdx');
+          }
+          // Fill inside the SAME batch — a fresh table has no merged regions,
+          // so cellIdx is exactly row*cols+col and no bbox round-trip is
+          // needed. Cells start empty, so unlike setCellText there is nothing
+          // to clear first; multi-line text still becomes one cell paragraph
+          // per line (a literal "\n" in a single cell paragraph does not wrap).
+          if (rowsData) {
+            for (let r = 0; r < Math.min(rowsData.length, rows); r++) {
+              const rowCells = Array.isArray(rowsData[r]) ? rowsData[r] : [];
+              for (let c = 0; c < Math.min(rowCells.length, cols); c++) {
+                const text = rowCells[c] == null ? '' : String(rowCells[c]);
+                if (text === '') continue;
+                const cellIdx = r * cols + c;
+                const segments = text.split('\n');
+                try {
+                  insertCellTextCompat(doc, sec, newPara, newCtrl, cellIdx, 0, 0, segments[0]);
+                  for (let i = 1; i < segments.length; i++) {
+                    const prev = i - 1;
+                    let len = 0;
+                    try { len = doc.getCellParagraphLength(sec, newPara, newCtrl, cellIdx, prev); }
+                    catch { len = (getCellTextCompat(doc, sec, newPara, newCtrl, cellIdx, prev, 0, 9999) || '').length; }
+                    doc.splitParagraphInCell(sec, newPara, newCtrl, cellIdx, prev, len);
+                    if (segments[i]) insertCellTextCompat(doc, sec, newPara, newCtrl, cellIdx, i, 0, segments[i]);
+                  }
+                  filled += 1;
+                } catch (e) {
+                  failures.push({ row: r, col: c, error: e?.message || String(e) });
+                }
+              }
+            }
+          }
+          doc.endBatch();
+        } catch (e) {
+          try { doc.endBatch(); } catch {}
+          throw e;
+        }
+        refresh();
+        const newPara = created.paraIdx ?? created.para_idx;
+        const newCtrl = created.controlIdx ?? created.control_idx ?? 0;
+        // ctrl 0 keeps the bare s{sec}:p{para} form the outline reports for
+        // a table that owns its paragraph; anything else needs the :c suffix.
+        const path = newCtrl === 0 ? `s${sec}:p${newPara}` : `s${sec}:p${newPara}:c${newCtrl}`;
+        // Read the dims back off the engine rather than echoing the request —
+        // a table that did not actually materialize would otherwise be
+        // reported as created.
+        const dims = tryGetTableDims(sec, newPara, newCtrl);
+        return {
+          ok: failures.length === 0,
+          path,
+          rows: dims ? dims.rowCount : rows,
+          cols: dims ? dims.colCount : cols,
+          verified: !!dims && dims.rowCount === rows && dims.colCount === cols,
+          ...(rowsData ? { filled } : {}),
+          ...(failures.length ? { failures } : {}),
+        };
+      },
+      // Delete an ENTIRE table (the control, its cells, and all their text).
+      // Body-level only — deleteTableControl has no *ByPath variant, so a
+      // nested path gets the standard refusal instead of silently blowing
+      // away the outer table.
+      async deleteTable(params) {
+        const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'delete_table');
+        const doc = getDoc();
+        const dims = tryGetTableDims(sec, para, ctrl);
+        if (!dims) return { ok: false, error: `no table at ${params.path}` };
+        let removed_host_paragraph = false;
+        doc.beginBatch();
+        try {
+          const r = safeParse(doc.deleteTableControl(sec, para, ctrl));
+          if (!r.ok && r.raw === undefined) {
+            throw new Error(r.error || 'deleteTableControl failed');
+          }
+          // deleteTableControl drops the control but keeps its host paragraph.
+          // A body table lives in a paragraph of its own, so what is left is a
+          // stray blank line — delete it, or every removed table leaves one
+          // behind and the doc slowly fills with empty paragraphs. Guarded:
+          // only when the paragraph now has NO text and NO remaining controls
+          // (getControlTextPositions counts every control kind, so a paragraph
+          // that also hosted an image or shape is left alone).
+          try {
+            const len = doc.getParagraphLength(sec, para);
+            const text = len ? (doc.getTextRange(sec, para, 0, len) || '') : '';
+            const ctrls = JSON.parse(doc.getControlTextPositions(sec, para) || '[]');
+            if (text.trim() === '' && Array.isArray(ctrls) && ctrls.length === 0) {
+              doc.deleteParagraph(sec, para);
+              removed_host_paragraph = true;
+            }
+          } catch {}
+          doc.endBatch();
+        } catch (e) {
+          try { doc.endBatch(); } catch {}
+          throw e;
+        }
+        refresh();
+        // Paragraph indices after the deleted table have shifted — say so
+        // explicitly so the agent re-reads instead of reusing stale paths.
+        return {
+          ok: true,
+          deleted: { path: params.path, rows: dims.rowCount, cols: dims.colCount },
+          removed_host_paragraph,
+          paths_invalidated: true,
+        };
+      },
       async mergeTableCells(params) {
         const { sec, para, ctrl } = bodyTableCoordsOrThrow(params.path, 'merge_table_cells');
         const r = safeParse(getDoc().mergeTableCells(sec, para, ctrl,
