@@ -318,11 +318,19 @@
     // into an HWPX paragraph that already hosts a control (empty
     // ctrl_data_records + Vec::insert OOB). Guard: on old WASM, refuse the
     // known-fatal shape (control-hosting paragraph) instead of bricking the
-    // editor until refresh. The *ByPath export doubles as the fixed-engine
-    // sentinel — both ship in the same build.
+    // editor until refresh.
+    //
+    // Fixed-engine sentinels, either of which is enough:
+    //   - insertTableRowByPath  — the fork engine (v0.7.13-x) shipped the trap
+    //     fix and the *ByPath structural exports in the same build.
+    //   - getCursorRectByPathNear — upstream v0.8.x, which fixed the trap
+    //     independently and never had the *ByPath exports. Verified on
+    //     v0.8.2-1: insertFootnote/insertEquation into a table-hosting
+    //     paragraph return ok and the engine stays alive.
     function guardLegacyInsertTrap(sec, para, opName) {
       const doc = getDoc();
-      if (typeof doc.insertTableRowByPath === 'function') return null; // fixed engine
+      if (typeof doc.insertTableRowByPath === 'function') return null; // fixed engine (fork)
+      if (typeof doc.getCursorRectByPathNear === 'function') return null; // fixed engine (upstream v0.8.x)
       // Trap shapes on the old engine: paragraph 0 (hosts the section/column
       // def controls) and table-hosting paragraphs. Both leave the insert
       // index past the (empty) ctrl_data_records vec.
@@ -362,9 +370,9 @@
         if (e instanceof TypeError && /is not a function/.test(e.message || '')) {
           return {
             ok: false,
-            error: `${opName} on a NESTED table needs a newer WASM build ` +
-              '(*ByPath structural API missing) — tell the user structural ' +
-              'changes to this inner table are not available yet.',
+            error: `${opName} on a NESTED table is not supported by this ` +
+              'engine build (*ByPath structural API missing) — tell the user ' +
+              'structural changes to this inner table are not available yet.',
           };
         }
         return { ok: false, error: e?.message || String(e) };
@@ -2826,7 +2834,11 @@
         const doc = getDoc();
         doc.beginBatch();
         try {
-          const r = safeParse(doc.insertPicture(sec, para, offset, bytes,
+          // v0.8.2 engine: insertPicture gained a cell_path_json param in 4th
+          // position (hop-list JSON, same grammar as getTableDimensionsByPath).
+          // pathToCoords only parses body paths (s{sec}:p{para}[:c{ctrl}]), so
+          // pictures are always body-level here — pass an empty hop list.
+          const r = safeParse(doc.insertPicture(sec, para, offset, '[]', bytes,
             widthHwp, heightHwp, naturalWPx, naturalHPx, ext, description));
           if (!r.ok && r.raw === undefined) throw new Error(r.error || 'insertPicture failed');
           doc.endBatch();
