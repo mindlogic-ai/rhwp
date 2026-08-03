@@ -72,6 +72,13 @@ export interface DetectLocalFontsOptions {
   includeRegistered?: boolean;
   /** Local Font Access API가 없는 브라우저에서 현재 문서 글꼴만 확인할 때 사용한다. */
   candidateFamilies?: readonly string[];
+  /**
+   * 감지 백엔드를 고정한다. 'font-presence-probe' 는 권한 프롬프트도 사용자
+   * 제스처도 필요 없어서, 모달을 띄울 수 없는 환경(iframe 임베드의 에이전트
+   * 로드)에서 문서 글꼴을 확인하는 유일한 길이다. 미지정이면 기존대로
+   * Local Font Access API 를 우선한다.
+   */
+  method?: LocalFontDetectionSource;
 }
 
 export interface GetLocalFontsOptions {
@@ -815,7 +822,8 @@ export async function detectLocalFonts(options: DetectLocalFontsOptions = {}): P
   }
 
   let snapshot: LocalFontSnapshot | null = null;
-  if (isLocalFontAccessSupported()) {
+  const allowFontAccessApi = options.method !== 'font-presence-probe';
+  if (allowFontAccessApi && isLocalFontAccessSupported()) {
     const queryLocalFonts = (globalThis as LocalFontGlobal).queryLocalFonts!;
     const fontDataList = await queryLocalFonts();
     snapshot = makeSnapshot(await collectLocalFontRecords(fontDataList), 'local-font-access');

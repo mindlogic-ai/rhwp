@@ -907,9 +907,11 @@ async function initializeDocument(
       console.warn('[validation] 감지 실패 (치명적이지 않음):', e);
     }
 
-    if (!options.suppressDialogs) {
-      await promptLocalFontsIfNeeded(docInfo, displayName);
-    }
+    // 대화상자를 띄울 수 없는 로드에서도 글꼴 확인 자체는 건너뛰지 않는다 —
+    // 건너뛰면 문서의 원본 글꼴이 전부 웹 대체 글꼴로 그려진다.
+    await resolveLocalFontsForDocument(docInfo, displayName, {
+      interactive: !options.suppressDialogs,
+    });
 
     // 로컬 글꼴 감지 결과가 뷰를 갱신한 뒤에 캐럿을 연결해야 입력 포커스가 재설정과 경합하지 않는다.
     console.log('[initDoc] 8. inputHandler activateWithCaretPosition');
@@ -927,7 +929,19 @@ async function initializeDocument(
   }
 }
 
-async function promptLocalFontsIfNeeded(docInfo: DocumentInfo, displayName: string): Promise<void> {
+/**
+ * 문서가 쓰는 글꼴을 로컬 설치본으로 해결한다.
+ *
+ * `interactive: false` (에이전트/임베드 로드) 에서는 사용자가 대답할 수 없는
+ * 안내 모달 대신 canvas presence probe 로 곧장 확인한다 — 권한 프롬프트도
+ * 제스처도 필요 없는 백엔드라 iframe 안에서도 동작한다. 확인 자체를 건너뛰면
+ * 설치된 원본 글꼴을 두고도 문서 전체가 웹 대체 글꼴로 그려진다.
+ */
+async function resolveLocalFontsForDocument(
+  docInfo: DocumentInfo,
+  displayName: string,
+  options: { interactive: boolean } = { interactive: true },
+): Promise<void> {
   if (!docInfo.fontsUsed?.length) return;
 
   const msg = sbMessage();
@@ -935,6 +949,23 @@ async function promptLocalFontsIfNeeded(docInfo: DocumentInfo, displayName: stri
     await loadStoredLocalFonts();
     const report = analyzeDocumentFonts(docInfo.fontsUsed);
     if (!report.shouldPromptLocalAccess) return;
+
+    if (!options.interactive) {
+      const probed = await detectLocalFonts({
+        force: true,
+        includeRegistered: true,
+        candidateFamilies: docInfo.fontsUsed,
+        method: 'font-presence-probe',
+      });
+      const nextReport = analyzeDocumentFonts(docInfo.fontsUsed);
+      eventBus.emit('local-fonts-changed', { fonts: probed, report: nextReport });
+      prepareCanvasKitLocalFonts(docInfo.fontsUsed);
+      console.log(
+        `[local-fonts] 임베드 로드 — probe 로 ${probed.length}개 확인, `
+        + `대체 ${nextReport.summary.webSubstitute}개 / 누락 ${nextReport.summary.missing}개`,
+      );
+      return;
+    }
 
     const choice = await showLocalFontsModalIfNeeded(report, {
       disableExternalWebFonts: extensionViewerSettings.disableExternalWebFonts,
