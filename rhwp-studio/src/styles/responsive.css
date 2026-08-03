@@ -1,18 +1,35 @@
 /* ================================================================
-   반응형 레이아웃 — 모바일 / 태블릿 / 데스크톱
+   좁은 창 대응 — 데스크톱 전용 레이아웃
    ================================================================
+   rhwp-studio는 데스크톱 전용이다. 모바일/터치 환경은 지원하지 않으므로
+   터치 타겟 확대(44px)·햄버거 메뉴·풀스크린 시트 같은 모바일 패턴은 쓰지 않는다.
+   창 너비가 좁아져도 기능이 사라지지 않는 것을 최우선으로 한다.
+     - 메뉴/도구/서식 바: 감추지 않고 줄바꿈(flex-wrap)으로 모두 노출
+     - 콤보 박스: flex-shrink 금지 (찌그러져 파란 네모로 보이는 문제 방지)
+     - 드롭다운: 데스크톱과 동일한 크기 유지 (버튼 높이 확대 없음)
+
    브레이크포인트:
-     모바일:   ~767px
-     태블릿:   768px ~ 1023px
-     데스크톱: 1024px~ (기존 레이아웃 유지)
+     좁은 창:   ~1023px
+     기본:      1024px~
    ================================================================ */
 
-/* ─── 태블릿 (768~1023px) ────────────────────────────── */
+/* ─── 좁은 창 (~1023px) ──────────────────────────────── */
 @media (max-width: 1023px) {
-  /* 도구 상자: 높이 축소, 라벨 숨김 */
+  /* ── 메뉴바: 전 항목 유지, 모자라면 줄바꿈 ──
+     (감추면 보기/입력/서식/쪽/표/도구 메뉴에 도달할 방법이 없어진다) */
+  #menu-bar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 28px;
+  }
+
+  /* ── 도구 상자: 라벨 숨겨 아이콘만, 모자라면 줄바꿈 ── */
   #icon-toolbar {
-    height: 40px;
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 40px;
     padding: 2px 4px;
+    row-gap: 2px;
   }
   .tb-btn {
     min-width: 36px;
@@ -22,10 +39,13 @@
     display: none;
   }
 
-  /* 서식 도구 모음: 가로 스크롤 */
+  /* ── 서식 도구 모음: 가로 스크롤 대신 줄바꿈 ──
+     (overflow-x: auto는 글자 효과·형광펜 드롭다운 패널까지 잘라낸다) */
   #style-bar {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 28px;
+    row-gap: 2px;
   }
 
   /* 눈금자 숨김: grid 대신 display로 처리하여 iOS WebKit 호환 */
@@ -40,217 +60,17 @@
     flex: 1;
     min-height: 0;
   }
-}
 
-/* ─── 모바일 (~767px) ────────────────────────────────── */
-@media (max-width: 767px) {
-  /* 전체 레이아웃: 편집 영역 최대화 */
-  body {
-    height: 100vh;
-    height: 100dvh; /* 폴백: 100vh → 100dvh (미지원 브라우저에서 100vh 사용) */
-  }
-  #studio-root {
-    height: 100vh;
-    height: 100dvh;
-  }
-
-  /* ── 메뉴바: 햄버거 메뉴 전환 ── */
-  #menu-bar {
-    height: 40px;
-    padding: 0 4px;
-  }
-  #menu-bar .menu-item {
-    display: none; /* 기본 숨김 */
-  }
-  #menu-bar .menu-item:first-child,
-  #menu-bar .menu-item[data-menu="edit"] {
-    display: block; /* 파일 + 편집 (비교/이력 등은 편집 메뉴에 있음) */
-  }
-  /* 햄버거 버튼 (JS에서 .mobile-menu-toggle 추가 시 표시) */
-  .mobile-menu-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: var(--touch-target-min);
-    height: var(--touch-target-min);
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    font-size: 20px;
-  }
-  /* 메뉴 펼쳐진 상태 */
-  #menu-bar.mobile-open .menu-item {
-    display: block;
-  }
-  #menu-bar.mobile-open {
-    flex-wrap: wrap;
-    height: auto;
-  }
-
-  /* ── 도구 상자: 태블릿과 같이 한 줄 + 가로 스크롤 (숨기면 비교/이력 등 메뉴에도 없어져 도달 불가) ── */
-  #icon-toolbar {
-    display: flex;
-    height: 40px;
-    padding: 2px 4px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  /* ── 서식 도구 모음: 가로 스크롤 + 터치 타겟 확대 ── */
-  #style-bar {
-    height: 40px;
-    padding: 2px 4px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    gap: 1px;
-  }
-  .sb-btn {
-    min-width: var(--touch-target-min);
-    min-height: var(--touch-target-min);
-    padding: 4px;
-  }
-  .sb-combo {
-    height: 36px;
-    font-size: var(--font-size-md);
-  }
-  /* 일부 서식 버튼 숨김 (축소 모드) */
-  .sb-sep { display: none; }
-  .sb-ga { display: none; }
-
-  /* ── 편집 영역: 전체 화면 (grid→flex 전환으로 iOS 호환) ── */
-  #editor-area {
-    display: flex;
-    flex-direction: column;
-  }
-  #ruler-corner, #h-ruler, #v-ruler {
+  /* ── 상태 표시줄: 안내 메시지만 생략 (줌 컨트롤은 유지) ── */
+  .stb-message {
     display: none;
   }
-  #scroll-container {
-    flex: 1;
-    min-height: 0;
-    touch-action: pan-x pan-y pinch-zoom;
-    -webkit-overflow-scrolling: touch;
-  }
 
-  /* ── 상태 표시줄: 최소 정보 ── */
-  #status-bar {
-    height: 32px;
-    font-size: var(--font-size-sm);
-    padding: 0 4px;
-  }
-  .stb-divider { display: none; }
-  .stb-message { display: none; }
-  /* 모바일 줌: 쪽맞춤 + 100% 토글만 표시 */
-  #sb-zoom-fit-width { display: none; }
-  #sb-zoom-out { display: none; }
-  #sb-zoom-in { display: none; }
-  /* 줌 값 표시를 100% 토글 버튼으로 활용 */
-  .stb-zoom-val {
-    min-width: 44px;
-    cursor: pointer;
-    border-radius: var(--radius-sm);
-  }
-  .stb-zoom-val:active {
-    background: var(--color-hover-bg);
-  }
-  /* 줌 버튼 터치 타겟 확대 */
-  .stb-icon-btn {
-    width: var(--touch-target-min);
-    height: 32px;
-  }
-
-  /* ── 대화상자: 풀스크린 시트 ── */
-  .modal-overlay {
-    align-items: flex-end; /* 하단에서 올라오는 시트 */
-  }
+  /* ── 대화상자: 뷰포트를 넘지 않도록 ── */
   .dialog-wrap {
-    width: 100% !important;
-    max-width: 100%;
-    max-height: 90dvh;
-    border-radius: 12px 12px 0 0;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-  .dialog-title {
-    padding: 12px 16px;
-    font-size: var(--font-size-lg);
-    position: sticky;
-    top: 0;
-    z-index: 1;
-  }
-  .dialog-close {
-    width: var(--touch-target-min);
-    height: var(--touch-target-min);
-    font-size: 20px;
-  }
-  .dialog-body {
-    padding: 16px;
-  }
-  .dialog-btn {
-    min-height: var(--touch-target-min);
-    padding: 8px 16px;
-    font-size: var(--font-size-md);
-  }
-  .dialog-input, .dialog-select {
-    height: 36px;
-    font-size: var(--font-size-md);
-    padding: 4px 8px;
-  }
-  .dialog-row {
-    gap: 8px;
-    margin-bottom: 10px;
-  }
-  .dialog-label {
-    font-size: var(--font-size-base);
-    min-width: unset;
-    text-align: left;
-  }
-  .dialog-radio-group label {
-    font-size: var(--font-size-base);
-    min-height: var(--touch-target-min);
-    display: flex;
-    align-items: center;
-  }
-
-  /* ── 드롭다운 메뉴: 터치 대응 ── */
-  .md-panel {
-    min-width: 200px;
-  }
-  .md-item {
-    min-height: var(--touch-target-min);
-    padding: 8px 16px 8px 32px;
-    font-size: var(--font-size-md);
-  }
-}
-
-/* ─── 터치 디바이스 공통 (pointer: coarse) ────────────── */
-@media (pointer: coarse) {
-  /* 모든 클릭 가능 요소의 최소 터치 타겟 */
-  .tb-btn, .sb-btn, .stb-icon-btn, .md-item, .menu-title {
-    min-height: 36px;
-  }
-  .dialog-btn, .dialog-close {
-    min-height: var(--touch-target-min);
-  }
-
-  /* 스크롤바 숨김 (터치 스크롤 사용) */
-  #style-bar::-webkit-scrollbar {
-    display: none;
-  }
-  #style-bar {
-    scrollbar-width: none;
-  }
-}
-
-/* ─── 가상 키보드 대응 ───────────────────────────────── */
-@media (max-height: 500px) and (max-width: 767px) {
-  /* 키보드가 올라온 상태: 도구 영역 최소화 */
-  #menu-bar { display: none; }
-  #style-bar { display: none; }
-  #status-bar { display: none; }
-  #editor-area {
-    display: flex;
-    flex-direction: column;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    overflow: auto;
   }
 }
 

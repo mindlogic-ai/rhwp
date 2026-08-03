@@ -16,6 +16,7 @@
 .menu-item {
   position: relative;
   user-select: none;
+  flex-shrink: 0;
 }
 
 .menu-title {
