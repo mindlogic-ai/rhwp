@@ -96,11 +96,15 @@ async function completeHostSave(fileName?: string): Promise<{ ok: true; wasDirty
   notifySaved: (fileName?: string) => completeHostSave(fileName),
 };
 
+// factchat HWP agent: expose globals always so the iframe bridge
+// (public/agent-bridge.js) can drive the WASM doc via window.__wasm.
+// initRhwpDev stays DEV-only.
+(window as any).__wasm = wasm;
+(window as any).__eventBus = eventBus;
+(window as any).__documentState = documentState;
+
 // E2E 테스트용 전역 노출 (개발 모드 전용)
 if (import.meta.env.DEV) {
-  (window as any).__wasm = wasm;
-  (window as any).__eventBus = eventBus;
-  (window as any).__documentState = documentState;
   (window as any).__autosaveManager = autosaveManager;
   (window as any).__theme = { getThemeMode, getEffectiveTheme, setThemeMode };
   initRhwpDev(wasm);
@@ -496,10 +500,16 @@ async function initialize(): Promise<void> {
       },
     });
 
+    // factchat HWP agent: Expose inputHandler + canvasView always (not just
+    // DEV) so the agent bridge (public/agent-bridge.js) can read the live
+    // caret/selection (CursorState) in production builds — same rationale as
+    // window.__wasm above. The WASM doc.getCaretPosition() is decoupled from
+    // the studio cursor and always returns {0,0,0}, so CursorState is the only
+    // correct source for user_focus. The render-debug handles stay DEV-only.
+    (window as any).__inputHandler = inputHandler;
+    (window as any).__canvasView = canvasView;
     // E2E 테스트용 전역 노출 (개발 모드 전용)
     if (import.meta.env.DEV) {
-      (window as any).__inputHandler = inputHandler;
-      (window as any).__canvasView = canvasView;
       (window as any).__renderBackend = null;
       (window as any).__renderBackendRequest = renderBackendRequest;
       (window as any).__rendererRuntimeRequest = rendererRuntimeRequest;
@@ -1319,6 +1329,11 @@ function showLoadError(error: unknown): void {
 }
 
 const initPromise = initialize();
+// factchat HWP agent: agent-bridge.js must not announce studio_ready until
+// initialize() fully completes — polling wasm.initialized alone fires mid-boot
+// (after wasm init, before canvasView/toolbar exist), and an early loadFile
+// then skips canvasView?.loadDocument() silently: doc in WASM, blank screen.
+(window as any).__initPromise = initPromise;
 
 installEmbedRuntime({
   hostWindow: window,

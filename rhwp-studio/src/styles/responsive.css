@@ -103,37 +103,19 @@
     height: 100dvh;
   }
 
-  /* ── 메뉴바: 햄버거 메뉴 전환 ── */
+  /* ── 메뉴바: 좁아져도 전 항목 노출, 모자라면 줄바꿈 ──
+       [FactChat 포크] 원래는 파일/편집만 남기고 나머지를 감춘 뒤 햄버거
+       버튼(.mobile-menu-toggle)으로 펼치는 설계였으나, 그 버튼을 만드는 JS가
+       없어서 보기/입력/서식/쪽/표/도구 메뉴에 도달할 방법이 없었다. FactChat
+       임베드는 좁은 패널에서 뜨므로 감추는 대신 줄바꿈으로 모두 노출한다. */
   #menu-bar {
-    height: 40px;
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 40px;
     padding: 0 4px;
   }
   #menu-bar .menu-item {
-    display: none; /* 기본 숨김 */
-  }
-  #menu-bar .menu-item:first-child,
-  #menu-bar .menu-item[data-menu="edit"] {
-    display: block; /* 파일 + 편집 (비교/이력 등은 편집 메뉴에 있음) */
-  }
-  /* 햄버거 버튼 (JS에서 .mobile-menu-toggle 추가 시 표시) */
-  .mobile-menu-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: var(--touch-target-min);
-    height: var(--touch-target-min);
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    font-size: 20px;
-  }
-  /* 메뉴 펼쳐진 상태 */
-  #menu-bar.mobile-open .menu-item {
-    display: block;
-  }
-  #menu-bar.mobile-open {
-    flex-wrap: wrap;
-    height: auto;
+    flex-shrink: 0;
   }
 
   /* ── 도구 상자: 논리 그룹 단위 여러 행 ── */
@@ -415,35 +397,16 @@
     align-items: center;
   }
 
-  /* ── 드롭다운 메뉴: 터치 대응 ── */
+  /* ── 드롭다운 메뉴 ──
+       [FactChat 포크] 터치 타겟 확대(min-height/padding/font-size)는 걷어냈다.
+       데스크톱 전용 임베드라 창을 좁혔을 때 메뉴 항목 높이만 커져 보인다. */
   .md-panel {
     min-width: 200px;
   }
-  .md-item {
-    min-height: var(--touch-target-min);
-    padding: 8px 16px 8px 32px;
-    font-size: var(--font-size-md);
-  }
 }
 
-/* ─── 터치 디바이스 공통 (pointer: coarse) ────────────── */
-@media (pointer: coarse) {
-  /* 모든 클릭 가능 요소의 최소 터치 타겟 */
-  .tb-btn, .stb-icon-btn, .md-item, .menu-title {
-    min-height: 36px;
-  }
-  .dialog-btn, .dialog-close {
-    min-height: var(--touch-target-min);
-  }
-
-  /* 스크롤바 숨김 (터치 스크롤 사용) */
-  #style-bar::-webkit-scrollbar {
-    display: none;
-  }
-  #style-bar {
-    scrollbar-width: none;
-  }
-}
+/* [FactChat 포크] pointer: coarse 블록 제거 — 터치 기기를 지원하지 않으므로
+   .md-item/.tb-btn 최소 높이 36px 확대가 필요 없다. */
 
 /* ─── 가상 키보드 대응 ───────────────────────────────── */
 @media (max-height: 500px) and (max-width: 767px) {

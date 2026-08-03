@@ -8,6 +8,8 @@
   <!-- 다크테마 FOUC 방지 — 확장 CSP가 인라인 스크립트를 금지하므로 외부 파일로 분리(#1444).
        module/defer 금지(동기 로드)로 번들 전 즉시 실행되어 FOUC 방지를 유지한다. -->
   <script src="/theme-init.js"></script>
+  <!-- factchat HWP agent: 이전 PWA 빌드가 남긴 서비스 워커 자가 해제 (public/) -->
+  <script src="/factchat-sw-selfheal.js"></script>
   <link rel="icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" href="/icons/icon-256.png" />
   <title>rhwp-studio</title>
@@ -23,15 +25,28 @@
       <div class="menu-item" data-menu="file">
         <span class="menu-title">파일</span>
         <div class="menu-dropdown">
-          <div class="md-item disabled" data-cmd="file:new-doc"><span class="md-icon icon-new-doc"></span><span class="md-label">새로 만들기</span></div>
-          <div class="md-item" data-cmd="file:open"><span class="md-icon"></span><span class="md-label">열기</span></div>
+          <!-- FactChat: 새로 만들기/열기 removed — doc lifecycle is owned by
+               the FactChat session model (landing composer / upload), and an
+               in-iframe open would bypass session creation + revision
+               tracking entirely. The Ctrl+O / Ctrl+Alt+N shortcuts are
+               swallowed in agent-bridge.js. -->
           <div class="md-sub" data-recent>
             <span class="md-icon"></span><span class="md-label">최근 문서</span><span class="md-arrow">▶</span>
             <div class="md-sub-panel" id="recent-docs-panel">
               <div class="md-item disabled"><span class="md-icon"></span><span class="md-label">(최근 문서 없음)</span></div>
             </div>
           </div>
-          <div class="md-item disabled" data-cmd="file:save"><span class="md-icon icon-save"></span><span class="md-label">저장</span><span class="md-shortcut">Ctrl+S</span></div>
+          <!-- FactChat: native 저장(in-iframe exportHwp download) is replaced by
+               format-explicit download items owned by agent-bridge.js — no
+               data-cmd, so the studio dispatcher ignores them; the bridge
+               forwards save_requested to the parent FE, which routes through
+               its native/converter download pipeline (revision snapshot +
+               fidelity routing). 다른 이름으로 저장 계열은 studio-native로
+               유지 — location/filename picker(File System Access)가 있는
+               유일한 경로다. -->
+          <div class="md-item disabled" data-fc-save="hwp"><span class="md-icon icon-fc-hwp"></span><span class="md-label">HWP로 다운로드</span></div>
+          <div class="md-item disabled" data-fc-save="hwpx"><span class="md-icon icon-fc-hwpx"></span><span class="md-label">HWPX로 다운로드</span></div>
+          <div class="md-item disabled" data-fc-save="pdf"><span class="md-icon icon-fc-pdf"></span><span class="md-label">PDF로 다운로드</span></div>
           <div class="md-item disabled" data-cmd="file:save-as"><span class="md-icon"></span><span class="md-label">다른 이름으로 저장(A)...</span><span class="md-shortcut">Ctrl+Shift+S</span></div>
           <div class="md-item disabled" data-cmd="file:print-to-pdf" title="브라우저 인쇄 창에서 ‘대상 → PDF로 저장’을 선택합니다."><span class="md-icon icon-pdf"></span><span class="md-label">PDF로 저장…</span></div>
           <div class="md-item disabled" data-cmd="file:save-as-hwp"><span class="md-icon"></span><span class="md-label">HWP 형식으로 저장...</span></div>
@@ -47,8 +62,12 @@
       <div class="menu-item" data-menu="edit">
         <span class="menu-title">편집</span>
         <div class="menu-dropdown">
-          <div class="md-item" data-cmd="edit:undo"><span class="md-icon icon-undo"></span><span class="md-label">되돌리기</span><span class="md-shortcut">Ctrl+Z</span></div>
-          <div class="md-item" data-cmd="edit:redo"><span class="md-icon icon-redo"></span><span class="md-label">다시 실행</span><span class="md-shortcut">Ctrl+Shift+Z</span></div>
+          <!-- FactChat: data-cmd stripped — these route through the
+               bridge's unified undo/redo (local history first, then the
+               BE revision timeline), same entry point as the toolbar
+               buttons and Ctrl+Z/Ctrl+Shift+Z. -->
+          <div class="md-item disabled" data-fc-undo><span class="md-icon icon-undo"></span><span class="md-label">되돌리기</span><span class="md-shortcut">Ctrl+Z</span></div>
+          <div class="md-item disabled" data-fc-redo><span class="md-icon icon-redo"></span><span class="md-label">다시 실행</span><span class="md-shortcut">Ctrl+Shift+Z</span></div>
           <div class="md-sep"></div>
           <div class="md-item" data-cmd="edit:cut"><span class="md-icon icon-cut"></span><span class="md-label">오려 두기</span><span class="md-shortcut">Ctrl+X</span></div>
           <div class="md-item" data-cmd="edit:copy"><span class="md-icon icon-copy"></span><span class="md-label">복사하기</span><span class="md-shortcut">Ctrl+C</span></div>
@@ -60,8 +79,13 @@
           <div class="md-item disabled" data-cmd="edit:select-all"><span class="md-icon icon-select-all"></span><span class="md-label">모두 선택</span><span class="md-shortcut">Ctrl+A</span></div>
           <div class="md-sep"></div>
           <div class="md-item" data-cmd="edit:find"><span class="md-icon icon-find"></span><span class="md-label">찾기(F)</span><span class="md-shortcut">Ctrl+F</span></div>
-          <div class="md-item" data-cmd="edit:compare-documents"><span class="md-icon"></span><span class="md-label">문서 비교</span><span class="md-shortcut">Alt+Shift+V</span></div>
-          <div class="md-item" data-cmd="edit:document-history"><span class="md-icon"></span><span class="md-label">문서 이력 관리</span><span class="md-shortcut">Ctrl+Shift+H</span></div>
+          <!-- FactChat: 문서 비교/문서 이력 관리 removed — the native history
+               dialog has no restore capability and its private IndexedDB
+               snapshots can't represent the FactChat revision timeline;
+               문서 비교 loads an arbitrary local file into the editor,
+               bypassing the session model. The parent FE's 작업 내역
+               popover (BE revision timeline + jump) replaces them.
+               Shortcuts are swallowed in agent-bridge.js. -->
           <div class="md-item" data-cmd="edit:find-replace"><span class="md-icon icon-find-replace"></span><span class="md-label">찾아 바꾸기(E)</span><span class="md-shortcut">Ctrl+F2</span></div>
           <div class="md-item" data-cmd="edit:find-again"><span class="md-icon"></span><span class="md-label">다시 찾기(X)</span><span class="md-shortcut">Ctrl+L</span></div>
           <div class="md-item" data-cmd="edit:goto"><span class="md-icon"></span><span class="md-label">찾아가기(G)</span><span class="md-shortcut">Alt+G</span></div>
@@ -406,6 +430,14 @@
 
     <!-- 아이콘 툴바 -->
     <div id="icon-toolbar">
+      <!-- FactChat: unified undo/redo — owned by agent-bridge.js (no
+           data-cmd). Routes char-level editor history first, then the
+           BE revision timeline (agent turns) via the parent FE. -->
+      <div class="tb-group">
+        <button class="tb-btn" data-fc-undo disabled title="되돌리기 (Ctrl+Z)"><span class="tb-sprite icon-undo"></span><span class="tb-label">되돌<br/>리기</span></button>
+        <button class="tb-btn" data-fc-redo disabled title="다시 실행 (Ctrl+Shift+Z)"><span class="tb-sprite icon-redo"></span><span class="tb-label">다시<br/>실행</span></button>
+      </div>
+      <span class="tb-sep"></span>
       <div class="tb-group">
         <button class="tb-btn" title="오려두기 (Ctrl+X)"><span class="tb-sprite icon-cut"></span><span class="tb-label">오려<br/>두기</span></button>
         <button class="tb-btn" title="복사하기 (Ctrl+C)"><span class="tb-sprite icon-copy"></span><span class="tb-label">복사<br/>하기</span></button>
@@ -462,16 +494,12 @@
           <button class="tb-btn tb-split-arrow" title="찾기 메뉴"><span class="tb-arrow-icon">▾</span></button>
           <div class="tb-split-menu">
             <div class="tb-split-item" data-cmd="edit:find">찾기(F) <span class="tb-split-shortcut">Ctrl+F</span></div>
-            <div class="tb-split-item" data-cmd="edit:compare-documents">문서 비교 <span class="tb-split-shortcut">Alt+Shift+V</span></div>
-            <div class="tb-split-item" data-cmd="edit:document-history">문서 이력 관리 <span class="tb-split-shortcut">Ctrl+Shift+H</span></div>
             <div class="tb-split-item" data-cmd="edit:find-replace">찾아 바꾸기(E) <span class="tb-split-shortcut">Ctrl+F2</span></div>
             <div class="tb-split-item" data-cmd="edit:find-again">다시 찾기(X) <span class="tb-split-shortcut">Ctrl+L</span></div>
             <div class="tb-split-sep"></div>
             <div class="tb-split-item" data-cmd="edit:goto">찾아가기(G) <span class="tb-split-shortcut">Alt+G</span></div>
           </div>
         </div>
-        <button class="tb-btn" data-cmd="edit:document-history" title="문서 이력 관리 (Ctrl+Shift+H)"><span class="tb-icon-text">⧉</span><span class="tb-label">이력<br/>관리</span></button>
-        <button class="tb-btn" data-cmd="edit:compare-documents" title="문서 비교 (Alt+Shift+V)"><span class="tb-icon-text">≍</span><span class="tb-label">문서<br/>비교</span></button>
       </div>
       <!-- 머리말/꼬리말 편집 모드 전용 도구상자 (숨김) -->
       <div class="tb-group tb-headerfooter-group" style="display:none">
@@ -666,5 +694,11 @@
     </footer>
   </div>
   <script type="module" src="/src/main.ts"></script>
+  <!-- factchat HWP agent bridge: exposes WASM methods to the parent window
+       via postMessage RPC. Loaded after the main module so window.__wasm
+       is already exposed by the time agent-bridge.js initializes. Vite
+       inlines this path relative to base= so it resolves to
+       /rhwp/<version>/agent-bridge.js in production. -->
+  <script src="./agent-bridge.js" defer></script>
 </body>
 </html>
