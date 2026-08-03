@@ -547,12 +547,13 @@
     });
 
     // ── FactChat save menu (파일 > HWP/HWPX/PDF로 저장) ──
-    // index.html replaces the studio-native 저장/다른 이름으로 저장 (in-iframe
-    // exportHwp download — bypasses the FE's revision snapshot + fidelity
-    // routing) with format-explicit `data-fc-save` items. They carry no
-    // data-cmd, so the studio dispatcher ignores them entirely; the bridge
-    // owns their enable state and forwards clicks to the parent FE, which
-    // runs its existing native/converter download pipeline.
+    // 저장 진입점은 format-explicit `data-fc-save` 항목이 담당한다. data-cmd가
+    // 없어 스튜디오 디스패처는 무시하고, 브리지가 enable 상태를 소유하며 클릭을
+    // 부모 FE로 넘겨 기존 native/converter 다운로드 파이프라인(리비전 스냅샷 +
+    // fidelity 라우팅)을 태운다.
+    // 현재 index.html에는 이 항목이 없다 — 다운로드 UI를 부모 FE가 전부 소유하기로
+    // 해서 걷어냈다. 아래 코드는 빈 목록에 대해 no-op이므로, 메뉴에 다시 넣으면
+    // 그대로 동작한다.
     const fcSaveItems = Array.from(
       document.querySelectorAll('.md-item[data-fc-save]'),
     );
