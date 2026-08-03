@@ -1182,6 +1182,12 @@ eventBus.on('open-document-bytes', async (payload) => {
     skipUnsavedGuard?: boolean;
     /** 문서 비교 등: 로드 완료를 기다리는 쪽과 짝을 맞출 때만 전달 */
     requestId?: string;
+    /**
+     * 에이전트(FactChat 브리지)가 연 문서. 사용자가 대답할 수 없는 로드 중
+     * 대화상자(로컬 글꼴 안내 등)를 띄우면 initializeDocument 가 응답을 기다리며
+     * 멈추고, 짝이 되는 :done 이 끝내 발행되지 않아 호출 측이 타임아웃한다.
+     */
+    agentLoad?: boolean;
   };
   const notifyDone = (ok: boolean, error?: string) => {
     if (!data.requestId) return;
@@ -1192,7 +1198,10 @@ eventBus.on('open-document-bytes', async (payload) => {
       notifyDone(false, '문서 열기가 취소되었습니다.');
       return;
     }
-    await loadBytes(data.bytes, data.fileName, data.fileHandle);
+    await loadBytes(data.bytes, data.fileName, data.fileHandle, undefined, {
+      suppressDialogs: data.agentLoad === true,
+      skipRecent: data.agentLoad === true,
+    });
     notifyDone(true);
   } catch (error) {
     // #265: WASM 파서 에러 (예: HWP 3.0 미지원) 를 사용자에게 전파
