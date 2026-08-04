@@ -520,6 +520,8 @@
         const o = JSON.parse(json);
         delete o.pageBreakBefore;
         delete o.paraShapeId;
+        // breakType은 ParaShape가 아니라 문단 자체의 값이라 서식 비교 대상이 아니다.
+        delete o.breakType;
         return JSON.stringify(o);
       } catch { return json; }
     }
@@ -1139,7 +1141,11 @@
         let char_props = null, para_props = null;
         try { char_props = safeParse(doc.getCharPropertiesAt(sec, para, 0)); } catch {}
         try { para_props = safeParse(doc.getParaPropertiesAt(sec, para)); } catch {}
-        return { path: params.path, text, length: len, char_props, para_props };
+        // 문단 자체의 나누기(쪽/단/구역). ParaShape의 pageBreakBefore와 다른
+        // 채널이라 apply_para_style로는 끌 수 없고 remove_page_break를 써야 한다.
+        // para_props 안에도 있지만 진단에서 놓치지 않도록 최상위로 올린다.
+        const break_type = (para_props && para_props.breakType) || 'none';
+        return { path: params.path, text, length: len, char_props, para_props, break_type };
       },
       async getSection(params) {
         const sec = params.sec;
@@ -1150,7 +1156,17 @@
           try {
             const len = doc.getParagraphLength(sec, p);
             const text = doc.getTextRange(sec, p, 0, Math.min(len, 200));
-            paragraphs.push({ path: `s${sec}:p${p}`, length: len, text });
+            // 강제 쪽/단 나누기가 걸린 문단을 한 번의 조회로 찾을 수 있게 한다.
+            // 이 값이 없던 탓에 "빈 줄마다 페이지가 갈리는" 문서를 진단하려면
+            // 문단을 하나씩 찔러봐야 했다.
+            // page/column만 싣는다 — section(0x01)은 모든 구역의 첫 문단이 늘
+            // 달고 있는 구조 표시라 목록에 나오면 노이즈이고, removePageBreak도
+            // 보존 대상이라 손댈 수 없다. 전체 값이 필요하면 getBlock을 쓴다.
+            let break_type = 'none';
+            try { break_type = safeParse(doc.getParaPropertiesAt(sec, p))?.breakType || 'none'; } catch {}
+            const row = { path: `s${sec}:p${p}`, length: len, text };
+            if (break_type === 'page' || break_type === 'column') row.break_type = break_type;
+            paragraphs.push(row);
           } catch {}
         }
         return { sec, paragraphs };
@@ -1967,6 +1983,29 @@
           }
           refresh();
           return { ok: true, result, before_pages: beforePages, after_pages: afterPages };
+        } catch (e) { try { doc.endBatch(); } catch {} throw e; }
+      },
+      // 문단에 걸린 강제 나누기(쪽/단/구역) 해제 — insertPageBreak의 짝.
+      // 이 나누기는 ParaShape의 pageBreakBefore와 다른 채널이라
+      // applyParaStyle{pageBreakBefore:false}로는 꺼지지 않는다(changed:false만
+      // 돌아온다). 지금까지는 문단을 통째로 지우는 것 말고는 방법이 없어서
+      // 여백용 빈 줄을 지우고 문단 간격으로 다시 채워 넣어야 했다.
+      // 문단은 보존되므로 텍스트·서식·문단 안 그림/표가 그대로 남는다.
+      async removePageBreak(params) {
+        const { sec, para } = pathToCoords(params.path);
+        const doc = getDoc();
+        const beforePages = doc.pageCount();
+        doc.beginBatch();
+        try {
+          const result = safeParse(doc.removePageBreak(sec, para));
+          doc.endBatch();
+          refresh();
+          return {
+            ok: true,
+            changed: result?.changed === true,
+            before_pages: beforePages,
+            after_pages: doc.pageCount(),
+          };
         } catch (e) { try { doc.endBatch(); } catch {} throw e; }
       },
 

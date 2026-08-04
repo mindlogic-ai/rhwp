@@ -2613,6 +2613,78 @@ impl DocumentCore {
         )))
     }
 
+    /// 문단에 걸린 쪽/단 나누기 해제.
+    ///
+    /// insert_page_break_native / insert_column_break_native가 세팅하는
+    /// column_type + raw_break_type을 되돌린다. 이 나누기는 ParaShape의
+    /// pageBreakBefore와 별개 채널이라 apply_para_format으로는 끌 수 없고,
+    /// 지금까지는 문단을 통째로 지우는 것 말고는 제거 수단이 없었다
+    /// (여백·서식·문단 안 컨트롤까지 같이 사라짐).
+    ///
+    /// 문단 자체는 건드리지 않으므로 텍스트/서식/그림·표가 그대로 남는다.
+    /// 구역 나누기(0x01)·다단 나누기(0x02) 비트는 보존한다 — 구역의 첫 문단
+    /// 표시라 지우면 HWP 저장 시 구역 구조가 깨진다.
+    /// 쪽/단 나누기가 없던 문단에 호출하면 아무 것도 바꾸지 않고 changed=false를
+    /// 돌려준다(재페이지네이션도 건너뛴다).
+    pub fn remove_page_break_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+    ) -> Result<String, HwpError> {
+        use crate::model::paragraph::ColumnBreakType;
+
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과",
+                section_idx
+            )));
+        }
+        if para_idx >= self.document.sections[section_idx].paragraphs.len() {
+            return Err(HwpError::RenderError(format!(
+                "문단 인덱스 {} 범위 초과",
+                para_idx
+            )));
+        }
+
+        // raw_break_type은 비트 플래그다 (parser/body_text.rs 표 61):
+        //   0x01 구역 나누기, 0x02 다단 나누기, 0x04 쪽 나누기, 0x08 단 나누기
+        // 여기서 지우는 건 쪽/단(0x04|0x08)뿐이다. 0x01은 구역의 첫 문단 표시라
+        // (hwpx_to_hwp가 세팅하고 serializer/body_text가 기록한다) 함께 지우면
+        // HWP 저장 시 구역 구조가 깨진다.
+        const PAGE_OR_COLUMN: u8 = 0x04 | 0x08;
+        let raw = self.document.sections[section_idx].paragraphs[para_idx].raw_break_type;
+        let had_break = raw & PAGE_OR_COLUMN != 0
+            || matches!(
+                self.document.sections[section_idx].paragraphs[para_idx].column_type,
+                ColumnBreakType::Page | ColumnBreakType::Column
+            );
+        if !had_break {
+            return Ok(super::super::helpers::json_ok_with("\"changed\":false"));
+        }
+
+        self.document.sections[section_idx].raw_stream = None;
+        {
+            let para = &mut self.document.sections[section_idx].paragraphs[para_idx];
+            let remaining = para.raw_break_type & !PAGE_OR_COLUMN;
+            para.raw_break_type = remaining;
+            // 남은 비트로 column_type을 파서와 같은 우선순위로 재계산한다.
+            para.column_type = if remaining & 0x01 != 0 {
+                ColumnBreakType::Section
+            } else if remaining & 0x02 != 0 {
+                ColumnBreakType::MultiColumn
+            } else {
+                ColumnBreakType::None
+            };
+        }
+
+        // 재구성 순서는 insert_page_break_native 꼬리와 동일하게 맞춘다.
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+        self.invalidate_page_tree_cache();
+
+        Ok(super::super::helpers::json_ok_with("\"changed\":true"))
+    }
+
     /// 단 나누기 삽입 (Ctrl+Shift+Enter)
     /// 커서 위치에서 문단을 분리하고 새 문단에 단 나누기 설정.
     /// 1단 문서에서는 쪽 나누기와 동일하게 동작.

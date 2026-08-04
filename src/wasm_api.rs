@@ -1936,6 +1936,20 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 문단에 걸린 쪽/단 나누기 해제.
+    /// insertPageBreak/insertColumnBreak의 짝. ParaShape의 pageBreakBefore와
+    /// 다른 채널이라 applyParaFormat으로는 끌 수 없다. 문단과 구역 나누기
+    /// 비트는 보존된다.
+    #[wasm_bindgen(js_name = removePageBreak)]
+    pub fn remove_page_break(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.remove_page_break_native(section_idx as usize, para_idx as usize)
+            .map_err(|e| e.into())
+    }
+
     /// 강제 쪽 나누기 삽입 (Ctrl+Enter)
     #[wasm_bindgen(js_name = insertPageBreak)]
     pub fn insert_page_break(

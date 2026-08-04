@@ -163,6 +163,22 @@ impl DocumentCore {
             ));
         }
 
+        // 문단 자체의 나누기(insert_page_break이 세팅하는 column_type).
+        // ParaShape의 pageBreakBefore와 별개 채널이고 페이지네이션은 둘을 OR로
+        // 본다(renderer/pagination/engine.rs). 이 값이 조회로 안 나가면 "보이지
+        // 않는 쪽 나누기"가 되어 원인 추적이 불가능하다. build_para_properties_json은
+        // ParaShape id만 받는 공유 헬퍼(셀/각주 경로도 함께 씀)라 문단 컨텍스트가
+        // 없으므로 여기서 덧붙인다.
+        let break_type = match para.column_type {
+            crate::model::paragraph::ColumnBreakType::Page => "page",
+            crate::model::paragraph::ColumnBreakType::Column => "column",
+            crate::model::paragraph::ColumnBreakType::Section => "section",
+            crate::model::paragraph::ColumnBreakType::MultiColumn => "multicolumn",
+            crate::model::paragraph::ColumnBreakType::None => "none",
+        };
+        json.pop(); // 마지막 '}' 제거
+        json.push_str(&format!(",\"breakType\":\"{}\"}}", break_type));
+
         Ok(json)
     }
 
