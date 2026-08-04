@@ -489,6 +489,40 @@
     // DROPPED — alignment/spacing edits returned ok:true but never applied
     // (the 2026-06-17 "중앙정렬 안됨" QA bug). Engine-shaped keys (alignment,
     // lineSpacing, indent, ...) pass through unchanged so direct callers work.
+    // ── 삽입 문단의 "문단 앞에서 항상 쪽 나눔" 승계 차단 ──
+    // insertParagraphAfter/insertParagraphsAfter는 사람이 줄 끝에서 Enter를 친
+    // 것과 같게 splitParagraph로 문단을 만든다. 그래서 새 문단이 앵커의
+    // ParaShape를 그대로 물려받는데, 여기엔 pageBreakBefore도 포함된다.
+    // 앵커에 쪽 나눔이 걸려 있으면(공문 서식의 제목/결재 문단 등 흔함) 에이전트가
+    // 넣는 문단마다 페이지가 갈리고, 여백용 빈 줄이 대개 그 문단들이라 "빈 줄마다
+    // 페이지가 넘어간다"로 보인다. 실측: 쪽 나눔 문단 뒤에 5문단 삽입 → 6페이지.
+    // 새 문단에서만 플래그를 끈다. 앵커와 나머지 서식(정렬/들여쓰기/줄간격/글자
+    // 모양)은 그대로 승계된다. 진짜 쪽 나눔이 필요하면 insertPageBreak나
+    // applyParaStyle{pageBreakBefore:true}로 명시적으로 건다.
+    function clearInheritedPageBreak(doc, sec, paraIdx) {
+      try {
+        const cur = JSON.parse(doc.getParaPropertiesAt(sec, paraIdx));
+        if (cur.pageBreakBefore !== true) return false;
+        doc.applyParaFormat(sec, paraIdx, '{"pageBreakBefore":false}');
+        return true;
+      } catch { return false; }
+    }
+    // shape_matched 읽기-검증용 정규화. 위에서 일부러 끈 플래그 때문에 정상
+    // 삽입이 shape_matched=false로 보고되면 안 된다.
+    //   pageBreakBefore — 의도적으로 끈 값.
+    //   paraShapeId     — 플래그를 끄면 다른 ParaShape 항목으로 해소되므로 id가
+    //                     달라진다. 도큐먼트 내부 테이블 인덱스일 뿐이고, 이
+    //                     검증이 잡으려는 건 "새 문단이 기본 서식(작은 글꼴·가운데
+    //                     정렬)으로 떨어지는" 회귀다. 정렬/들여쓰기/줄간격 등 실제
+    //                     서식 값은 그대로 비교된다.
+    function normalizeParaShape(json) {
+      try {
+        const o = JSON.parse(json);
+        delete o.pageBreakBefore;
+        delete o.paraShapeId;
+        return JSON.stringify(o);
+      } catch { return json; }
+    }
     function translateParaProps(props) {
       const out = {};
       for (const [k, v] of Object.entries(props || {})) {
@@ -1769,6 +1803,7 @@
           const srcLen = doc.getParagraphLength(sec, para);
           doc.splitParagraph(sec, para, srcLen);
           if (params.text) doc.insertText(sec, para + 1, 0, params.text);
+          clearInheritedPageBreak(doc, sec, para + 1);
           doc.endBatch();
           refresh();
           // Read-back: confirm the new paragraph actually inherited the
@@ -1779,8 +1814,8 @@
           try {
             const srcChar = doc.getCharPropertiesAt(sec, para, Math.max(0, srcLen - 1));
             const newChar = doc.getCharPropertiesAt(sec, para + 1, 0);
-            const srcPara = doc.getParaPropertiesAt(sec, para);
-            const newPara = doc.getParaPropertiesAt(sec, para + 1);
+            const srcPara = normalizeParaShape(doc.getParaPropertiesAt(sec, para));
+            const newPara = normalizeParaShape(doc.getParaPropertiesAt(sec, para + 1));
             shape_matched = (srcChar === newChar) && (srcPara === newPara);
           } catch {}
           return { ok: true, new_path: `s${sec}:p${para + 1}`, shape_matched };
@@ -1803,6 +1838,7 @@
             doc.splitParagraph(sec, anchorPara, anchorLen);
             const newPara = anchorPara + 1;
             if (line) doc.insertText(sec, newPara, 0, line);
+            clearInheritedPageBreak(doc, sec, newPara);
             paths.push(`s${sec}:p${newPara}`);
             anchorPara = newPara;
           }
@@ -1813,12 +1849,12 @@
             const fmtPara = fmt.para <= para ? fmt.para : fmt.para + lines.length;
             const refLen = doc.getParagraphLength(fmt.sec, fmtPara);
             const refChar = doc.getCharPropertiesAt(fmt.sec, fmtPara, Math.max(0, refLen - 1));
-            const refPara = doc.getParaPropertiesAt(fmt.sec, fmtPara);
+            const refPara = normalizeParaShape(doc.getParaPropertiesAt(fmt.sec, fmtPara));
             shape_matched = paths.every((path) => {
               const current = pathToCoords(path);
               return (
                 doc.getCharPropertiesAt(current.sec, current.para, 0) === refChar
-                && doc.getParaPropertiesAt(current.sec, current.para) === refPara
+                && normalizeParaShape(doc.getParaPropertiesAt(current.sec, current.para)) === refPara
               );
             });
           } catch {}
