@@ -3044,6 +3044,35 @@
         const data = await res.json();
         return { ok: true, file_name: fullName, bytes_len: bytes.length, hwp_verify: hwpVerify, preserved_original: preserveOriginalHwpx, download_url: data.url };
       },
+      // 호스트 저장 완료 통지 (rhwp #2660 계약의 브리지 표면).
+      //
+      // 저장 흐름은 브리지가 끝내지 않는다: 저장 메뉴는 parent 로
+      // 'save_requested' 를 보내고, FE 가 자기 다운로드/업로드 파이프라인을
+      // 돌린다. 그 파이프라인이 성공으로 끝난 뒤 FE 가 이 RPC 를 부르면
+      // 그때 비로소 문서가 clean 이 되고 복구 draft 가 지워진다.
+      //
+      // exportDocument 성공만으로 clean 처리하지 않는 이유: export 는 바이트를
+      // 만들 뿐 영속화를 보장하지 않는다. 업로드/저장이 실패해도 복구 draft 는
+      // 남아 있어야 하므로, 영속화를 아는 쪽(FE)이 명시적으로 통지한다.
+      //
+      // 통지가 오지 않으면 draft 가 IndexedDB 에 남아 다음 세션 진입 때마다
+      // "문서 복구" 안내가 다시 뜬다 (e2e/embed-save-ack.test.mjs TC-2 가
+      // 그 음성 대조를 고정하고 있다).
+      //
+      // params.file_name — 저장된 최종 파일명(선택). 주면 studio 의 fileName 을
+      // 그 이름으로 갱신해 이후 export/제목 표기가 실제 저장본과 일치한다.
+      async notifySaved(params) {
+        const api = window.rhwpStudio;
+        if (!api || typeof api.notifySaved !== 'function') {
+          return { ok: false, error: 'notifySaved is not supported by this Studio build' };
+        }
+        const requested = params && params.file_name;
+        const fileName = typeof requested === 'string' && requested ? requested : undefined;
+        // draft 삭제 완료까지 await 한다 — 응답 이후 팝업/탭을 닫아도
+        // IndexedDB 삭제가 잘리지 않는다.
+        const ack = await api.notifySaved(fileName);
+        return { ok: true, was_dirty: !!(ack && ack.wasDirty), file_name: wasm.fileName };
+      },
       async convertToEditable() {
         try { return safeParse(getDoc().convertToEditable()); }
         catch (e) { return { ok: false, error: e.message }; }
