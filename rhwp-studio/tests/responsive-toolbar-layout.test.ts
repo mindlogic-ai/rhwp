@@ -9,7 +9,8 @@ const responsive = readFileSync(new URL('../src/styles/responsive.css', import.m
 test('icon toolbar wraps complete groups and grows to its row count', () => {
   assert.match(toolbar, /#icon-toolbar\s*\{[^}]*flex-wrap:\s*wrap;/s);
   assert.match(toolbar, /#icon-toolbar\s*\{[^}]*height:\s*auto;/s);
-  assert.match(toolbar, /#icon-toolbar\s*\{[^}]*min-height:\s*56px;/s);
+  // [FactChat 포크] 높이 하한 없음 — 툴바는 실제 행 수만큼만 차지한다.
+  assert.doesNotMatch(toolbar, /#icon-toolbar\s*\{[^}]*min-height:/s);
   assert.match(toolbar, /\.tb-group\s*\{[^}]*flex-shrink:\s*0;/s);
 });
 
@@ -18,10 +19,11 @@ test('constrained layouts hide top-level separators and do not scroll the toolba
     responsive,
     /@media\s*\(max-width:\s*1279px\)[\s\S]*?#icon-toolbar\s*>\s*\.tb-sep,\s*#style-bar\s*>\s*\.sb-sep\s*\{[^}]*display:\s*none;/,
   );
-  assert.match(
-    responsive,
-    /@media\s*\(max-width:\s*1023px\)[\s\S]*?#icon-toolbar\s*\{[^}]*min-height:\s*40px;/,
-  );
+  // [FactChat 포크] 좁은 창에서도 min-height 하한을 두지 않는다(54128bb64 이후).
+  const responsiveToolbarRules = [...responsive.matchAll(/#icon-toolbar\s*\{([^}]*)\}/g)];
+  for (const rule of responsiveToolbarRules) {
+    assert.doesNotMatch(rule[1], /min-height:/);
+  }
 
   const mobileToolbar = responsive.match(
     /@media\s*\(max-width:\s*767px\)[\s\S]*?#icon-toolbar\s*\{([^}]*)\}/,
