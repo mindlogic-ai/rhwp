@@ -1,0 +1,161 @@
+# rhwp-studio 를 S3 + CloudFront 정적 호스팅으로 배포한다.
+#
+# 사전 준비 — 비밀값이 아닌 식별자는 Variables 로 둔다 (레포 설정 → Variables):
+#   vars.AWS_REGION          예: ap-northeast-2
+#   vars.S3_BUCKET           배포 대상 버킷 이름 (퍼블릭 차단 + CloudFront OAC)
+#   vars.CF_DISTRIBUTION_ID  CloudFront 배포 ID
+#   vars.AWS_ACCESS_KEY_ID   배포 전용 IAM 사용자의 액세스 키 ID. 서명 요청
+#                            헤더와 CloudTrail 에 평문으로 남는 식별자라
+#                            비밀값이 아니다.
+#
+# Secrets:
+#   secrets.AWS_SECRET_ACCESS_KEY
+#     위 키 ID 의 시크릿. 실제 자격 증명은 이것뿐이다. 사용자 권한은 대상
+#     버킷의 객체 읽기/쓰기/삭제와 해당 배포의 CreateInvalidation 으로만 제한한다.
+#
+# CloudFront 쪽 설정:
+#   - Compress 켜기 (wasm/js/css 전송량 감소, 자동 압축은 10MB 미만 객체 대상)
+#   - Default root object: index.html
+#   - 403/404 → /index.html (200) 로 응답 매핑 (SPA fallback)
+name: Deploy studio to S3
+
+on:
+  push:
+    branches: [mindlogic/main]
+    paths-ignore:
+      - 'mydocs/**'
+      - 'docs/**'
+      - 'samples/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'rhwp-logo.*'
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'vite base path (서브경로 배포 시 예: /studio/)'
+        type: string
+        default: '/'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-s3
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    env:
+      BASE_PATH: ${{ inputs.base || '/' }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # --- WASM 빌드 (deploy-pages.yml 과 동일 절차) ---
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: ./.github/actions/install-wasm-pack
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-wasm-
+
+      - name: Build WASM
+        run: wasm-pack build --target web --release
+
+      # --- rhwp-studio 빌드 ---
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: rhwp-studio
+        run: npm ci
+
+      - name: Copy WASM to public
+        run: |
+          cp pkg/rhwp_bg.wasm rhwp-studio/public/
+          cp pkg/rhwp.js rhwp-studio/public/
+
+      - name: Copy favicon
+        run: cp assets/logo/favicon.ico rhwp-studio/public/favicon.ico
+
+      - name: Build rhwp-studio
+        working-directory: rhwp-studio
+        run: npx vite build --base="${BASE_PATH}"
+
+      # --- 업로드 ---
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # 순서가 중요하다. 해시 붙은 신규 에셋을 먼저 올리고, 그것을 참조하는
+      # index.html 은 마지막에 올린다. 반대로 하면 그 사이 요청이 없는 에셋을 찾는다.
+      - name: Sync immutable assets
+        env:
+          BUCKET: ${{ vars.S3_BUCKET }}
+        run: |
+          aws s3 sync rhwp-studio/dist "s3://${BUCKET}" \
+            --delete \
+            --exclude "*.html" \
+            --exclude "*.wasm" \
+            --exclude "rhwp.js" \
+            --exclude "agent-bridge.js" \
+            --exclude "theme-init.js" \
+            --exclude "factchat-sw-selfheal.js" \
+            --cache-control "public,max-age=31536000,immutable"
+
+      # aws-cli 의 확장자 추론이 .wasm 을 application/octet-stream 으로 올릴 수 있다.
+      # 그 경우 instantiateStreaming 이 실패하므로 Content-Type 을 명시한다.
+      - name: Sync wasm
+        env:
+          BUCKET: ${{ vars.S3_BUCKET }}
+        run: |
+          aws s3 sync rhwp-studio/dist "s3://${BUCKET}" \
+            --exclude "*" --include "*.wasm" \
+            --content-type "application/wasm" \
+            --cache-control "public,max-age=31536000,immutable"
+
+      # 엔트리 파일은 파일명이 고정이라 캐시되면 엔진 업그레이드 후에도 옛 번들을
+      # 물고 있게 된다 (PWA CacheFirst 로 겪었던 stale WASM 과 같은 실패 모드).
+      - name: Sync entry files
+        env:
+          BUCKET: ${{ vars.S3_BUCKET }}
+        run: |
+          aws s3 sync rhwp-studio/dist "s3://${BUCKET}" \
+            --exclude "*" \
+            --include "*.html" \
+            --include "rhwp.js" \
+            --include "agent-bridge.js" \
+            --include "theme-init.js" \
+            --include "factchat-sw-selfheal.js" \
+            --cache-control "no-cache,must-revalidate"
+
+      # 해시 파일명 에셋은 무효화가 필요 없다. 고정 이름 엔트리만 찍어
+      # 월 1000 경로 무료 한도 안에서 처리한다.
+      - name: Invalidate CloudFront
+        env:
+          DIST_ID: ${{ vars.CF_DISTRIBUTION_ID }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${DIST_ID}" \
+            --paths "/index.html" "/print.html" "/rhwp.js" \
+                    "/agent-bridge.js" "/theme-init.js" "/factchat-sw-selfheal.js"
