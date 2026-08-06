@@ -560,7 +560,16 @@
     // change that's genuinely theirs.
     let quietUntilUserInput = true;
     ['keydown', 'pointerdown', 'beforeinput', 'paste', 'drop'].forEach((type) => {
-      document.addEventListener(type, () => { quietUntilUserInput = false; }, true);
+      document.addEventListener(type, () => {
+        // 잠금 중에는 갱신하지 않는다. 잠금이 스크롤·드래그 선택을 허용하게 되면서
+        // 사용자가 문서를 읽기만 해도 pointerdown 이 뜬다 — 여기서 quiet 를 풀면
+        // 에이전트 mutation 의 트레일링 document-changed 가 진짜 user_edit 으로
+        // 새어 나가 BE 가 redo 스택을 죽이고 phantom 리비전을 저장한다.
+        // 잠금 중 사용자 입력은 어차피 스튜디오 readonly 가 막으므로 "사용자가
+        // 진짜 편집했다"는 신호가 될 수 없다.
+        if (document.body.classList.contains('agent-locked')) return;
+        quietUntilUserInput = false;
+      }, true);
     });
     // First agent-made mutation of the current lock cycle — lets the FE
     // pill flip from "확인 중" to "편집 중" without duplicating a tool list.
@@ -774,7 +783,12 @@
     // real time — no dim, no center pill, no covered toolbar.
     const lockStyle = document.createElement('style');
     lockStyle.textContent = [
-      'body.agent-locked #editor-area, body.agent-locked #menu-bar, body.agent-locked #icon-toolbar, body.agent-locked #style-bar { pointer-events: none !important; }',
+      // #editor-area 는 뺀다 — pointer-events:none 이면 스크롤과 드래그 선택까지
+      // 죽어서, 사용자에게는 "쓰기 금지"가 아니라 "화면이 멈춤"으로 보인다.
+      // 에이전트가 손대지 않는 페이지조차 읽을 수 없었다. 그 자리는 스튜디오
+      // readonly(= setLocked 이 켠다)가 메운다: 키 이벤트를 직접 필터링하는 방식은
+      // 한글 IME 조합 입력이 preventDefault 를 우회해 새기 쉽다.
+      'body.agent-locked #menu-bar, body.agent-locked #icon-toolbar, body.agent-locked #style-bar { pointer-events: none !important; }',
       // rhwp-studio raises a sticky top-right toast on every HWPX load
       // ("HWPX 문서는 저장 시 HWP 형식으로 변환 저장됩니다…"). It covers
       // the toolbar and is redundant with the inline hint in the parent
@@ -785,8 +799,58 @@
     ].join('\n');
     document.head.appendChild(lockStyle);
 
+    // ── 잠금 = 툴바 차단(CSS) + 편집 차단(스튜디오 readonly) ──
+    //
+    // readonly 에는 두 가지 유래가 있고 둘을 구분해야 한다:
+    //   viewer     — ?readonly=1 이나 호스트의 setReadonly RPC. 문서를 아무도
+    //                바꾸면 안 되는 세션이라 에이전트 RPC 도 거절한다.
+    //   agent-turn — editor_lock 으로 브리지가 켠 것. 사용자 입력만 막고 에이전트
+    //                편집 RPC 는 통과해야 한다. 이걸 구분하지 않으면 턴 중에
+    //                readonly 를 켜는 순간 그 턴의 편집이 전부 거절된다.
+    //
+    // agentTurnReadonly 는 "지금 readonly 인 이유가 잠금인가"를 뜻한다.
+    let agentTurnReadonly = false;
+    let preLockEditMode = null;
+
+    function studioEditMode() {
+      const api = window.rhwpStudio;
+      return api && typeof api.getEditMode === 'function' ? api.getEditMode() : 'normal';
+    }
+
+    function setStudioEditMode(mode) {
+      const api = window.rhwpStudio;
+      if (!api || typeof api.setEditMode !== 'function') return false;
+      try {
+        api.setEditMode(mode);
+        return true;
+      } catch (err) {
+        console.warn('[agent-bridge] setEditMode 실패:', err);
+        return false;
+      }
+    }
+
+    /** 뷰어 유래 readonly 인가? (에이전트 RPC 를 거절해야 하는 상태) */
+    function isViewerReadonly() {
+      return studioEditMode() === 'readonly' && !agentTurnReadonly;
+    }
+
     function setLocked(b) {
       document.body.classList.toggle('agent-locked', b);
+      if (b) {
+        // 이미 viewer readonly 인 세션은 건드리지 않는다 — 잠금이 풀렸다고
+        // 뷰어 세션이 편집 가능해지면 안 된다.
+        if (agentTurnReadonly || studioEditMode() === 'readonly') return;
+        // 양식 모드였다면 그 모드로 정확히 되돌려야 하므로 이전 모드를 기억한다.
+        const before = studioEditMode();
+        if (setStudioEditMode('readonly')) {
+          preLockEditMode = before;
+          agentTurnReadonly = true;
+        }
+      } else if (agentTurnReadonly) {
+        setStudioEditMode(preLockEditMode || 'normal');
+        agentTurnReadonly = false;
+        preLockEditMode = null;
+      }
     }
 
     // ── Suppress "HWPX 비표준 감지" validation modal ──
@@ -3135,12 +3199,23 @@
         if (!api || typeof api.setReadonly !== 'function') {
           return { ok: false, error: 'studio does not expose setReadonly' };
         }
-        return api.setReadonly(params.on !== false);
+        const result = api.setReadonly(params.on !== false);
+        // 호스트가 명시로 건 readonly 는 viewer 유래다. 잠금이 켠 상태를
+        // 덮어쓰는 것이므로 잠금 복원 정보도 버린다(잠금 해제 때 되살아나면
+        // 호스트 의도가 조용히 뒤집힌다).
+        agentTurnReadonly = false;
+        preLockEditMode = null;
+        return result;
       },
       async getEditMode() {
-        const api = window.rhwpStudio;
-        const mode = api && typeof api.getEditMode === 'function' ? api.getEditMode() : 'normal';
-        return { ok: true, edit_mode: mode, readonly: mode === 'readonly' };
+        const mode = studioEditMode();
+        return {
+          ok: true,
+          edit_mode: mode,
+          readonly: mode === 'readonly',
+          // 'agent-turn' 이면 에이전트 편집 RPC 는 계속 통과한다.
+          readonly_reason: mode === 'readonly' ? (agentTurnReadonly ? 'agent-turn' : 'viewer') : null,
+        };
       },
     };
 
@@ -3160,9 +3235,11 @@
       'setReadonly', 'getEditMode',
     ]);
 
+    // 게이트는 viewer 유래 readonly 에만 건다. editor_lock 이 켠 readonly 는
+    // 사용자 입력을 막으려는 것이지 에이전트를 막으려는 것이 아니다 —
+    // 구분하지 않으면 턴 중 잠금이 그 턴의 편집 RPC 를 전부 거절한다.
     function isReadonlyNow() {
-      const api = window.rhwpStudio;
-      return !!api && typeof api.getEditMode === 'function' && api.getEditMode() === 'readonly';
+      return isViewerReadonly();
     }
 
     // ── Router ──

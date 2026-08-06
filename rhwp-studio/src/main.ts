@@ -100,6 +100,20 @@ async function completeHostSave(fileName?: string): Promise<{ ok: true; wasDirty
     return { ok: true, editMode };
   },
   getEditMode: () => editMode,
+  /**
+   * 편집 모드를 직접 지정한다.
+   *
+   * setReadonly 는 readonly ↔ normal 만 오가므로, 양식 모드였던 세션이 잠금을
+   * 거치면 양식 모드를 잃는다. 브리지의 editor_lock/unlock 은 잠금 직전 모드를
+   * 기억했다가 그대로 되돌려야 해서 임의 모드 지정이 필요하다.
+   */
+  setEditMode: (mode: EditorEditMode) => {
+    if (mode !== 'normal' && mode !== 'form' && mode !== 'readonly') {
+      return { ok: false, error: `unknown edit mode: ${mode}` };
+    }
+    setEditMode(mode);
+    return { ok: true, editMode };
+  },
 };
 
 // factchat HWP agent: expose globals always so the iframe bridge
