@@ -1,0 +1,61 @@
+# rhwp/latest/ 를 옛 버전 디렉토리로 되돌린다.
+#
+# 각 배포가 rhwp/v<버전>-<빌드번호>/ 를 그대로 남겨두므로 재빌드 없이 거울만
+# 다시 맞추면 된다. 되돌릴 버전은 배포 잡 요약이나
+# `aws s3 ls s3://<bucket>/rhwp/` 로 확인한다.
+name: Rollback studio on S3
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '되돌릴 버전 디렉토리 (예: v0.8.2-10)'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-s3
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Mirror old version to latest
+    runs-on: ubuntu-latest
+    env:
+      BUCKET: ${{ vars.S3_BUCKET }}
+      PREFIX: rhwp
+      VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify version directory
+        run: |
+          aws s3api head-object --bucket "${BUCKET}" \
+            --key "${PREFIX}/${VERSION}/index.html" >/dev/null
+
+      - name: Mirror to latest
+        run: |
+          src="s3://${BUCKET}/${PREFIX}/${VERSION}"
+          dest="s3://${BUCKET}/${PREFIX}/latest"
+          aws s3 sync "${src}" "${dest}" --delete --exclude "index.html"
+          aws s3 cp "${src}/index.html" "${dest}/index.html"
+
+      - name: Invalidate CloudFront
+        env:
+          DIST_ID: ${{ vars.CF_DISTRIBUTION_ID }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${DIST_ID}" \
+            --paths "/${PREFIX}/latest/*"
+
+      - name: Summary
+        run: echo "### 롤백 완료 — \`${PREFIX}/${VERSION}/\`" >> "$GITHUB_STEP_SUMMARY"

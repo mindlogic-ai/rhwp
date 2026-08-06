@@ -1,22 +1,12 @@
-# rhwp-studio 를 S3 + CloudFront 정적 호스팅으로 배포한다.
+# rhwp-studio 를 s3://mindlogic-webhwp/rhwp/ 로 배포한다.
+# CDN: webhwp.mindlogic-api.com (CloudFront E3P04SMU1DWDVP).
 #
-# 사전 준비 — 비밀값이 아닌 식별자는 Variables 로 둔다 (레포 설정 → Variables):
-#   vars.AWS_REGION          예: ap-northeast-2
-#   vars.S3_BUCKET           배포 대상 버킷 이름 (퍼블릭 차단 + CloudFront OAC)
-#   vars.CF_DISTRIBUTION_ID  CloudFront 배포 ID
-#   vars.AWS_ACCESS_KEY_ID   배포 전용 IAM 사용자의 액세스 키 ID. 서명 요청
-#                            헤더와 CloudTrail 에 평문으로 남는 식별자라
-#                            비밀값이 아니다.
+# Variables: AWS_REGION, S3_BUCKET, CF_DISTRIBUTION_ID, AWS_ACCESS_KEY_ID
+# Secrets: AWS_SECRET_ACCESS_KEY
 #
-# Secrets:
-#   secrets.AWS_SECRET_ACCESS_KEY
-#     위 키 ID 의 시크릿. 실제 자격 증명은 이것뿐이다. 사용자 권한은 대상
-#     버킷의 객체 읽기/쓰기/삭제와 해당 배포의 CreateInvalidation 으로만 제한한다.
-#
-# CloudFront 쪽 설정:
-#   - Compress 켜기 (wasm/js/css 전송량 감소, 자동 압축은 10MB 미만 객체 대상)
-#   - Default root object: index.html
-#   - 403/404 → /index.html (200) 로 응답 매핑 (SPA fallback)
+# 배포 단위는 기존 수동 배포 규칙을 그대로 따른다 — rhwp/v<패키지버전>-<빌드번호>/.
+# 각 디렉토리는 자기완결적이고 한 번 쓰면 바뀌지 않는다. 그 위에 rhwp/latest/ 를
+# 두어 소비자가 배포마다 URL 을 바꾸지 않아도 되게 한다.
 name: Deploy studio to S3
 
 on:
@@ -25,17 +15,11 @@ on:
     paths-ignore:
       - 'mydocs/**'
       - 'docs/**'
-      - 'samples/**'
       - '*.md'
       - 'LICENSE'
       - '.github/ISSUE_TEMPLATE/**'
       - 'rhwp-logo.*'
   workflow_dispatch:
-    inputs:
-      base:
-        description: 'vite base path (서브경로 배포 시 예: /studio/)'
-        type: string
-        default: '/'
 
 permissions:
   contents: read
@@ -49,26 +33,41 @@ jobs:
     name: Build and deploy
     runs-on: ubuntu-latest
     env:
-      BASE_PATH: ${{ inputs.base || '/' }}
+      BUCKET: ${{ vars.S3_BUCKET }}
+      PREFIX: rhwp
 
     steps:
       - uses: actions/checkout@v7
 
-      # --- WASM 빌드 (deploy-pages.yml 과 동일 절차) ---
-      # 이 잡에서 가장 오래 걸리는 구간이다. 스튜디오 프론트만 고친 푸시에서는
-      # Rust 입력이 하나도 안 바뀌므로 산출물 pkg/ 를 그대로 재사용한다.
-      # cargo 캐시만으로는 부족하다 — checkout 이 mtime 을 새로 찍어 cargo
-      # fingerprint 가 깨지고, 소스가 같아도 상당수 크레이트를 다시 컴파일한다.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          ver=$(jq -r .version rhwp-studio/package.json)
+          last=$(aws s3 ls "s3://${BUCKET}/${PREFIX}/" \
+            | sed -n "s#.*PRE v${ver}-\([0-9]\{1,\}\)/#\1#p" | sort -n | tail -1)
+          version="v${ver}-$(( ${last:-0} + 1 ))"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "BASE_PATH=/${PREFIX}/${version}/" >> "$GITHUB_ENV"
+          echo "배포 대상: ${PREFIX}/${version}/"
+
+      # 잡에서 가장 오래 걸리는 구간이라 산출물째 캐시한다. cargo 캐시만으로는
+      # 부족하다 — checkout 이 mtime 을 새로 찍어 fingerprint 가 깨지고, 소스가
+      # 같아도 상당수 크레이트를 다시 컴파일한다.
       #
-      # restore-keys 를 두지 않는 것이 중요하다. 부분 일치로 옛 pkg/ 를 복원하면
-      # 소스와 다른 엔진이 배포된다. 키가 안 맞으면 그냥 새로 빌드해야 한다.
+      # restore-keys 는 일부러 없다. 부분 일치로 옛 pkg/ 를 복원하면 소스와 다른
+      # 엔진이 조용히 배포된다.
       - name: Cache built WASM
         id: wasm-artifact
         uses: actions/cache@v6
         with:
           path: pkg
-          # 해시 대상: Rust 소스와 의존성 고정 파일, wasm 바이너리에 include_bytes!
-          # 로 박히는 자산, 그리고 wasm-pack 버전을 고정한 액션 정의.
           key: wasm-pkg-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'saved/**', 'assets/logo/**', '.github/actions/install-wasm-pack/action.yml') }}
 
       - name: Install Rust toolchain
@@ -97,7 +96,6 @@ jobs:
         if: steps.wasm-artifact.outputs.cache-hit != 'true'
         run: wasm-pack build --target web --release
 
-      # --- rhwp-studio 빌드 ---
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
@@ -107,11 +105,6 @@ jobs:
         working-directory: rhwp-studio
         run: npm ci
 
-      - name: Copy WASM to public
-        run: |
-          cp pkg/rhwp_bg.wasm rhwp-studio/public/
-          cp pkg/rhwp.js rhwp-studio/public/
-
       - name: Copy favicon
         run: cp assets/logo/favicon.ico rhwp-studio/public/favicon.ico
 
@@ -119,63 +112,41 @@ jobs:
         working-directory: rhwp-studio
         run: npx vite build --base="${BASE_PATH}"
 
-      # --- 업로드 ---
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      # 순서가 중요하다. 해시 붙은 신규 에셋을 먼저 올리고, 그것을 참조하는
-      # index.html 은 마지막에 올린다. 반대로 하면 그 사이 요청이 없는 에셋을 찾는다.
-      - name: Sync immutable assets
-        env:
-          BUCKET: ${{ vars.S3_BUCKET }}
+      - name: Upload to version directory
         run: |
-          aws s3 sync rhwp-studio/dist "s3://${BUCKET}" \
-            --delete \
+          dest="s3://${BUCKET}/${PREFIX}/${VERSION}"
+          aws s3 sync rhwp-studio/dist "${dest}" \
             --exclude "*.html" \
-            --exclude "*.wasm" \
-            --exclude "rhwp.js" \
-            --exclude "agent-bridge.js" \
-            --exclude "theme-init.js" \
-            --exclude "factchat-sw-selfheal.js" \
             --cache-control "public,max-age=31536000,immutable"
-
-      # aws-cli 의 확장자 추론이 .wasm 을 application/octet-stream 으로 올릴 수 있다.
-      # 그 경우 instantiateStreaming 이 실패하므로 Content-Type 을 명시한다.
-      - name: Sync wasm
-        env:
-          BUCKET: ${{ vars.S3_BUCKET }}
-        run: |
-          aws s3 sync rhwp-studio/dist "s3://${BUCKET}" \
-            --exclude "*" --include "*.wasm" \
-            --content-type "application/wasm" \
-            --cache-control "public,max-age=31536000,immutable"
-
-      # 엔트리 파일은 파일명이 고정이라 캐시되면 엔진 업그레이드 후에도 옛 번들을
-      # 물고 있게 된다 (PWA CacheFirst 로 겪었던 stale WASM 과 같은 실패 모드).
-      - name: Sync entry files
-        env:
-          BUCKET: ${{ vars.S3_BUCKET }}
-        run: |
-          aws s3 sync rhwp-studio/dist "s3://${BUCKET}" \
-            --exclude "*" \
-            --include "*.html" \
-            --include "rhwp.js" \
-            --include "agent-bridge.js" \
-            --include "theme-init.js" \
-            --include "factchat-sw-selfheal.js" \
+          aws s3 sync rhwp-studio/dist "${dest}" \
+            --exclude "*" --include "*.html" \
             --cache-control "no-cache,must-revalidate"
 
-      # 해시 파일명 에셋은 무효화가 필요 없다. 고정 이름 엔트리만 찍어
-      # 월 1000 경로 무료 한도 안에서 처리한다.
+      # latest/ 는 방금 만든 버전 디렉토리의 거울이다. index.html 을 맨 마지막에
+      # 옮기는 이유는, 그 문서가 같은 디렉토리의 agent-bridge.js·fonts/ 를 상대
+      # 경로로 부르기 때문이다. 먼저 바뀌면 그 사이 방문자가 새 문서 + 옛 브리지를
+      # 받는다. 해시 자산은 index.html 이 버전 경로로 절대 참조하므로 무관하다.
+      - name: Mirror to latest
+        run: |
+          src="s3://${BUCKET}/${PREFIX}/${VERSION}"
+          dest="s3://${BUCKET}/${PREFIX}/latest"
+          aws s3 sync "${src}" "${dest}" --delete --exclude "index.html"
+          aws s3 cp "${src}/index.html" "${dest}/index.html"
+
       - name: Invalidate CloudFront
         env:
           DIST_ID: ${{ vars.CF_DISTRIBUTION_ID }}
         run: |
           aws cloudfront create-invalidation \
             --distribution-id "${DIST_ID}" \
-            --paths "/index.html" "/print.html" "/rhwp.js" \
-                    "/agent-bridge.js" "/theme-init.js" "/factchat-sw-selfheal.js"
+            --paths "/${PREFIX}/latest/*"
+
+      - name: Summary
+        run: |
+          {
+            echo "### 배포 완료"
+            echo
+            echo "- 버전: \`${PREFIX}/${VERSION}/\`"
+            echo "- https://webhwp.mindlogic-api.com/${PREFIX}/latest/"
+            echo "- 롤백: rollback-studio-s3.yml 을 \`version=${VERSION}\` 으로 실행"
+          } >> "$GITHUB_STEP_SUMMARY"
