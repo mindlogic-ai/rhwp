@@ -4,7 +4,13 @@ import type { DocumentDirtyState } from '@/core/document-dirty-state';
 import type { InputHandler } from '@/engine/input-handler';
 import type { ViewportManager } from '@/view/viewport-manager';
 
-export type EditorEditMode = 'normal' | 'form';
+/**
+ * 편집 모드.
+ * - `normal`: 기본 편집 모드
+ * - `form`: 양식 모드 — 편집 가능 누름틀 안에서만 편집 허용
+ * - `readonly`: 읽기 전용 — 모든 문서 변경 차단(보기·이동·복사·내보내기만 허용)
+ */
+export type EditorEditMode = 'normal' | 'form' | 'readonly';
 
 /** 커맨드 실행 가능 여부 판단용 에디터 상태 스냅샷 */
 export interface EditorContext {
@@ -34,6 +40,8 @@ export interface EditorContext {
   editMode: EditorEditMode;
   /** 양식 모드인가? */
   isFormMode: boolean;
+  /** 읽기 전용 모드인가? */
+  isReadonly: boolean;
   /** 현재 커서 위치가 양식 모드에서 수정 가능한 누름틀인가? */
   canEditFormField: boolean;
   /** Undo 가능한가? */

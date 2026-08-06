@@ -657,7 +657,7 @@ export class InputHandler {
     // Toolbar에서 서식 적용 요청 수신 (글꼴명, 크기, 색상 — 커맨드 시스템 미경유)
     eventBus.on('format-char', (props) => {
       if (!this.active) return;
-      if (this.editMode === 'form') return;
+      if (!this.canMutateDocument()) return;
       if (this.cursor.hasSelection()) {
         this.applyCharFormat(props as Partial<CharProperties>);
       }
@@ -2142,6 +2142,9 @@ export class InputHandler {
 
   /** Undo 처리 */
   private handleUndo(): void {
+    // 편집 중 읽기 전용으로 전환하면 히스토리가 남아 있다 — undo 는 그 자체가
+    // 문서를 되돌리는 뮤테이션이므로 읽기 전용에서 막는다.
+    if (this.editMode === 'readonly') return;
     this.flushDeferredPaginationIfNeeded('before-undo', false);
     const newPos = this.history.undo(this.wasm);
     if (newPos) {
@@ -2156,6 +2159,7 @@ export class InputHandler {
 
   /** Redo 처리 */
   private handleRedo(): void {
+    if (this.editMode === 'readonly') return;
     this.flushDeferredPaginationIfNeeded('before-redo', false);
     const newPos = this.history.redo(this.wasm);
     if (newPos) {
@@ -3286,7 +3290,7 @@ export class InputHandler {
   /** 현재 편집 모드를 설정한다 */
   setEditMode(mode: EditorEditMode): void {
     this.editMode = mode;
-    if (mode === 'form') {
+    if (mode !== 'normal') {
       if (this.cursor.isInPictureObjectSelection()) {
         this.cursor.moveOutOfSelectedPicture();
         this.pictureObjectRenderer?.clear();
@@ -3303,6 +3307,19 @@ export class InputHandler {
 
   /** 양식 모드인가? */
   isFormMode(): boolean { return this.editMode === 'form'; }
+
+  /** 읽기 전용 모드인가? */
+  isReadonly(): boolean { return this.editMode === 'readonly'; }
+
+  /**
+   * 위치와 무관하게 문서를 변경할 수 있는가?
+   *
+   * 양식 모드는 "편집 가능 누름틀 안이면 허용"이라 위치별 판정(`can*InFormMode`)이
+   * 따로 필요하지만, 위치를 보지 않고 뮤테이션 자체를 막아야 하는 경로(서식바 적용·
+   * 잘라내기·붙이기·지우기 등)는 이 술어 하나로 판정한다. 읽기 전용에서는 어떤
+   * 위치에서도 false다.
+   */
+  private canMutateDocument(): boolean { return this.editMode === 'normal'; }
 
   /** 현재 커서가 양식 모드에서 편집 가능한 누름틀 안인가? */
   canEditCurrentFormField(): boolean {
@@ -3340,12 +3357,19 @@ export class InputHandler {
     return pos.charOffset >= start && pos.charOffset <= end;
   }
 
+  // 아래 세 술어는 이름은 양식 모드에서 왔지만 실제로는 "지금 이 위치에서 편집이
+  // 허용되는가"를 판정한다. 텍스트 입력·삭제 경로(input-handler-text.ts)가 모두
+  // 이들을 경유하므로, 읽기 전용 차단도 여기에 함께 둔다 — 새 모드가 늘어날 때마다
+  // 호출부 7곳을 다시 훑지 않아도 되게 한다.
+
   canInsertTextInFormMode(pos: DocumentPosition): boolean {
+    if (this.editMode === 'readonly') return false;
     if (this.editMode !== 'form') return true;
     return this.isEditableFormFieldPosition(pos);
   }
 
   canDeleteTextInFormMode(pos: DocumentPosition, count: number): boolean {
+    if (this.editMode === 'readonly') return false;
     if (this.editMode !== 'form') return true;
     const fi = this.getFormFieldInfoAt(pos);
     if (!fi?.editableInForm) return false;
@@ -3355,6 +3379,7 @@ export class InputHandler {
   }
 
   canDeleteSelectionInFormMode(): boolean {
+    if (this.editMode === 'readonly') return false;
     if (this.editMode !== 'form') return true;
     const sel = this.cursor.getSelectionOrdered();
     if (!sel) return this.canEditCurrentFormField();
@@ -3465,6 +3490,11 @@ export class InputHandler {
   }
 
   private isOperationAllowedInEditMode(desc: OperationDescriptor): boolean {
+    // 읽기 전용은 종류를 가리지 않고 전부 막는다. 양식 모드의 kind:'record' 예외는
+    // "호출부 게이트가 이미 통과시켜 문서에 적용된 뮤테이션"을 히스토리에 남기기
+    // 위한 것인데, 읽기 전용에서는 그 호출부 게이트들이 먼저 false를 반환하므로
+    // 기록할 기적용 뮤테이션 자체가 없다.
+    if (this.editMode === 'readonly') return false;
     if (this.editMode !== 'form') return true;
     // [Task #2337-review] kind:'record' 는 이미 적용된 뮤테이션을 히스토리에 기록만 한다.
     // form mode 에서 이를 드롭하면 그 뮤테이션이 undo 불가한 미기록 편집으로 남아(더블클릭
@@ -3619,6 +3649,9 @@ export class InputHandler {
 
   /** 현재 커서 위치의 누름틀 필드와 내용을 제거한다. */
   removeCurrentField(posOverride?: DocumentPosition): void {
+    // 아래 양식 모드 분기는 executeOperation 을 우회해 wasm 을 직접 호출하므로
+    // 읽기 전용을 여기서 막지 않으면 중앙 게이트를 그냥 통과한다.
+    if (this.editMode === 'readonly') return;
     const pos = posOverride ?? this.cursor.getPosition();
     let restorePos: DocumentPosition | null = null;
     try {
@@ -4205,14 +4238,14 @@ export class InputHandler {
 
   /** 붙이기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
   performPaste(): boolean {
-    if (this.editMode === 'form') return false;
+    if (!this.canMutateDocument()) return false;
     this.focusTextarea();
     return document.execCommand('paste');
   }
 
   /** 잘라내기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
   performCut(): void {
-    if (this.editMode === 'form') return;
+    if (!this.canMutateDocument()) return;
     // 개체 선택 모드 → 복사 + 삭제
     if (this.cursor.isInPictureObjectSelection()) {
       const ref = this.cursor.getSelectedPictureRef();
@@ -4258,7 +4291,7 @@ export class InputHandler {
 
   /** 선택 영역 삭제 (커맨드 시스템용 — 편집 > 지우기) */
   performDelete(): void {
-    if (this.editMode === 'form') return;
+    if (!this.canMutateDocument()) return;
     if (this.cursor.isInPictureObjectSelection()) {
       const ref = this.cursor.getSelectedPictureRef();
       if (ref) {

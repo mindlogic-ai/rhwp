@@ -3128,7 +3128,42 @@
           truncated,
         };
       },
+      // 읽기 전용 토글. URL 의 ?readonly=1 과 같은 상태를 가리키며, 호스트가
+      // 문서를 연 뒤에도 켜고 끌 수 있게 한다.
+      async setReadonly(params) {
+        const api = window.rhwpStudio;
+        if (!api || typeof api.setReadonly !== 'function') {
+          return { ok: false, error: 'studio does not expose setReadonly' };
+        }
+        return api.setReadonly(params.on !== false);
+      },
+      async getEditMode() {
+        const api = window.rhwpStudio;
+        const mode = api && typeof api.getEditMode === 'function' ? api.getEditMode() : 'normal';
+        return { ok: true, edit_mode: mode, readonly: mode === 'readonly' };
+      },
     };
+
+    // 읽기 전용에서 통과시킬 RPC. 스튜디오 커맨드 게이트와 같은 이유로 허용리스트다 —
+    // 새 RPC 가 추가될 때 기본값이 "차단"이어야 문서 보호가 깨지지 않는다.
+    //
+    // exportDocument / saveSnapshot / notifySaved 는 문서를 바꾸지 않고 현재 상태를
+    // 밖으로 내보내거나 통지만 하므로 열어 둔다. restoreSnapshot·convertToEditable 은
+    // 문서를 바꾸므로 빠져 있다.
+    const READONLY_SAFE_METHODS = new Set([
+      'loadFile',
+      'outline', 'getUserFocus', 'getBlock', 'getSection', 'getFullText', 'getTable',
+      'getFieldList', 'getFieldValue', 'findText', 'getWarnings',
+      'getPageInfo', 'getPageDef', 'getPageOfPosition', 'getStyleList', 'getBookmarks',
+      'getHeaderFooterList', 'getHeaderFooter', 'viewPage', 'getStableIds',
+      'exportDocument', 'saveSnapshot', 'notifySaved', 'getDocStats',
+      'setReadonly', 'getEditMode',
+    ]);
+
+    function isReadonlyNow() {
+      const api = window.rhwpStudio;
+      return !!api && typeof api.getEditMode === 'function' && api.getEditMode() === 'readonly';
+    }
 
     // ── Router ──
     window.addEventListener('message', async (e) => {
@@ -3164,6 +3199,14 @@
       const handler = handlers[method];
       if (!handler) {
         sendToParent({ type: 'rpc_reply', id: msg.id, error: `unknown method: ${msg.method}` });
+        return;
+      }
+      if (isReadonlyNow() && !READONLY_SAFE_METHODS.has(method)) {
+        sendToParent({
+          type: 'rpc_reply',
+          id: msg.id,
+          error: `readonly mode: ${msg.method} is not allowed`,
+        });
         return;
       }
       try {

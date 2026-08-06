@@ -94,6 +94,12 @@ async function completeHostSave(fileName?: string): Promise<{ ok: true; wasDirty
 // 호스트를 위해 프로덕션 빌드에도 항상 노출한다 (iframe 호스트는 embed RPC 사용).
 (window as any).rhwpStudio = {
   notifySaved: (fileName?: string) => completeHostSave(fileName),
+  /** 읽기 전용 토글 — 브리지 RPC(setReadonly)의 실제 구현부. */
+  setReadonly: (on: boolean) => {
+    setEditMode(on ? 'readonly' : 'normal');
+    return { ok: true, editMode };
+  },
+  getEditMode: () => editMode,
 };
 
 // factchat HWP agent: expose globals always so the iframe bridge
@@ -114,7 +120,20 @@ let inputHandler: InputHandler | null = null;
 let toolbar: Toolbar | null = null;
 let ruler: Ruler | null = null;
 let rendererSession: RendererSession | null = null;
-let editMode: EditorEditMode = 'normal';
+/**
+ * `?readonly=1` 로 읽기 전용 진입.
+ *
+ * 호스트가 iframe src 를 만들 때 한 번에 지정할 수 있어야 첫 렌더부터 편집 UI가
+ * 비활성으로 뜬다 — 브리지 RPC(setEditMode)만 있으면 로드~RPC 도착 사이에 편집이
+ * 열려 있는 창이 생긴다.
+ */
+function resolveInitialEditMode(search: string): EditorEditMode {
+  const value = new URLSearchParams(search).get('readonly');
+  if (value === null) return 'normal';
+  return value === '0' || value === 'false' ? 'normal' : 'readonly';
+}
+
+let editMode: EditorEditMode = resolveInitialEditMode(window.location.search);
 let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
 let rendererInitializationError: string | null = null;
@@ -131,6 +150,7 @@ function getContext(): EditorContext {
   const hasDoc = wasm.pageCount > 0;
   const canEditFormField = inputHandler?.canEditCurrentFormField() ?? false;
   const isFormMode = editMode === 'form';
+  const isReadonly = editMode === 'readonly';
   return {
     hasDocument: hasDoc,
     hasSelection: inputHandler?.hasSelection() ?? false,
@@ -142,9 +162,10 @@ function getContext(): EditorContext {
     inTableObjectSelection: inputHandler?.isInTableObjectSelection() ?? false,
     inPictureObjectSelection: inputHandler?.isInPictureObjectSelection() ?? false,
     inField: inputHandler?.isInField() ?? false,
-    isEditable: !isFormMode || canEditFormField,
+    isEditable: editMode === 'normal' || (isFormMode && canEditFormField),
     editMode,
     isFormMode,
+    isReadonly,
     canEditFormField,
     canUndo: inputHandler?.canUndo() ?? false,
     canRedo: inputHandler?.canRedo() ?? false,
@@ -160,10 +181,13 @@ function setEditMode(mode: EditorEditMode): void {
   editMode = mode;
   inputHandler?.setEditMode(mode);
   document.documentElement.dataset.editMode = mode;
+  // 문서 로드 후 모드를 바꾸는 경로(브리지 RPC)에서도 서식 도구 모음 표시를 맞춘다.
+  if (wasm.pageCount > 0) toolbar?.setEnabled(mode !== 'readonly');
   document.querySelectorAll('[data-cmd="view:form-mode"]').forEach(el => {
     el.classList.toggle('active', mode === 'form');
   });
-  sbMessage().textContent = mode === 'form' ? '양식 모드' : '기본 편집 모드';
+  sbMessage().textContent =
+    mode === 'form' ? '양식 모드' : mode === 'readonly' ? '읽기 전용' : '기본 편집 모드';
   eventBus.emit('edit-mode-changed', mode);
   eventBus.emit('command-state-changed');
 }
@@ -403,7 +427,9 @@ async function initialize(): Promise<void> {
       canvasView.getVirtualScroll(),
       canvasView.getViewportManager(),
     );
-    inputHandler.setEditMode(editMode);
+    // inputHandler 뿐 아니라 상태바·data-edit-mode·커맨드 상태까지 한 번에 맞춘다
+    // (?readonly=1 로 시작한 경우 첫 렌더부터 UI가 읽기 전용으로 보여야 한다).
+    setEditMode(editMode);
 
     toolbar = new Toolbar(document.getElementById('style-bar')!, wasm, eventBus, dispatcher);
     toolbar.setEnabled(false);
@@ -882,7 +908,10 @@ async function initializeDocument(
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
     console.log('[initDoc] 5. toolbar setEnabled');
     await updateLoadProgress(90, '도구 모음 준비 중...');
-    toolbar?.setEnabled(true);
+    // 서식 도구 모음은 커맨드 시스템을 거치지 않고 eventBus('format-char')로 바로
+    // 적용하는 위젯을 갖고 있다. 적용 자체는 입력 핸들러가 막지만, 읽기 전용에서
+    // 조작 가능한 것처럼 보이지 않도록 표시도 비활성으로 둔다.
+    toolbar?.setEnabled(editMode !== 'readonly');
     console.log('[initDoc] 6. toolbar initFontDropdown + initStyleDropdown');
     toolbar?.initFontDropdown(docInfo.fontsUsed);
     toolbar?.initStyleDropdown();

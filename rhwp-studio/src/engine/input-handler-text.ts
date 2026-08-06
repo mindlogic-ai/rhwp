@@ -55,7 +55,7 @@ function tryConfirmRemoveClickHereAtBoundary(
   pos: DocumentPosition,
   direction: 'backward' | 'forward',
 ): boolean {
-  if (this.isFormMode?.()) return false;
+  if (this.isReadonly?.() || this.isFormMode?.()) return false;
   try {
     const fi = this.wasm.getFieldInfoAt(pos);
     if (!fi.inField || fi.fieldType !== 'clickhere') return false;
@@ -221,6 +221,9 @@ function tryDeleteBodyFootnoteAtCursor(
 }
 
 export function handleBackspace(this: any, pos: DocumentPosition, inCell: boolean): void {
+  // 아래 머리말/꼬리말·각주 분기는 executeOperation 중앙 게이트를 거치지 않고 wasm 을
+  // 직접 호출한다(적용 후 kind:'record' 로 기록만 함) — 읽기 전용은 여기서 막아야 한다.
+  if (this.isReadonly?.()) return;
   if (this.isFormMode?.() && !this.canEditCurrentFormField?.()) return;
   // 머리말/꼬리말 편집 모드
   if (this.cursor.isInHeaderFooter()) {
@@ -288,6 +291,8 @@ export function handleBackspace(this: any, pos: DocumentPosition, inCell: boolea
 }
 
 export function handleDelete(this: any, pos: DocumentPosition, inCell: boolean): void {
+  // handleBackspace 와 같은 이유로 읽기 전용을 진입부에서 막는다.
+  if (this.isReadonly?.()) return;
   if (this.isFormMode?.() && !this.canEditCurrentFormField?.()) return;
   // 머리말/꼬리말 편집 모드
   if (this.cursor.isInHeaderFooter()) {
@@ -363,6 +368,11 @@ export function handleDelete(this: any, pos: DocumentPosition, inCell: boolean):
 }
 
 export function onCompositionStart(this: any): void {
+  // IME 조합은 조합 중 문서를 직접 갱신하므로 진입 자체를 막는다.
+  if (this.isReadonly?.()) {
+    this.textarea.value = '';
+    return;
+  }
   this.resetRawTextMutationEffects();
   // 선택 영역이 있으면 삭제 후 조합 시작
   if (this.cursor.hasSelection()) {
@@ -475,6 +485,11 @@ export function getTextAt(this: any, pos: DocumentPosition, count: number): stri
 
 export function onInput(this: any, e?: InputEvent): void {
   if (!this.active) return;
+  // 머리말/꼬리말·각주 분기가 wasm 을 직접 호출하므로 진입부에서 막는다.
+  if (this.isReadonly?.()) {
+    this.textarea.value = '';
+    return;
+  }
 
   const text = this.textarea.value;
   // const inputType = e?.inputType ?? 'unknown';

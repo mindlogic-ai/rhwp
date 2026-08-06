@@ -1315,9 +1315,12 @@ export function onDblClick(this: any, e: MouseEvent): void {
             const sectionIdx = hfHit.sectionIndex ?? 0;
             const applyTo = hfHit.applyTo ?? 0;
             const isHeader = hfHit.isHeader ?? true;
-            // 머리말/꼬리말이 없으면 생성
+            // 머리말/꼬리말이 없으면 생성 — executeOperation 을 거치지 않는 직접
+            // 뮤테이션이라 읽기 전용에서는 진입 자체를 포기한다(빈 머리말을 만들면
+            // 문서가 바뀐다).
             const existing = JSON.parse(this.wasm.getHeaderFooter(sectionIdx, isHeader, applyTo));
             if (!existing.exists) {
+              if (this.isReadonly?.()) return;
               this.wasm.createHeaderFooter(sectionIdx, isHeader, applyTo);
             }
             this.cursor.enterHeaderFooterMode(isHeader, sectionIdx, applyTo, pageIdx);
@@ -1495,8 +1498,10 @@ export function onMouseMove(this: any, e: MouseEvent): void {
     return;
   }
 
-  // 직선 끝점 드래그 중
+  // 직선 끝점 드래그 중 — 드래그 중 미리보기가 moveLineEndpoint 로 문서를 직접
+  // 갱신한다(중앙 라우터 미경유). 읽기 전용에서는 드래그 자체를 진행하지 않는다.
   if (this.isLineEndpointDragging && this.lineEndpointState) {
+    if (this.isReadonly?.()) return;
     if (this.dragRafId) return;
     this.dragRafId = requestAnimationFrame(() => {
       this.dragRafId = 0;
