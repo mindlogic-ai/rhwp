@@ -648,6 +648,8 @@ export function startResizeDrag(this: any,
     this.cachedCellBboxes,
   );
 
+  // 읽기 전용: 개체 드래그는 진행 중 wasm 을 직접 갱신하므로 진입을 막는다.
+  if (this.isReadonly?.()) return;
   this.isResizeDragging = true;
   this.resizeDragState = {
     edge,
@@ -1258,6 +1260,9 @@ export function finishImagePlacement(this: any, e: MouseEvent): void {
 }
 
 export function moveSelectedTable(this: any, key: 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight'): void {
+  // 읽기 전용 최종 방어선 — wasm 을 직접 부르는 지점이다. 클래스 래퍼(input-handler.ts)
+  // 가드만으로는 모듈 내부 직접 호출을 못 막는다.
+  if (this.isReadonly?.()) return;
   const ref = this.cursor.getSelectedTableRef();
   if (!ref) return;
 
@@ -1330,6 +1335,7 @@ export function moveSelectedPicture(this: any, key: 'ArrowUp' | 'ArrowDown' | 'A
 }
 
 export function updateMoveDrag(this: any, e: MouseEvent): void {
+  if (this.isReadonly?.()) return;
   if (!this.moveDragState) return;
   const zoom = this.viewportManager.getZoom();
   const sc = this.container.querySelector('#scroll-content');

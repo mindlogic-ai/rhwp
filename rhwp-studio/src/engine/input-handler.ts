@@ -703,11 +703,13 @@ export class InputHandler {
 
   /** 리사이즈 드래그 중 마커 위치를 갱신한다 */
   private updateResizeDrag(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _table.updateResizeDrag.call(this, e);
   }
 
   /** 리사이즈 드래그를 완료하고 셀 크기를 적용한다 */
   private finishResizeDrag(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _table.finishResizeDrag.call(this, e);
   }
 
@@ -869,6 +871,7 @@ export class InputHandler {
 
   /** 그림 배치 완료: 마우스업 시 호출 */
   private finishImagePlacement(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _table.finishImagePlacement.call(this, e);
   }
 
@@ -1312,35 +1315,42 @@ export class InputHandler {
 
   /** 표 객체 선택 모드에서 방향키로 표 위치 이동 */
   private moveSelectedTable(key: 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight'): void {
+    if (this.editMode === 'readonly') return;
     _table.moveSelectedTable.call(this, key);
   }
 
   /** 그림 객체 선택 모드에서 방향키로 그림 위치 이동 */
   private moveSelectedPicture(key: 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight'): void {
+    if (this.editMode === 'readonly') return;
     _table.moveSelectedPicture.call(this, key);
   }
 
   /** 그림 객체 선택 모드에서 Shift+방향키로 개체 크기 조절 (#1231) */
   private resizeSelectedPicture(key: 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight'): void {
+    if (this.editMode === 'readonly') return;
     _picture.resizeSelectedPicture.call(this, key);
   }
 
   /** 마우스 드래그로 표 이동 — 드래그 중 갱신 */
   private updateMoveDrag(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _table.updateMoveDrag.call(this, e);
   }
 
   /** 마우스 드래그로 표 이동 — 드래그 종료 */
   private finishMoveDrag(): void {
+    if (this.editMode === 'readonly') return;
     _table.finishMoveDrag.call(this);
   }
 
   /** 셀 선택 모드에서 Ctrl+방향키로 셀 크기 조절 */
   private resizeCellByKeyboard(key: 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight'): void {
+    if (this.editMode === 'readonly') return;
     _table.resizeCellByKeyboard.call(this, key);
   }
 
   private resizeTableProportional(key: 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight'): void {
+    if (this.editMode === 'readonly') return;
     _table.resizeTableProportional.call(this, key);
   }
 
@@ -3023,16 +3033,19 @@ export class InputHandler {
 
   /** 개체 속성을 타입에 따라 변경한다 (그림/글상자 분기) */
   private setObjectProperties(ref: { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole' }, props: Record<string, unknown>): void {
+    if (this.editMode === 'readonly') return;
     _picture.setObjectProperties.call(this, ref, props);
   }
 
   /** 개체를 타입에 따라 삭제한다 (그림/글상자 분기) */
   private deleteObjectControl(ref: { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole' }): void {
+    if (this.editMode === 'readonly') return;
     _picture.deleteObjectControl.call(this, ref);
   }
 
   /** [Task #2230] 그림 미지정 placeholder 에 그림 지정 (파일 선택 → assignPictureImage) */
   private promptAssignPictureImage(ref: { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellPath?: any }): void {
+    if (this.editMode === 'readonly') return;
     _picture.promptAssignPictureImage.call(this, ref);
   }
 
@@ -3059,11 +3072,13 @@ export class InputHandler {
 
   /** 드래그 중 실시간 피드백: 핸들 위치를 새 bbox에 맞춰 재렌더 */
   private updatePictureResizeDrag(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _picture.updatePictureResizeDrag.call(this, e);
   }
 
   /** 드래그 완료: 새 크기를 WASM에 반영 */
   private finishPictureResizeDrag(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _picture.finishPictureResizeDrag.call(this, e);
   }
 
@@ -3080,21 +3095,25 @@ export class InputHandler {
 
   /** 마우스 드래그로 그림 이동 — 드래그 중 갱신 */
   private updatePictureMoveDrag(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _picture.updatePictureMoveDrag.call(this, e);
   }
 
   /** 마우스 드래그로 그림 이동 — 드래그 종료 */
   private finishPictureMoveDrag(): void {
+    if (this.editMode === 'readonly') return;
     _picture.finishPictureMoveDrag.call(this);
   }
 
   /** 마우스 드래그로 그림 회전 — 드래그 업데이트 */
   private updatePictureRotateDrag(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _picture.updatePictureRotateDrag.call(this, e);
   }
 
   /** 마우스 드래그로 그림 회전 — 드래그 종료 */
   private finishPictureRotateDrag(e: MouseEvent): void {
+    if (this.editMode === 'readonly') return;
     _picture.finishPictureRotateDrag.call(this, e);
   }
 
@@ -3302,6 +3321,12 @@ export class InputHandler {
         this.eventBus.emit('table-object-selection-changed', false);
       }
     }
+    // 읽기 전용: 개체 선택은 허용하되(무엇이 선택됐는지는 보여야 한다) 이동·크기·
+    // 회전 핸들은 숨긴다. 핸들이 보이면 끌 수 있다는 뜻인데 실제로는 드래그도
+    // 방향키도 막혀 있어, 조작해도 아무 일이 안 일어나는 불일치가 생긴다.
+    const hideHandles = mode === 'readonly';
+    this.tableObjectRenderer?.setHandlesHidden(hideHandles);
+    this.pictureObjectRenderer?.setHandlesHidden(hideHandles);
     this.eventBus.emit('command-state-changed');
   }
 
@@ -3530,10 +3555,18 @@ export class InputHandler {
   setCellSelectionRenderer(r: CellSelectionRenderer): void { this.cellSelectionRenderer = r; }
 
   /** 표 객체 선택 렌더러를 주입한다 (main.ts에서 호출) */
-  setTableObjectRenderer(r: TableObjectRenderer): void { this.tableObjectRenderer = r; }
+  setTableObjectRenderer(r: TableObjectRenderer): void {
+    this.tableObjectRenderer = r;
+    // 렌더러는 setEditMode 이후에 주입된다(main.ts) — 현재 모드를 즉시 반영하지
+    // 않으면 ?readonly=1 세션의 첫 선택에 핸들이 그대로 뜬다.
+    r.setHandlesHidden(this.editMode === 'readonly');
+  }
 
   /** 그림 객체 선택 렌더러를 주입한다 (main.ts에서 호출) */
-  setPictureObjectRenderer(r: TableObjectRenderer): void { this.pictureObjectRenderer = r; }
+  setPictureObjectRenderer(r: TableObjectRenderer): void {
+    this.pictureObjectRenderer = r;
+    r.setHandlesHidden(this.editMode === 'readonly');
+  }
 
   /** 그림 객체 선택 모드인가? */
   isInPictureObjectSelection(): boolean { return this.cursor.isInPictureObjectSelection(); }

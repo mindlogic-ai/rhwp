@@ -182,6 +182,114 @@ test('텍스트 입력·삭제 술어가 읽기 전용에서 항상 false 다', 
   }
 });
 
+test('읽기 전용은 개체를 바꾸는 모듈 함수를 전부 막는다', () => {
+  // 이게 진짜 최종 방어선이다. 클래스 래퍼(input-handler.ts)에만 가드를 두면
+  // 모듈 내부 직접 호출이 그냥 통과한다 — moveSelectedPicture 가
+  // this.setObjectProperties 가 아니라 import 한 setObjectProperties 를 부르는 식.
+  // wasm 을 실제로 만지는 함수 4개에 건다.
+  const table = read('src/engine/input-handler-table.ts');
+  const picture = read('src/engine/input-handler-picture.ts');
+
+  for (const [src, fn] of [
+    [table, 'moveSelectedTable'],
+    [table, 'updateMoveDrag'],
+    [picture, 'setObjectProperties'],
+    [picture, 'deleteObjectControl'],
+  ] as const) {
+    const start = src.indexOf(`export function ${fn}(`);
+    assert.notEqual(start, -1, `${fn} not found`);
+    assert.match(src.slice(start, start + 500), /if \(this\.isReadonly\?\.\(\)\) return;/,
+      `${fn} 가 읽기 전용에서 문서를 바꾼다`);
+  }
+
+  // setObjectProperties 가 개체 이동·크기·회전의 공통 통로인지도 함께 고정한다.
+  // 이 통로가 갈라지면 위 가드 하나로는 못 막는다.
+  const callers = picture.match(/setObjectProperties\.call\(/g) ?? [];
+  assert.ok(callers.length >= 5, `setObjectProperties 경유 호출이 ${callers.length}건뿐 — 우회로가 생겼는지 확인 필요`);
+});
+
+test('읽기 전용은 개체 선택을 허용하되 핸들만 숨긴다', () => {
+  // 선택 자체는 막지 않는다 — 무엇이 선택됐는지는 보여야 하고, 개체 복사도 된다.
+  // 다만 이동·크기·회전 핸들이 보이면 "끌 수 있다"는 뜻인데 드래그도 방향키도
+  // 막혀 있어 조작해도 아무 일이 안 일어난다. 그 불일치를 없앤다.
+  const renderer = read('src/engine/table-object-renderer.ts');
+  const handler = read('src/engine/input-handler.ts');
+  const cursor = read('src/engine/cursor.ts');
+
+  assert.match(renderer, /setHandlesHidden\(hidden: boolean\): void \{/);
+  // 핸들 생성 지점 두 블록(회전 도형 / 다중 페이지) 모두 막혀야 한다.
+  const breaks = renderer.match(/if \(this\.handlesHidden\) break;/g) ?? [];
+  assert.equal(breaks.length, 2, '핸들 생성 블록 중 막히지 않은 곳이 있다');
+  const rotateGuards = renderer.match(/this\.showRotateHandle && !this\.handlesHidden/g) ?? [];
+  assert.equal(rotateGuards.length, 2, '회전 핸들이 읽기 전용에서 남는다');
+
+  const setEditMode = handler.slice(handler.indexOf('  setEditMode(mode: EditorEditMode): void {'));
+  assert.match(setEditMode.slice(0, 1500), /setHandlesHidden\(hideHandles\)/);
+
+  // 렌더러는 setEditMode 뒤에 주입된다(main.ts) — 주입 시점에도 모드를 반영해야
+  // ?readonly=1 세션의 첫 선택에 핸들이 뜨지 않는다.
+  for (const setter of ['setTableObjectRenderer', 'setPictureObjectRenderer']) {
+    const start = handler.indexOf(`  ${setter}(`);
+    assert.notEqual(start, -1);
+    assert.match(handler.slice(start, start + 400), /setHandlesHidden\(this\.editMode === 'readonly'\)/,
+      `${setter} 가 현재 모드를 반영하지 않는다`);
+  }
+
+  // 선택 자체를 막던 게이트는 제거됐다.
+  assert.doesNotMatch(cursor, /objectSelectionAllowed/,
+    '개체 선택을 다시 막으면 읽기 전용에서 개체 복사가 불가능해진다');
+});
+
+test('개체 편집 래퍼가 읽기 전용에서 모두 막힌다', () => {
+  // 모듈 가드의 앞단 방어. 키보드 경로(방향키 이동/크기)가 여기를 지난다.
+  const handler = read('src/engine/input-handler.ts');
+  const wrappers = [
+    'updateMoveDrag', 'finishMoveDrag',
+    'updateResizeDrag', 'finishResizeDrag',
+    'moveSelectedTable', 'moveSelectedPicture', 'resizeSelectedPicture',
+    'resizeCellByKeyboard', 'resizeTableProportional',
+    'updatePictureMoveDrag', 'finishPictureMoveDrag',
+    'updatePictureResizeDrag', 'finishPictureResizeDrag',
+    'updatePictureRotateDrag', 'finishPictureRotateDrag',
+    'setObjectProperties', 'deleteObjectControl', 'promptAssignPictureImage',
+    'finishImagePlacement',
+  ];
+  for (const fn of wrappers) {
+    const start = handler.indexOf(`  private ${fn}(`);
+    assert.notEqual(start, -1, `${fn} 래퍼를 찾지 못했다`);
+    const head = handler.slice(start, start + 400);
+    assert.match(head, /editMode === 'readonly'\) return;/, `${fn} 가 읽기 전용에서 문서를 바꾼다`);
+  }
+});
+
+test('개체 드래그 진입도 읽기 전용에서 막힌다', () => {
+  const mouse = read('src/engine/input-handler-mouse.ts');
+  const table = read('src/engine/input-handler-table.ts');
+  const starts = [
+    'this.isMoveDragging = true;',
+    'this.isPictureMoveDragging = true;',
+    'this.isPictureResizeDragging = true;',
+    'this.isPictureRotateDragging = true;',
+    'this.isLineEndpointDragging = true;',
+  ];
+  for (const flag of starts) {
+    let from = 0;
+    let seen = 0;
+    for (;;) {
+      const at = mouse.indexOf(flag, from);
+      if (at === -1) break;
+      seen++;
+      assert.match(mouse.slice(Math.max(0, at - 200), at), /isReadonly\?\.\(\)/,
+        `${flag} (offset ${at}) 앞에 읽기 전용 가드가 없다`);
+      from = at + flag.length;
+    }
+    assert.ok(seen > 0, `${flag} 를 찾지 못했다`);
+  }
+  const resize = table.indexOf('this.isResizeDragging = true;');
+  assert.notEqual(resize, -1);
+  assert.match(table.slice(Math.max(0, resize - 200), resize), /isReadonly\?\.\(\)/);
+});
+
 test('브리지 RPC 는 허용리스트 밖의 메서드를 읽기 전용에서 거부한다', () => {
   const bridge = read('public/agent-bridge.js');
 

@@ -534,6 +534,9 @@ export function getObjectProperties(this: any, ref: PictureObjectRef): any {
 
 /** 개체 속성을 타입에 따라 변경한다. */
 export function setObjectProperties(this: any, ref: PictureObjectRef, props: Record<string, unknown>): void {
+  // 개체 이동·크기·회전이 전부 이 함수로 모인다(드래그·방향키·대화상자). 호출부가
+  // 모듈 내부에서 직접 부르는 경우가 많아 클래스 래퍼 가드로는 새므로 여기서 막는다.
+  if (this.isReadonly?.()) return;
   if (ref.type === 'shape' || ref.type === 'line' || ref.type === 'group' || ref.type === 'ole') {
     if (hasCellPath(ref)) {
       this.wasm.setCellShapePropertiesByPath(ref.sec, ref.ppi, ref.cellPath, ref.ci, props);
@@ -573,6 +576,7 @@ export function isObjectSizeProtected(this: any, ref: PictureObjectRef | null | 
 
 /** 개체를 타입에 따라 삭제한다. */
 export function deleteObjectControl(this: any, ref: PictureObjectRef): void {
+  if (this.isReadonly?.()) return;
   if (ref.type === 'shape' || ref.type === 'group' || ref.type === 'line' || ref.type === 'ole') {
     this.wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
   } else if (ref.type === 'equation') {

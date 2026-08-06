@@ -410,6 +410,8 @@ export function onClick(this: any, e: MouseEvent): void {
               py >= bbox.y && py <= bbox.y + bbox.height) {
             clickedInsideSelectedTable = true;
             e.preventDefault();
+            // 읽기 전용: 개체 드래그는 진행 중 wasm 을 직접 갱신하므로 진입을 막는다.
+            if (this.isReadonly?.()) return;
             this.isMoveDragging = true;
             this.moveDragState = {
               tableRef: { sec: ref.sec, ppi: ref.ppi, ci: ref.ci },
@@ -487,6 +489,8 @@ export function onClick(this: any, e: MouseEvent): void {
               }
               if (hasSizeProtected) return;
               if (multiResizeRefs.length > 0) {
+                // 읽기 전용: 개체 드래그는 진행 중 wasm 을 직접 갱신하므로 진입을 막는다.
+                if (this.isReadonly?.()) return;
                 this.isPictureResizeDragging = true;
                 this.pictureResizeState = {
                   dir,
@@ -517,6 +521,8 @@ export function onClick(this: any, e: MouseEvent): void {
             }
             if (multiMoveRefs.length > 0) {
               e.preventDefault();
+              // 읽기 전용: 개체 드래그는 진행 중 wasm 을 직접 갱신하므로 진입을 막는다.
+              if (this.isReadonly?.()) return;
               this.isPictureMoveDragging = true;
               this.pictureMoveState = {
                 ref: multiMoveRefs[0] as any,
@@ -564,6 +570,8 @@ export function onClick(this: any, e: MouseEvent): void {
                 const po = this.virtualScroll.getPageOffset(picBbox.pageIndex);
                 const pw = this.virtualScroll.getPageWidth(picBbox.pageIndex);
                 const pl = this.virtualScroll.getPageLeftResolved(picBbox.pageIndex, sc.clientWidth);
+                // 읽기 전용: 개체 드래그는 진행 중 wasm 을 직접 갱신하므로 진입을 막는다.
+                if (this.isReadonly?.()) return;
                 this.isLineEndpointDragging = true;
                 // [Task #2759] 드래그 시작 시 원래 끝점(글로벌 HWPUNIT)을 캡처해 종료 시
                 // Undo 기록의 before 로 쓴다. (x1,y1)=시작점, (x2,y2)=끝점 — 드래그 중
@@ -598,6 +606,8 @@ export function onClick(this: any, e: MouseEvent): void {
                 const origAngle = props.rotationAngle ?? 0;
                 // 마우스→중심 각도
                 const startAngle = Math.atan2(cy - objCy, cx - objCx);
+                // 읽기 전용: 개체 드래그는 진행 중 wasm 을 직접 갱신하므로 진입을 막는다.
+                if (this.isReadonly?.()) return;
                 this.isPictureRotateDragging = true;
                 this.pictureRotateState = {
                   ref: { sec: ref.sec, ppi: ref.ppi, ci: ref.ci, type: ref.type, cellPath: ref.cellPath, headerFooter: ref.headerFooter },
@@ -612,6 +622,8 @@ export function onClick(this: any, e: MouseEvent): void {
                 return;
               }
               // 리사이즈 드래그 시작
+              // 읽기 전용: 개체 드래그는 진행 중 wasm 을 직접 갱신하므로 진입을 막는다.
+              if (this.isReadonly?.()) return;
               this.isPictureResizeDragging = true;
               this.pictureResizeState = {
                 dir,
@@ -659,6 +671,8 @@ export function onClick(this: any, e: MouseEvent): void {
                 const props = this.getObjectProperties(ref);
                 if (!props.treatAsChar) {
                   e.preventDefault();
+                  // 읽기 전용: 개체 드래그는 진행 중 wasm 을 직접 갱신하므로 진입을 막는다.
+                  if (this.isReadonly?.()) return;
                   this.isPictureMoveDragging = true;
                   this.pictureMoveState = {
                     ref: { sec: ref.sec, ppi: ref.ppi, ci: ref.ci, type: ref.type, cellPath: ref.cellPath, headerFooter: ref.headerFooter },

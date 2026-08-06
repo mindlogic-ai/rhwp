@@ -76,6 +76,15 @@ export class TableObjectRenderer {
   private handles: HandleInfo[] = [];
   private extraEls: HTMLElement[] = [];  // 회전 연결선 등 부가 요소
   private previewEl: HTMLDivElement | null = null;
+  /**
+   * 핸들을 그리지 않는 모드(읽기 전용).
+   *
+   * 선택 자체는 허용해 무엇이 선택됐는지 보이게 하되, 이동·크기·회전 핸들은
+   * 숨긴다. 핸들이 보이면 끌 수 있다는 뜻인데 읽기 전용에서는 드래그가 막혀 있어
+   * 조작해도 아무 일이 안 일어난다 — 그 불일치를 없앤다. 외곽선은 남긴다.
+   */
+  private handlesHidden = false;
+
   private static readonly HANDLE_SIZE = 8; // px (화면 고정)
   private static readonly ROTATE_HANDLE_SIZE = 10; // px
   private static readonly ROTATE_HANDLE_GAP = 20; // px (상단 중앙에서 위로)
@@ -92,6 +101,11 @@ export class TableObjectRenderer {
     if (scrollContent) {
       scrollContent.appendChild(this.layer);
     }
+  }
+
+  /** 핸들 표시 여부를 지정한다. 끄면 외곽선만 남는다. */
+  setHandlesHidden(hidden: boolean): void {
+    this.handlesHidden = hidden;
   }
 
   /** 표 바운딩박스 기준으로 외곽선 + 핸들을 렌더링한다 */
@@ -152,6 +166,7 @@ export class TableObjectRenderer {
       { dir: 'w',  lx: -w / 2, ly: 0      },
     ];
     for (const pos of positions) {
+      if (this.handlesHidden) break;
       const [px, py] = rot(pos.lx, pos.ly);
       const el = createObjectHandle(px, py, hs, locked);
       this.layer.appendChild(el);
@@ -159,7 +174,7 @@ export class TableObjectRenderer {
     }
 
     // 회전 핸들 (도형 위쪽 방향으로 gap만큼 이동)
-    if (this.showRotateHandle) {
+    if (this.showRotateHandle && !this.handlesHidden) {
       const rhs = TableObjectRenderer.ROTATE_HANDLE_SIZE;
       const rhalf = rhs / 2;
       const gap = TableObjectRenderer.ROTATE_HANDLE_GAP;
@@ -250,13 +265,14 @@ export class TableObjectRenderer {
       ];
 
       for (const pos of positions) {
+        if (this.handlesHidden) break;
         const el = createObjectHandle(pos.cx, pos.cy, hs, locked);
         this.layer.appendChild(el);
         this.handles.push({ dir: pos.dir, el, cx: pos.cx, cy: pos.cy });
       }
 
       // 회전 핸들 (그림/글상자 전용)
-      if (this.showRotateHandle) {
+      if (this.showRotateHandle && !this.handlesHidden) {
         const rhs = TableObjectRenderer.ROTATE_HANDLE_SIZE;
         const rhalf = rhs / 2;
         const gap = TableObjectRenderer.ROTATE_HANDLE_GAP;
