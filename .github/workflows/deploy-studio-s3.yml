@@ -55,15 +55,34 @@ jobs:
       - uses: actions/checkout@v7
 
       # --- WASM 빌드 (deploy-pages.yml 과 동일 절차) ---
+      # 이 잡에서 가장 오래 걸리는 구간이다. 스튜디오 프론트만 고친 푸시에서는
+      # Rust 입력이 하나도 안 바뀌므로 산출물 pkg/ 를 그대로 재사용한다.
+      # cargo 캐시만으로는 부족하다 — checkout 이 mtime 을 새로 찍어 cargo
+      # fingerprint 가 깨지고, 소스가 같아도 상당수 크레이트를 다시 컴파일한다.
+      #
+      # restore-keys 를 두지 않는 것이 중요하다. 부분 일치로 옛 pkg/ 를 복원하면
+      # 소스와 다른 엔진이 배포된다. 키가 안 맞으면 그냥 새로 빌드해야 한다.
+      - name: Cache built WASM
+        id: wasm-artifact
+        uses: actions/cache@v6
+        with:
+          path: pkg
+          # 해시 대상: Rust 소스와 의존성 고정 파일, wasm 바이너리에 include_bytes!
+          # 로 박히는 자산, 그리고 wasm-pack 버전을 고정한 액션 정의.
+          key: wasm-pkg-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'saved/**', 'assets/logo/**', '.github/actions/install-wasm-pack/action.yml') }}
+
       - name: Install Rust toolchain
+        if: steps.wasm-artifact.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
+        if: steps.wasm-artifact.outputs.cache-hit != 'true'
         uses: ./.github/actions/install-wasm-pack
 
       - name: Cache cargo registry & build
+        if: steps.wasm-artifact.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -75,6 +94,7 @@ jobs:
             ${{ runner.os }}-wasm-
 
       - name: Build WASM
+        if: steps.wasm-artifact.outputs.cache-hit != 'true'
         run: wasm-pack build --target web --release
 
       # --- rhwp-studio 빌드 ---
