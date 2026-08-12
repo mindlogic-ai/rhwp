@@ -139,7 +139,7 @@ fn link_line_type_str(t: crate::model::shape::LinkLineType) -> &'static str {
 /// [Issue #1943] 종전 write_line 은 골격 속성(startX/Y/endX/Y attr + sz/pos/outMargin)
 /// 만 방출해 (A) connector 보유 시에도 무조건 hp:line 으로 변질하고, (B) 컴포넌트
 /// 블록(offset/orgSz/curSz/flip/rotationInfo/renderingInfo)·lineShape(색·굵기)·
-/// fillBrush/shadow·좌표(hp:startPt/endPt 자식) 전체를 소실시켰다. 파서는 좌표를
+/// fillBrush/shadow·좌표(hc:startPt/endPt 자식) 전체를 소실시켰다. 파서는 좌표를
 /// startPt/endPt **자식 요소**로만 읽으므로(startX/Y attr 무시) 종전 좌표는 dead
 /// 였다. write_rect 와 동형으로 전 구조를 방출한다.
 pub fn write_line<W: Write>(
@@ -193,8 +193,10 @@ pub fn write_line<W: Write>(
     write_fill_brush(w, &line.drawing.fill, ctx)?;
     write_shadow(w, &line.drawing)?;
 
-    // 좌표 — hp:startPt/hp:endPt 자식 (파서가 읽는 유일 경로). connectLine 은
-    // subjectIDRef/subjectIdx(연결 개체) 포함.
+    // 좌표 — hc:startPt/hc:endPt 자식 (connectLine 은 subjectIDRef/subjectIdx 포함).
+    // 접두사는 core(hc) 다. hp 로 쓰면 그 문서를 한글이 열지 못하고, 한컴 Docs
+    // Converter 는 필터 데몬이 멈춘 채 code 0220 을 낸다. 우리 파서는 로컬명만
+    // 보므로 자기 왕복은 어느 쪽이든 통과한다 — 그래서 드러나지 않았다.
     let (sub_start_ref, sub_start_idx, sub_end_ref, sub_end_idx) = line
         .connector
         .as_ref()
@@ -214,7 +216,7 @@ pub fn write_line<W: Write>(
         let (esr, esi) = (sub_end_ref.to_string(), sub_end_idx.to_string());
         empty_tag(
             w,
-            "hp:startPt",
+            "hc:startPt",
             &[
                 ("x", &sx),
                 ("y", &sy),
@@ -224,7 +226,7 @@ pub fn write_line<W: Write>(
         )?;
         empty_tag(
             w,
-            "hp:endPt",
+            "hc:endPt",
             &[
                 ("x", &ex),
                 ("y", &ey),
@@ -233,8 +235,8 @@ pub fn write_line<W: Write>(
             ],
         )?;
     } else {
-        empty_tag(w, "hp:startPt", &[("x", &sx), ("y", &sy)])?;
-        empty_tag(w, "hp:endPt", &[("x", &ex), ("y", &ey)])?;
+        empty_tag(w, "hc:startPt", &[("x", &sx), ("y", &sy)])?;
+        empty_tag(w, "hc:endPt", &[("x", &ex), ("y", &ey)])?;
     }
 
     // connectLine 제어점 (꺾인/곡선 커넥터의 경로).
@@ -1406,18 +1408,18 @@ mod tests {
 
     #[test]
     fn line_emits_start_end_attrs() {
-        // [Issue #1943] 좌표는 hp:startPt/hp:endPt 자식으로 방출한다 (파서가 읽는
+        // [Issue #1943] 좌표는 hc:startPt/hc:endPt 자식으로 방출한다 (파서가 읽는
         // 유일 경로). 종전 startX/Y attr 은 파서가 무시하는 dead 출력이었다.
         let mut line = LineShape::default();
         line.start = Point { x: 100, y: 200 };
         line.end = Point { x: 300, y: 400 };
         let xml = serialize_line(&line);
         assert!(
-            xml.contains(r#"<hp:startPt x="100" y="200""#),
+            xml.contains(r#"<hc:startPt x="100" y="200""#),
             "startPt 자식 방출: {xml}"
         );
         assert!(
-            xml.contains(r#"<hp:endPt x="300" y="400""#),
+            xml.contains(r#"<hc:endPt x="300" y="400""#),
             "endPt 자식 방출: {xml}"
         );
         // 컴포넌트 블록·lineShape 보존 (#1943 (B)).
