@@ -598,7 +598,8 @@
     // fidelity 라우팅)을 태운다.
     // 현재 index.html에는 이 항목이 없다 — 다운로드 UI를 부모 FE가 전부 소유하기로
     // 해서 걷어냈다. 아래 코드는 빈 목록에 대해 no-op이므로, 메뉴에 다시 넣으면
-    // 그대로 동작한다.
+    // 그대로 동작한다. 남아 있는 스튜디오 자체 저장 커맨드는 아래 클릭
+    // 핸들러가 data-cmd 로 가로챈다.
     const fcSaveItems = Array.from(
       document.querySelectorAll('.md-item[data-fc-save]'),
     );
@@ -619,15 +620,39 @@
         );
       }
     }
+    // 스튜디오 자체 저장 커맨드도 같은 곳으로 보낸다. 이 항목들은 index.html에
+    // `disabled` 로 적혀 있지만 menu-bar 가 드롭다운을 열 때마다
+    // `dispatcher.isEnabled()` 로 상태를 다시 칠하므로 실제로는 살아 있고,
+    // 눌리면 iframe 안에서 exportHwp/exportHwpx 바이트를 그대로 내려받는다.
+    // 그 바이트는 rhwp 밖에서 열리지 않는다 — 한컴은 rhwp 의 .hwp 를
+    // "손상된 파일" 이라 하고 한컴 컨버터조차 F040 으로 거부한다. 그래서
+    // 클릭을 가로채 부모 FE 의 서버 변환 파이프라인으로 넘긴다.
+    // 임베드가 아니면 넘길 부모가 없다 — 그때는 스튜디오 자체 저장이 유일한
+    // 저장 수단이므로 가로채지 않는다.
+    const fcEmbedded = window.parent !== window;
+    const FC_SAVE_CMD_FORMATS = {
+      'file:save': 'default',
+      'file:save-as': 'default',
+      'file:save-as-hwp': 'hwp',
+      'file:save-as-hwpx': 'hwpx',
+    };
     document.addEventListener('click', (e) => {
       const item = e.target && e.target.closest
-        ? e.target.closest('.md-item[data-fc-save]')
+        ? e.target.closest('.md-item[data-fc-save], .md-item[data-cmd]')
         : null;
       if (!item) return;
+      const format = item.hasAttribute('data-fc-save')
+        ? item.getAttribute('data-fc-save')
+        : fcEmbedded
+          ? FC_SAVE_CMD_FORMATS[item.getAttribute('data-cmd')]
+          : null;
+      if (!format) return;
       e.preventDefault();
       e.stopPropagation();
+      // 디스패처는 container 의 버블 리스너라 stopPropagation 으로 막히지만,
+      // 같은 캡처 단계에 다른 리스너가 붙으면 그쪽은 계속 받는다.
+      e.stopImmediatePropagation();
       if (item.classList.contains('disabled')) return;
-      const format = item.getAttribute('data-fc-save');
       sendToParent({ type: 'save_requested', format });
       closeOpenMenu();
     }, true);
