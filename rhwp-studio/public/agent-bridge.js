@@ -8,6 +8,8 @@
 //   { type: 'rpc_request', id, method, params } — dispatch to handler
 //   { type: 'editor_lock' }   — show overlay, disable user input
 //   { type: 'editor_unlock' } — hide overlay
+//   { type: 'host_ready' }    — host listener is up; replay the boot
+//                               announce if it already went out
 // Sends:
 //   { type: 'rpc_reply', id, result | error }
 //   { type: 'user_edit', kind, summary } — fired on document-changed when
@@ -16,6 +18,34 @@
 
 (function () {
   'use strict';
+
+  // ── Host handshake ──
+  // The boot announce (studio_ready / studio_init_failed) goes out exactly
+  // once, and on the factchat host it can leave before the host's message
+  // listener exists: the iframe is in the server-rendered HTML and boots from
+  // first paint, while the host attaches its listener only after hydration.
+  // A frame posted into that gap is dropped by the browser and nothing
+  // re-announces it, so the host sat on its skeleton forever.
+  //
+  // The host now posts `host_ready` right after attaching. If we already
+  // announced, replay it (tagged so the host can tell it from a genuine
+  // reboot); if we have not booted yet, ignore it — the normal announce
+  // will reach the now-listening host. Either way the host sees exactly one
+  // announce. This listener is registered at script load, before any boot
+  // work, so `host_ready` can never itself fall into a gap.
+  let announced = null;
+  function postToHost(msg) {
+    try { window.parent && window.parent.postMessage(msg, '*'); } catch (e) {}
+  }
+  function announce(type) {
+    announced = type;
+    postToHost({ type });
+  }
+  window.addEventListener('message', (e) => {
+    const msg = e.data;
+    if (!msg || typeof msg !== 'object' || msg.type !== 'host_ready') return;
+    if (announced) postToHost({ type: announced, replay: true });
+  });
 
   // Wait for main.ts's initialize() to FULLY complete before announcing
   // studio_ready. Polling wasm.initialized alone fired mid-boot — after
@@ -35,7 +65,7 @@
           // uninitialized glue (`__wbindgen_malloc` undefined). Tell the
           // parent explicitly instead of leaving it to a timeout.
           console.error('[agent-bridge] init finished but engine unusable — studio_ready withheld');
-          try { window.parent && window.parent.postMessage({ type: 'studio_init_failed' }, '*'); } catch (e) {}
+          announce('studio_init_failed');
           return;
         }
         // initialize()가 마지막으로 남기는 유휴 상태("HWP 파일을
@@ -3320,7 +3350,7 @@
       }
     });
 
-    sendToParent({ type: 'studio_ready' });
+    announce('studio_ready');
     console.log('[agent-bridge] ready');
   });
 })();

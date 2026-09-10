@@ -693,6 +693,6 @@
        is already exposed by the time agent-bridge.js initializes. Vite
        inlines this path relative to base= so it resolves to
        /rhwp/<version>/agent-bridge.js in production. -->
-  <script src="./agent-bridge.js" defer></script>
+  <script src="./agent-bridge.js?v=%VITE_STUDIO_VERSION%" defer></script>
 </body>
 </html>
