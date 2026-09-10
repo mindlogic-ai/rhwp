@@ -11,6 +11,13 @@ const subsecondWasmDir = resolve(
 );
 const useSubsecondWasm = process.env.RHWP_SUBSECOND === '1';
 
+// Cache-buster for the non-hashed `./agent-bridge.js` that index.html loads
+// relative to its own directory (so under rhwp/latest/ the URL never changed
+// across deploys while the object was served immutable). The deploy workflow
+// sets this to the rhwp/v<version>-<build> it is publishing; local builds
+// fall back to the package version so the placeholder never ships verbatim.
+process.env.VITE_STUDIO_VERSION ||= `${pkg.version}-local`;
+
 export default defineConfig({
   // factchat HWP agent: STUDIO_BASE makes the asset paths match the production
   // factchat CDN path (/rhwp/<version>/) so the bundled HTML resolves its own

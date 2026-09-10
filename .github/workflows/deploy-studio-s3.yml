@@ -110,14 +110,26 @@ jobs:
 
       - name: Build rhwp-studio
         working-directory: rhwp-studio
+        env:
+          # index.html 의 ./agent-bridge.js 참조에 붙는 캐시 버스터. 배포마다
+          # 값이 바뀌어야 latest/ 아래에서 URL 이 달라진다.
+          VITE_STUDIO_VERSION: ${{ env.VERSION }}
         run: npx vite build --base="${BASE_PATH}"
 
+      # agent-bridge.js 는 해시가 없는 파일인데 index.html 이 상대 경로로 부른다.
+      # latest/ 아래에서는 배포가 바뀌어도 URL 이 같으니 immutable 로 내보내면
+      # 브라우저가 1년짜리 캐시를 그대로 쓴다 — 2026-09-10 까지 실제로 그랬다.
+      # 그래서 이 파일만 짧은 캐시로 올리고, index.html 쪽 ?v= 버스터가 배포마다
+      # URL 을 바꾼다. 나머지 해시 자산은 그대로 immutable.
       - name: Upload to version directory
         run: |
           dest="s3://${BUCKET}/${PREFIX}/${VERSION}"
           aws s3 sync rhwp-studio/dist "${dest}" \
-            --exclude "*.html" \
+            --exclude "*.html" --exclude "agent-bridge.js" \
             --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp rhwp-studio/dist/agent-bridge.js "${dest}/agent-bridge.js" \
+            --content-type "text/javascript" \
+            --cache-control "public,max-age=300,must-revalidate"
           aws s3 sync rhwp-studio/dist "${dest}" \
             --exclude "*" --include "*.html" \
             --cache-control "no-cache,must-revalidate"
