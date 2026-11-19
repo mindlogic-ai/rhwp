@@ -2979,14 +2979,57 @@ impl DocumentCore {
                 .to_string()
         }
 
-        fn table_cell_text(cell: &crate::model::table::Cell) -> String {
-            let mut parts: Vec<String> = Vec::new();
-            for para in &cell.paragraphs {
+        // 셀 문단의 텍스트와, 그 문단에 들어 있는 표·글상자의 텍스트까지 모은다.
+        // 마크다운 셀에는 표를 넣을 수 없으므로 중첩 표는 행마다 " / " 로 이은 한 줄이 된다.
+        // 예전에는 para.text 만 읽어서, 표 안에 표로 짠 동의서·시험 자료가 통째로 빠졌다.
+        fn collect_cell_parts(paragraphs: &[Paragraph], parts: &mut Vec<String>, depth: usize) {
+            for para in paragraphs {
                 let txt = para.text.trim();
                 if !txt.is_empty() {
                     parts.push(markdown_escape_cell(txt));
                 }
+                if depth >= 8 {
+                    continue;
+                }
+                for ctrl in &para.controls {
+                    match ctrl {
+                        crate::model::control::Control::Table(t) => {
+                            let mut cells: Vec<&crate::model::table::Cell> = t.cells.iter().collect();
+                            cells.sort_by_key(|c| (c.row, c.col));
+                            let mut row_no: Option<u16> = None;
+                            let mut row: Vec<String> = Vec::new();
+                            for c in cells {
+                                if row_no.is_some() && row_no != Some(c.row) {
+                                    if !row.is_empty() {
+                                        parts.push(row.join(" / "));
+                                    }
+                                    row.clear();
+                                }
+                                row_no = Some(c.row);
+                                let mut inner: Vec<String> = Vec::new();
+                                collect_cell_parts(&c.paragraphs, &mut inner, depth + 1);
+                                if !inner.is_empty() {
+                                    row.push(inner.join(" "));
+                                }
+                            }
+                            if !row.is_empty() {
+                                parts.push(row.join(" / "));
+                            }
+                        }
+                        crate::model::control::Control::Shape(shape) => {
+                            if let Some(tb) = shape.drawing().and_then(|d| d.text_box.as_ref()) {
+                                collect_cell_parts(&tb.paragraphs, parts, depth + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
+        }
+
+        fn table_cell_text(cell: &crate::model::table::Cell) -> String {
+            let mut parts: Vec<String> = Vec::new();
+            collect_cell_parts(&cell.paragraphs, &mut parts, 0);
             parts.join(" <br> ")
         }
 
